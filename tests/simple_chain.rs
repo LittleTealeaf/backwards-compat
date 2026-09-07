@@ -38,26 +38,15 @@ impl From<UserV2> for UserV3 {
     }
 }
 
-backwards_compat! {
-    #[tag = "schema_version"]
-    pub enum UserVersion {
-        v1 = UserV1,
-        v2 = UserV2,
-        v3 = UserV3,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(from = "UserVersion", into = "UserVersion")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct User {
     pub name: String,
     pub email: String,
     pub is_admin: bool,
 }
 
-impl From<UserVersion> for User {
-    fn from(v: UserVersion) -> Self {
-        let v3: UserV3 = v.into();
+impl From<UserV3> for User {
+    fn from(v3: UserV3) -> Self {
         Self {
             name: v3.name,
             email: v3.email,
@@ -66,13 +55,22 @@ impl From<UserVersion> for User {
     }
 }
 
-impl From<User> for UserVersion {
+impl From<User> for UserV3 {
     fn from(u: User) -> Self {
-        Self::v3(UserV3 {
+        Self {
             name: u.name,
             email: u.email,
             is_admin: u.is_admin,
-        })
+        }
+    }
+}
+
+backwards_compat! {
+    #[tag = "schema_version", version = 3]
+    compat User {
+        1: UserV1,
+        2: UserV2,
+        3: UserV3,
     }
 }
 
@@ -106,7 +104,8 @@ fn test_json_upgrade_from_v2() {
 
 #[test]
 fn test_json_upgrade_from_v3() {
-    let raw = r#"{"schema_version": "3", "name": "Charlie", "email": "charlie@example.com", "is_admin": true}"#;
+    let raw =
+        r#"{"schema_version": "3", "name": "Charlie", "email": "charlie@example.com", "is_admin": true}"#;
     let user: User = serde_json::from_str(raw).unwrap();
     assert_eq!(
         user,

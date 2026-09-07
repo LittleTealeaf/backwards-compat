@@ -5,18 +5,10 @@
 //! ## Overview
 //!
 //! In applications with evolving data formats, schemas change across versions.
-//! `backwards-compat` streamlines the creation of versioning enums and migration pipelines.
+//! `backwards-compat` streamlines schema evolution by automatically implementing
+//! `serde::Serialize` and `serde::Deserialize` directly for your target model.
 //!
-//! You declare the sequence of versions using `v1 = <Type>, v2 = <Type>, ...` in a `{}` block.
-//! The macro verifies at compile time that each version implements `Into` (or `TryInto`) for
-//! the next version in sequence, and generates:
-//! - The version enum with Serde serialization & deserialization support
-//! - Tagged version matching (`#[serde(tag = "version")]`)
-//! - Optional fallback to untagged deserialization for legacy unversioned data
-//! - Sequential upgrade chains: older versions automatically convert forward to the latest or target type
-//! - `From` and `TryFrom` conversions for seamless use with `#[serde(from = "...")]` or `#[serde(try_from = "...")]`
-//!
-//! ## Example: Basic Tagged Versioning
+//! You declare previous schema versions and their transitions using the `compat TargetModel` syntax:
 //!
 //! ```rust
 //! use backwards_compat::backwards_compat;
@@ -42,59 +34,73 @@
 //!     }
 //! }
 //!
-//! backwards_compat! {
-//!     pub enum ConfigVersion {
-//!         v1 = ConfigV1,
-//!         v2 = ConfigV2,
+//! // The target domain model Config does NOT need #[derive(Serialize, Deserialize)].
+//! // backwards_compat! generates Serialize and Deserialize implementations automatically.
+//! #[derive(Debug, Clone, PartialEq)]
+//! pub struct Config {
+//!     pub name: String,
+//!     pub port: u16,
+//! }
+//!
+//! impl From<ConfigV2> for Config {
+//!     fn from(v2: ConfigV2) -> Self {
+//!         Self {
+//!             name: v2.name,
+//!             port: v2.port,
+//!         }
 //!     }
 //! }
 //!
-//! // Deserializing {"version": "1", "name": "app"} yields ConfigV2 via ConfigVersion:
+//! impl From<Config> for ConfigV2 {
+//!     fn from(c: Config) -> Self {
+//!         Self {
+//!             name: c.name,
+//!             port: c.port,
+//!         }
+//!     }
+//! }
+//!
+//! backwards_compat! {
+//!     #[tag = "version", version = 2]
+//!     compat Config {
+//!         1: ConfigV1,
+//!         2: ConfigV2,
+//!     }
+//! }
+//!
+//! // Deserializing {"version": "1", "name": "my-app"} yields Config:
 //! let json_v1 = r#"{"version": "1", "name": "my-app"}"#;
-//! let versioned: ConfigVersion = serde_json::from_str(json_v1).unwrap();
-//! let config: ConfigV2 = versioned.upgrade();
+//! let config: Config = serde_json::from_str(json_v1).unwrap();
 //! assert_eq!(config.port, 8080);
+//!
+//! // Serializing Config automatically tags it with the current version:
+//! let serialized = serde_json::to_string(&config).unwrap();
+//! assert!(serialized.contains(r#""version":"2""#));
 //! ```
 //!
-//! ## Example: Untagged Fallback (Hybrid)
+//! ## DAG Transitions
 //!
-//! For schemas where legacy data did not include a `"version"` tag:
+//! By default, versions upgrade sequentially (`1 -> 2 -> ... -> N`).
+//! You can also define custom upgrade graphs with `=> <next_version>`:
 //!
 //! ```rust
-//! use backwards_compat::backwards_compat;
-//! use serde::{Deserialize, Serialize};
-//!
-//! #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-//! pub struct V1 {
-//!     pub host: String,
-//! }
-//!
-//! #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-//! pub struct V2 {
-//!     pub host: String,
-//!     pub timeout_sec: u32,
-//! }
-//!
-//! impl From<V1> for V2 {
-//!     fn from(v1: V1) -> Self {
-//!         Self { host: v1.host, timeout_sec: 30 }
-//!     }
-//! }
-//!
+//! # use backwards_compat::backwards_compat;
+//! # use serde::{Deserialize, Serialize};
+//! # #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+//! # pub struct V1 { pub val: i32 }
+//! # #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+//! # pub struct V2 { pub val: i32 }
+//! # #[derive(Debug, Clone, PartialEq)]
+//! # pub struct V3 { pub val: i32 }
+//! # impl From<V1> for V3 { fn from(v: V1) -> Self { Self { val: v.val } } }
+//! # impl From<V2> for V3 { fn from(v: V2) -> Self { Self { val: v.val } } }
 //! backwards_compat! {
-//!     #[tag = "version"]
-//!     pub enum AppConfig {
-//!         #[untagged]
-//!         v1 = V1,
-//!         v2 = V2,
+//!     #[tag = "version", version = 3]
+//!     compat V3 {
+//!         1: V1 => 3,
+//!         2: V2 => 3,
 //!     }
 //! }
-//!
-//! // Untagged legacy json parses as V1 and upgrades to V2:
-//! let legacy_json = r#"{"host": "localhost"}"#;
-//! let config: AppConfig = serde_json::from_str(legacy_json).unwrap();
-//! let current: V2 = config.upgrade();
-//! assert_eq!(current.timeout_sec, 30);
 //! ```
 
 pub use backwards_compat_derive::backwards_compat;

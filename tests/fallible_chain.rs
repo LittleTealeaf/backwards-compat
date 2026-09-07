@@ -32,8 +32,7 @@ impl TryFrom<ServerConfigV1> for ServerConfigV2 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "ServerVersion", into = "ServerVersion")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ServerConfig {
     pub port: u16,
 }
@@ -56,13 +55,10 @@ impl From<ServerConfig> for ServerConfigV2 {
 }
 
 backwards_compat! {
-    #[tag = "version"]
-    #[target(ServerConfig, error = MigrationError)]
-    pub enum ServerVersion {
-        #[fallible]
-        v1 = ServerConfigV1,
-        #[fallible]
-        v2 = ServerConfigV2,
+    #[tag = "version", version = 2, error = MigrationError]
+    compat ServerConfig {
+        #[fallible] 1: ServerConfigV1,
+        #[fallible] 2: ServerConfigV2,
     }
 }
 

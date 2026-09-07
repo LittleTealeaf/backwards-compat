@@ -92,8 +92,7 @@ impl From<SchemaV4> for SchemaV5 {
 }
 
 // Domain Model Target Struct
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "SerializedSchema", into = "SerdeSchema")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FinalModel {
     pub player_count: usize,
     pub score: u32,
@@ -132,33 +131,26 @@ impl From<FinalModel> for SchemaV5 {
 }
 
 backwards_compat! {
-    #[tag = "version"]
-    #[target(FinalModel, error = SchemaError)]
-    #[tagged = SerdeSchema]
-    #[untagged = SerializedSchema]
-    pub enum SerializedSchema {
-        #[untagged_only]
-        v1 = SchemaV1,
-        #[untagged_only]
-        v2 = SchemaV2,
-        #[untagged]
-        v3 = SchemaV3,
-        v4 = SchemaV4,
-        #[fallible]
-        v5 = SchemaV5,
+    #[tag = "version", version = 5, error = SchemaError]
+    compat FinalModel {
+        1: SchemaV1,
+        2: SchemaV2,
+        3: SchemaV3,
+        4: SchemaV4,
+        #[fallible] 5: SchemaV5,
     }
 }
 
 #[test]
-fn test_v1_untagged_upgrade() {
+fn test_v1_tagged_upgrade() {
     let ron_v1 = r#"
         (
+            version: "1",
             players: ["Alice", "Bob", "Charlie", "Dave"],
             score: 42.4,
         )
     "#;
-    let serialized: SerializedSchema = ron::from_str(ron_v1).unwrap();
-    let model: FinalModel = serialized.upgrade().unwrap();
+    let model: FinalModel = ron::from_str(ron_v1).unwrap();
     assert_eq!(model.player_count, 4);
     assert_eq!(model.score, 42);
     assert!(model.active);
@@ -167,48 +159,42 @@ fn test_v1_untagged_upgrade() {
 }
 
 #[test]
-fn test_v2_untagged_upgrade() {
-    let json_v2 = r#"{"player_count": 8, "score": 100}"#;
-    let serialized: SerializedSchema = serde_json::from_str(json_v2).unwrap();
-    let model: FinalModel = serialized.upgrade().unwrap();
+fn test_v2_tagged_upgrade() {
+    let json_v2 = r#"{"version": "2", "player_count": 8, "score": 100}"#;
+    let model: FinalModel = serde_json::from_str(json_v2).unwrap();
     assert_eq!(model.player_count, 8);
     assert_eq!(model.score, 100);
     assert!(model.active);
     assert_eq!(model.tag, "migrated");
-}
-
-#[test]
-fn test_v3_untagged_upgrade() {
-    let ron_v3_untagged = r#"(player_count: 6, score: 88, active: false)"#;
-    let serialized: SerializedSchema = ron::from_str(ron_v3_untagged).unwrap();
-    let model: FinalModel = serialized.upgrade().unwrap();
-    assert_eq!(model.player_count, 6);
-    assert_eq!(model.score, 88);
-    assert!(!model.active);
+    assert_eq!(model.revision, 1);
 }
 
 #[test]
 fn test_v3_tagged_upgrade() {
     let json_v3_tagged = r#"{"version": "3", "player_count": 5, "score": 75, "active": true}"#;
-    let serialized: SerializedSchema = serde_json::from_str(json_v3_tagged).unwrap();
-    let model: FinalModel = serialized.upgrade().unwrap();
+    let model: FinalModel = serde_json::from_str(json_v3_tagged).unwrap();
     assert_eq!(model.player_count, 5);
     assert_eq!(model.score, 75);
+    assert!(model.active);
+    assert_eq!(model.tag, "migrated");
+    assert_eq!(model.revision, 1);
 }
 
 #[test]
 fn test_v4_tagged_upgrade() {
-    let json_v4 =
-        r#"{"version": "4", "player_count": 4, "score": 50, "active": true, "tag": "custom"}"#;
-    let serialized: SerializedSchema = serde_json::from_str(json_v4).unwrap();
-    let model: FinalModel = serialized.upgrade().unwrap();
+    let json_v4 = r#"{"version": "4", "player_count": 4, "score": 50, "active": true, "tag": "custom"}"#;
+    let model: FinalModel = serde_json::from_str(json_v4).unwrap();
     assert_eq!(model.player_count, 4);
+    assert_eq!(model.score, 50);
+    assert!(model.active);
     assert_eq!(model.tag, "custom");
+    assert_eq!(model.revision, 1);
 }
 
 #[test]
 fn test_v5_tagged_upgrade() {
-    let json_v5 = r#"{"version": "5", "player_count": 10, "score": 200, "active": false, "tag": "v5", "revision": 3}"#;
+    let json_v5 =
+        r#"{"version": "5", "player_count": 10, "score": 200, "active": false, "tag": "v5", "revision": 3}"#;
     let model: FinalModel = serde_json::from_str(json_v5).unwrap();
     assert_eq!(model.player_count, 10);
     assert_eq!(model.revision, 3);

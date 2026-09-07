@@ -1,0 +1,5 @@
+newline_style = "Unix"
+use_try_shorthand = true
+edition = "2024"
+style_edition = "2024"
+max_width = 110

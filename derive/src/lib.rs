@@ -2,6 +2,7 @@ use proc_macro::TokenStream;
 use syn::parse_macro_input;
 
 mod codegen;
+mod dag;
 mod parse;
 
 use parse::BackwardsCompatInput;
