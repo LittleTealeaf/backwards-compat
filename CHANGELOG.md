@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0](https://github.com/LittleTealeaf/backwards-compat/compare/backwards-compat-v0.1.0...backwards-compat-v0.2.0) (2026-09-07)
+## [0.2.0](https://github.com/LittleTealeaf/backwards-compat/releases/tag/v0.2.0) (2026-09-07)
 
 
 ### Features

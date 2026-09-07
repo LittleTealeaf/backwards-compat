@@ -12,7 +12,7 @@ members = [
 ]
 
 [dependencies]
-backwards-compat-derive = { path = "derive", version = "0.2.0" }
+backwards-compat-derive = { path = "derive", version = "0.2.0" } # x-release-please-version
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
