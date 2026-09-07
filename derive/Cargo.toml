@@ -1,6 +1,6 @@
 [package]
 name = "backwards-compat-derive"
-version = "0.2.0" # x-release-please-version
+version = "0.3.0" # x-release-please-version
 edition = "2024"
 description = "Procedural macro for backwards-compat"
 license = "MIT OR Apache-2.0"
