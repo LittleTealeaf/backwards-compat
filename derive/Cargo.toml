@@ -4,6 +4,8 @@ version = "0.2.0" # x-release-please-version
 edition = "2024"
 description = "Procedural macro for backwards-compat"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/LittleTealeaf/backwards-compat"
+documentation = "https://littletealeaf.github.io/backwards-compat/"
 
 [lib]
 proc-macro = true
