@@ -13,47 +13,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  ci:
-    name: Build, Test & Coverage
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          components: rustfmt
+      - name: Format
+        uses: actions-rust-lang/rustfmt@v1
 
-    - name: Setup Rust
-      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
-      with:
-        toolchain: stable
-        components: clippy, rustfmt, llvm-tools
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run Clippy
+        uses: LittleTealeaf/github-actions/cargo-clippy@2c8da212acd0ad1898eea4aa53b177ebe62f85ba
 
-    - name: Check Formatting
-      run: cargo fmt --check
+  test-coverage:
+    name: Test Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run Cargo Test Coverage
+        uses: LittleTealeaf/github-actions/cargo-test-coverage@2c8da212acd0ad1898eea4aa53b177ebe62f85ba
+        with:
+          workspace: 'true'
+          all-features: 'true'
 
-    - name: Lint (Clippy)
-      run: cargo clippy --all-targets --all-features -- -D warnings
-
-    - name: Build Release
-      run: cargo build --all --release
-
-    - name: Install Cargo LLVM Cov
-      uses: baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0 # v3.4.0
-      with:
-        crate: cargo-llvm-cov
-
-    - name: Run Tests & Generate Coverage
-      run: cargo llvm-cov test --all-features --workspace --lcov --output-path lcov_raw.info
-
-    - name: Filter and Format Coverages
-      run: chmod +x .github/workflows/coverages.bash && .github/workflows/coverages.bash
-
-    - name: Upload LCOV Artifact
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: lcov-coverage
-        path: lcov.info
-        retention-days: 7
-
-    - name: Print Coverage to Job Summary
-      uses: livewing/lcov-job-summary@f61677de6678fb6f860c8d1d35c5b4540b64b1d3 # v1.3.0
-      with:
-        lcov: lcov.info
+  audit:
+    name: Audit Cargo Dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/audit@v1
+        name: Audit Rust Dependencies
