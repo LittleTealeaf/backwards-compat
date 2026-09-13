@@ -36,7 +36,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run Clippy
-        uses: LittleTealeaf/github-actions/cargo-clippy@791d2e303901075caedb4706e2ed5736616744f4
+        uses: LittleTealeaf/github-actions/cargo-clippy@2530963f9fa6539fff754a95271939294ca516d7
 
   test-coverage:
     name: Test Coverage
@@ -45,7 +45,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run Cargo Test Coverage
-        uses: LittleTealeaf/github-actions/cargo-test-coverage@791d2e303901075caedb4706e2ed5736616744f4
+        uses: LittleTealeaf/github-actions/cargo-test-coverage@2530963f9fa6539fff754a95271939294ca516d7
         with:
           workspace: 'true'
           all-features: 'true'

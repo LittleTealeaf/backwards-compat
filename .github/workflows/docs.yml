@@ -28,4 +28,4 @@ jobs:
 
       - name: Build & Deploy Docs
         id: deployment
-        uses: LittleTealeaf/github-actions/cargo-doc-pages@791d2e303901075caedb4706e2ed5736616744f4
+        uses: LittleTealeaf/github-actions/cargo-doc-pages@2530963f9fa6539fff754a95271939294ca516d7
