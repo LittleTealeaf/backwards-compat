@@ -18,6 +18,13 @@ pub struct ResolvedPath {
     pub steps: Vec<MigrationStep>,
 }
 
+#[allow(dead_code)]
+impl ResolvedPath {
+    pub fn is_fallible(&self) -> bool {
+        self.steps.iter().any(|s| s.fallible)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DagPlan {
     pub paths: Vec<ResolvedPath>,
@@ -132,11 +139,16 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         loop {
             match next_targets[curr_node] {
                 NextTarget::TerminalTarget => {
-                    steps.push(MigrationStep {
-                        from_ty: curr_ty,
-                        to_ty: input.target_ty.clone(),
-                        fallible: input.versions[curr_node].fallible,
-                    });
+                    let target_ty = &input.target_ty;
+                    let curr_ty_str = quote::quote!(#curr_ty).to_string();
+                    let target_ty_str = quote::quote!(#target_ty).to_string();
+                    if curr_ty_str != target_ty_str {
+                        steps.push(MigrationStep {
+                            from_ty: curr_ty,
+                            to_ty: input.target_ty.clone(),
+                            fallible: input.versions[curr_node].fallible,
+                        });
+                    }
                     break;
                 }
                 NextTarget::VersionIndex(next_idx) => {
@@ -169,4 +181,65 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         latest_variant_idx,
         target_is_wire,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn test_is_fallible_empty_steps() {
+        let path = ResolvedPath {
+            tag: VersionTag::Int(1),
+            steps: vec![],
+        };
+        assert!(!path.is_fallible());
+    }
+
+    #[test]
+    fn test_is_fallible_all_infallible_steps() {
+        let t1: Type = parse_quote!(V1);
+        let t2: Type = parse_quote!(V2);
+        let t3: Type = parse_quote!(V3);
+        let path = ResolvedPath {
+            tag: VersionTag::Int(1),
+            steps: vec![
+                MigrationStep {
+                    from_ty: t1,
+                    to_ty: t2.clone(),
+                    fallible: false,
+                },
+                MigrationStep {
+                    from_ty: t2,
+                    to_ty: t3,
+                    fallible: false,
+                },
+            ],
+        };
+        assert!(!path.is_fallible());
+    }
+
+    #[test]
+    fn test_is_fallible_with_intermediate_fallible_step() {
+        let t1: Type = parse_quote!(V1);
+        let t2: Type = parse_quote!(V2);
+        let t3: Type = parse_quote!(V3);
+        let path = ResolvedPath {
+            tag: VersionTag::Int(1),
+            steps: vec![
+                MigrationStep {
+                    from_ty: t1,
+                    to_ty: t2.clone(),
+                    fallible: true,
+                },
+                MigrationStep {
+                    from_ty: t2,
+                    to_ty: t3,
+                    fallible: false,
+                },
+            ],
+        };
+        assert!(path.is_fallible());
+    }
 }

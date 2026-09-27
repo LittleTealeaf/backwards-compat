@@ -1,12 +1,13 @@
 //! # backwards-compat
 //!
-//! Declarative, compile-time verified schema versioning and backwards compatibility for Serde.
+//! Declarative, compile-time verified schema versioning and backwards compatibility for Serde and domain models.
 //!
 //! ## Overview
 //!
 //! In applications with evolving data formats, schemas change across versions.
-//! `backwards-compat` streamlines schema evolution by automatically implementing
-//! `serde::Serialize` and `serde::Deserialize` directly for your target model.
+//! `backwards-compat` streamlines schema evolution by:
+//! 1. Automatically implementing `serde::Serialize` and `serde::Deserialize` directly for your target model.
+//! 2. Automatically implementing `From<V>` (or `TryFrom<V>`) for your target model from every declared historical version `V`, enabling effortless in-code migrations.
 //!
 //! You declare previous schema versions and their transitions using the `compat TargetModel` syntax:
 //!
@@ -35,7 +36,8 @@
 //! }
 //!
 //! // The target domain model Config does NOT need #[derive(Serialize, Deserialize)].
-//! // backwards_compat! generates Serialize and Deserialize implementations automatically.
+//! // backwards_compat! generates Serialize and Deserialize implementations automatically,
+//! // as well as From<ConfigV1> and From<ConfigV2> for Config.
 //! #[derive(Debug, Clone, PartialEq)]
 //! pub struct Config {
 //!     pub name: String,
@@ -68,14 +70,87 @@
 //!     }
 //! }
 //!
-//! // Deserializing {"version": "1", "name": "my-app"} yields Config:
+//! // 1. Deserializing legacy serialized data upgrades automatically:
 //! let json_v1 = r#"{"version": "1", "name": "my-app"}"#;
 //! let config: Config = serde_json::from_str(json_v1).unwrap();
 //! assert_eq!(config.port, 8080);
 //!
-//! // Serializing Config automatically tags it with the current version:
+//! // 2. Serializing Config automatically tags it with the current version:
 //! let serialized = serde_json::to_string(&config).unwrap();
 //! assert!(serialized.contains(r#""version":"2""#));
+//!
+//! // 3. In-code manual conversion using From / Into:
+//! let v1 = ConfigV1 { name: "my-app".into() };
+//! let from_v1 = Config::from(v1.clone());
+//! let into_config: Config = v1.into();
+//! assert_eq!(from_v1, config);
+//! assert_eq!(into_config, config);
+//! ```
+//!
+//! ## Fallible In-Code Conversion (`TryFrom`)
+//!
+//! When schema transitions are marked `#[fallible]`, `backwards_compat!` generates `TryFrom<V>`
+//! implementations for the target model:
+//!
+//! ```rust
+//! use backwards_compat::backwards_compat;
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Debug, PartialEq)]
+//! pub struct CustomError(pub String);
+//!
+//! impl std::fmt::Display for CustomError {
+//!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//!         write!(f, "{}", self.0)
+//!     }
+//! }
+//!
+//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! pub struct ServerV1 { pub port: u32 }
+//!
+//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! pub struct ServerV2 { pub port: u16 }
+//!
+//! impl TryFrom<ServerV1> for ServerV2 {
+//!     type Error = CustomError;
+//!     fn try_from(v1: ServerV1) -> Result<Self, Self::Error> {
+//!         let port = u16::try_from(v1.port).map_err(|_| CustomError("overflow".into()))?;
+//!         Ok(Self { port })
+//!     }
+//! }
+//!
+//! #[derive(Debug, Clone, PartialEq)]
+//! pub struct Server { pub port: u16 }
+//!
+//! impl TryFrom<ServerV2> for Server {
+//!     type Error = CustomError;
+//!     fn try_from(v2: ServerV2) -> Result<Self, Self::Error> {
+//!         Ok(Self { port: v2.port })
+//!     }
+//! }
+//!
+//! impl From<Server> for ServerV2 {
+//!     fn from(s: Server) -> Self {
+//!         Self { port: s.port }
+//!     }
+//! }
+//!
+//! backwards_compat! {
+//!     #[tag = "version", version = 2, error = CustomError]
+//!     compat Server {
+//!         #[fallible] 1: ServerV1,
+//!         #[fallible] 2: ServerV2,
+//!     }
+//! }
+//!
+//! // Manual fallible conversion using TryFrom / TryInto:
+//! let v1_valid = ServerV1 { port: 8080 };
+//! let server: Server = Server::try_from(v1_valid.clone()).unwrap();
+//! let server2: Server = v1_valid.try_into().unwrap();
+//! assert_eq!(server, server2);
+//!
+//! let v1_invalid = ServerV1 { port: 70000 };
+//! assert!(Server::try_from(v1_invalid).is_err());
 //! ```
 //!
 //! ## DAG Transitions
@@ -102,5 +177,4 @@
 //!     }
 //! }
 //! ```
-
 pub use backwards_compat_derive::backwards_compat;

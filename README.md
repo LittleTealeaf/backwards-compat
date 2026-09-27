@@ -13,15 +13,17 @@ Declarative, compile-time verified schema versioning and backwards compatibility
 
 In applications with evolving data formats (such as configuration files, databases, event logs, or network APIs), schemas change over time. Manually maintaining backwards compatibility usually requires writing verbose intermediary enums, custom deserializers, and error-prone migration glue code.
 
-`backwards-compat` provides the `backwards_compat!` macro to declaratively define schema transitions. It automatically generates `serde::Serialize` and `serde::Deserialize` implementations directly for your target domain model:
+`backwards-compat` provides the `backwards_compat!` macro to declaratively define schema transitions. It automatically generates `serde::Serialize` and `serde::Deserialize` implementations directly for your target domain model, as well as `From<V>` and `TryFrom<V>` implementations for manual in-code upgrades:
 - **Deserialization**: Detects the incoming schema version tag, deserializes into the matching versioned struct, and automatically runs the migration chain to produce your target model.
 - **Serialization**: Encodes your target model using the current active schema version and injects the version tag automatically.
+- **In-Code Conversion**: Converts legacy schema struct instances directly into the target model via `From::from` / `.into()` (or `TryFrom::try_from` / `.try_into()`).
 
 ---
 
 ## Features
 
 - **Zero-Boilerplate Domain Models**: Your target struct does not need `#[derive(Serialize, Deserialize)]`—the macro generates them directly.
+- **Direct In-Code Conversions**: Automatically implements `From<V>` (or `TryFrom<V>`) on your target domain model for every declared historical version `V`, allowing `TargetModel::from(v1)` or `v1.into()`.
 - **Linear & DAG Migrations**: Support straightforward sequential version upgrades (`1 -> 2 -> ... -> N`) or complex Directed Acyclic Graph (DAG) upgrades (e.g. `1 => 3`).
 - **Infallible & Fallible Migrations**: Seamless support for infallible migrations using `From` as well as fallible migrations using `TryFrom` with custom error types (`#[fallible]`).
 - **Flexible Versioning**: Supports integer version tags (`1`, `2`, `3`) or string keys (`"1.0"`, `"2.0"`).
@@ -114,6 +116,13 @@ fn main() {
     // Serializing Config automatically tags it with current version 2:
     let json = serde_json::to_string(&config).unwrap();
     assert!(json.contains(r#""version":"2""#));
+
+    // In-code manual conversion using From / Into:
+    let v1 = ConfigV1 { name: "my-service".into() };
+    let config_from: Config = Config::from(v1.clone());
+    let config_into: Config = v1.into();
+    assert_eq!(config_from, config);
+    assert_eq!(config_into, config);
 }
 ```
 
@@ -186,6 +195,14 @@ backwards_compat! {
         #[fallible] 2: ServerConfigV2,
     }
 }
+
+fn main() {
+    // In-code manual conversion using TryFrom / TryInto:
+    let v1 = ServerConfigV1 { port: 8080 };
+    let config: ServerConfig = ServerConfig::try_from(v1.clone()).unwrap();
+    let config_into: ServerConfig = v1.try_into().unwrap();
+    assert_eq!(config, config_into);
+}
 ```
 
 ### Directed Acyclic Graph (DAG) Migrations
@@ -226,6 +243,7 @@ Under the hood, `backwards_compat!` constructs an internal, private enum represe
 
 1. **On Deserialization**: Serde inspects the tag field and deserializes the payload into the appropriate version variant. The macro then traverses the shortest migration path in the dependency graph using your `From` or `TryFrom` implementations until it produces the target domain model.
 2. **On Serialization**: The macro converts your target domain model into the designated target version and serializes it, ensuring that the version tag is present.
+3. **In-Code Conversions**: The macro generates `From<V> for TargetModel` (or `TryFrom<V> for TargetModel`) for all declared versions `V` by composing the transition steps along the shortest path.
 
 ---
 

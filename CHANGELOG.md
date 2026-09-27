@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+* Automatically generate `From<V>` and `TryFrom<V>` implementations on the target model for all declared historical versions `V`, enabling manual in-code migrations.
+
 ## [0.3.0](https://github.com/LittleTealeaf/backwards-compat/compare/v0.2.0...v0.3.0) (2026-09-07)
 
 ### Documentation
