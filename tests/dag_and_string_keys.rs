@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat;
+use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -69,7 +69,7 @@ impl From<AppConfig> for AppConfigV2_0 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "version"]
     compat AppConfig {
         "0.1": AppConfigV0_1,
@@ -293,7 +293,7 @@ impl From<MyModel> for JumpV3 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "version"]
     compat MyModel {
         1: JumpV1 => 3,
@@ -467,7 +467,7 @@ impl From<TelemetryEvent> for TelemetryV4 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "version"]
     compat TelemetryEvent {
         1: TelemetryV1 => 2,

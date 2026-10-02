@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat;
+use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -54,7 +54,7 @@ impl From<ServerConfig> for ServerConfigV2 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "version", version = 2, error = MigrationError]
     compat ServerConfig {
         #[fallible] 1: ServerConfigV1,

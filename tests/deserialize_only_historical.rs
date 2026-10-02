@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat;
+use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 
 // Historical schemas: only implement Deserialize (NOT Serialize)
@@ -68,7 +68,7 @@ impl From<ModernModel> for LegacyV3 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "schema_v", version = 3]
     compat ModernModel {
         1: LegacyV1,

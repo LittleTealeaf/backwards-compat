@@ -99,7 +99,10 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
     }
 }
 
-pub fn generate_backwards_compat(input: BackwardsCompatInput) -> syn::Result<TokenStream> {
+pub fn generate_backwards_compat(
+    input: BackwardsCompatInput,
+    shadow_struct: Option<&syn::Ident>,
+) -> syn::Result<TokenStream> {
     let dag_plan = resolve_dag(&input)?;
 
     let target_ty = &input.target_ty;
@@ -138,33 +141,39 @@ pub fn generate_backwards_compat(input: BackwardsCompatInput) -> syn::Result<Tok
     }
 
     if dag_plan.target_is_wire {
-        let current_var_ident = format_ident!("__V_{}", input.versions.len());
-        let current_tag_str = input.current_version.to_tag_string();
+        if let Some(shadow_ident) = shadow_struct {
+            let current_var_ident = format_ident!("__V_{}", input.versions.len());
+            let current_tag_str = input.current_version.to_tag_string();
 
-        helper_variants.push(quote! {
-            #[serde(rename = #current_tag_str)]
-            #current_var_ident(#target_ty)
-        });
+            helper_variants.push(quote! {
+                #[serde(rename = #current_tag_str)]
+                #current_var_ident(#shadow_ident)
+            });
 
-        match_arms.push(quote! {
-            __VersionHelper::#current_var_ident(val) => ::core::result::Result::Ok(val)
-        });
+            match_arms.push(quote! {
+                __VersionHelper::#current_var_ident(val) => ::core::result::Result::Ok(::core::convert::Into::into(val))
+            });
+        } else {
+            return Err(syn::Error::new_spanned(
+                &input.target_ty,
+                "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro",
+            ));
+        }
     }
 
-    let latest_wire_ty = &dag_plan.latest_wire_ty;
+    let latest_wire_ty = if dag_plan.target_is_wire {
+        let shadow_ident = shadow_struct.unwrap();
+        quote!(#shadow_ident)
+    } else {
+        let ty = &dag_plan.latest_wire_ty;
+        quote!(#ty)
+    };
     let current_tag_str = input.current_version.to_tag_string();
 
-    let serialize_stmt = if dag_plan.target_is_wire {
-        quote! {
-            let helper = __SerializeHelper::__Latest(self);
-            ::serde::Serialize::serialize(&helper, __serializer)
-        }
-    } else {
-        quote! {
-            let latest: #latest_wire_ty = ::core::convert::Into::into(::core::clone::Clone::clone(self));
-            let helper = __SerializeHelper::__Latest(&latest);
-            ::serde::Serialize::serialize(&helper, __serializer)
-        }
+    let serialize_stmt = quote! {
+        let latest: #latest_wire_ty = ::core::convert::Into::into(::core::clone::Clone::clone(self));
+        let helper = __SerializeHelper::__Latest(&latest);
+        ::serde::Serialize::serialize(&helper, __serializer)
     };
 
     let conversions = generate_conversions(&input, &dag_plan);
@@ -329,7 +338,7 @@ mod tests {
         })
         .unwrap();
 
-        let generated = generate_backwards_compat(input).unwrap();
+        let generated = generate_backwards_compat(input, None).unwrap();
         let rendered = generated.to_string();
 
         assert!(rendered.contains("__VersionHelper :: __V_0 (val) => :: core :: convert :: TryInto :: < TargetModel > :: try_into (val) . map_err (:: serde :: de :: Error :: custom)"));
@@ -349,7 +358,7 @@ mod tests {
         })
         .unwrap();
 
-        let generated = generate_backwards_compat(input).unwrap();
+        let generated = generate_backwards_compat(input, None).unwrap();
         let rendered = generated.to_string();
 
         // __VersionHelper only derives Deserialize
@@ -359,5 +368,45 @@ mod tests {
         assert!(rendered.contains(
             "enum __SerializeHelper < '__a > { # [serde (rename = \"3\")] __Latest (& '__a ModelV3) , }"
         ));
+    }
+
+    #[test]
+    fn test_generate_backwards_compat_target_is_wire_with_shadow() {
+        let input: BackwardsCompatInput = syn::parse2(quote! {
+            #[version = 3]
+            pub compat TargetModel {
+                1: ModelV1 => 2,
+                2: ModelV2 => 3,
+            }
+        })
+        .unwrap();
+
+        let shadow = format_ident!("TargetModelWire");
+        let generated = generate_backwards_compat(input, Some(&shadow)).unwrap();
+        let rendered = generated.to_string();
+
+        assert!(rendered.contains("__VersionHelper :: __V_2 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
+        assert!(rendered.contains(
+            "enum __SerializeHelper < '__a > { # [serde (rename = \"3\")] __Latest (& '__a TargetModelWire) , }"
+        ));
+    }
+
+    #[test]
+    fn test_generate_backwards_compat_target_is_wire_without_shadow_errors() {
+        let input: BackwardsCompatInput = syn::parse2(quote! {
+            #[version = 3]
+            pub compat TargetModel {
+                1: ModelV1 => 2,
+                2: ModelV2 => 3,
+            }
+        })
+        .unwrap();
+
+        let result = generate_backwards_compat(input, None);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro"
+        );
     }
 }

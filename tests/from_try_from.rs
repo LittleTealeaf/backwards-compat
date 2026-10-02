@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat;
+use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 
@@ -70,7 +70,7 @@ impl From<InfallibleTarget> for InfallibleV3 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "v", version = 3]
     compat InfallibleTarget {
         1: InfallibleV1,
@@ -188,7 +188,7 @@ impl From<CustomErrorTarget> for CustomErrorV2 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "version", version = 2, error = CustomModelError]
     compat CustomErrorTarget {
         #[fallible] 1: CustomErrorV1,
@@ -266,7 +266,7 @@ impl From<BoxedTarget> for BoxedV2 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "ver", version = 2]
     compat BoxedTarget {
         #[fallible] 1: BoxedV1,
@@ -362,7 +362,7 @@ impl From<DagTarget> for DagV3 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "dag_ver", version = 3]
     compat DagTarget {
         1: DagV1 => 3,
@@ -441,7 +441,7 @@ impl From<DeduplicatedTarget> for SharedCurrent {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "v", version = "v2"]
     compat DeduplicatedTarget {
         "v0": SharedLegacy => "v2",
@@ -491,7 +491,7 @@ impl From<SelfTargetV1> for SelfTargetModel {
 }
 
 // Target model is directly SelfTargetModel, which is also version 2
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "ver", version = 2]
     compat SelfTargetModel {
         1: SelfTargetV1,

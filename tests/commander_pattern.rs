@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat;
+use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -130,7 +130,7 @@ impl From<FinalModel> for SchemaV5 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "version", version = 5, error = SchemaError]
     compat FinalModel {
         1: SchemaV1,

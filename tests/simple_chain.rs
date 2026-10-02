@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat;
+use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -65,7 +65,7 @@ impl From<User> for UserV3 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "schema_version", version = 3]
     compat User {
         1: UserV1,
