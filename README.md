@@ -52,12 +52,13 @@ Define previous versions of your struct with standard Serde derives, implement `
 use backwards_compat::backwards_compat;
 use serde::{Deserialize, Serialize};
 
-// 1. Define legacy schemas
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// 1. Define historical schemas (only Deserialize is required)
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ConfigV1 {
     pub name: String,
 }
 
+// Current active wire schema (implements Serialize and Deserialize)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigV2 {
     pub name: String,
@@ -147,7 +148,7 @@ pub enum ConfigError {
     Validation(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfigV1 {
     pub port: u32,
 }

@@ -29,7 +29,6 @@ impl ResolvedPath {
 pub struct DagPlan {
     pub paths: Vec<ResolvedPath>,
     pub latest_wire_ty: Type,
-    pub latest_variant_idx: usize,
     pub target_is_wire: bool,
 }
 
@@ -170,15 +169,14 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         });
     }
 
-    let (latest_wire_ty, latest_variant_idx, target_is_wire) = match current_idx_opt {
-        Some(idx) => (input.versions[idx].ty.clone(), idx, false),
-        None => (input.target_ty.clone(), n, true),
+    let (latest_wire_ty, target_is_wire) = match current_idx_opt {
+        Some(idx) => (input.versions[idx].ty.clone(), false),
+        None => (input.target_ty.clone(), true),
     };
 
     Ok(DagPlan {
         paths,
         latest_wire_ty,
-        latest_variant_idx,
         target_is_wire,
     })
 }
