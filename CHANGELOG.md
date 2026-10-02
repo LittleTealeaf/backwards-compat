@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/LittleTealeaf/backwards-compat/compare/v0.4.0...v0.5.0) (2026-10-02)
+
+
+### Features
+
+* Remove blanket serialize requirements ([#17](https://github.com/LittleTealeaf/backwards-compat/issues/17)) ([0cfd722](https://github.com/LittleTealeaf/backwards-compat/commit/0cfd722fbd12607ba707c32bb0d91dd57fc718c4))
+
 ## [0.4.0](https://github.com/LittleTealeaf/backwards-compat/compare/v0.3.0...v0.4.0) (2026-09-27)
 
 
