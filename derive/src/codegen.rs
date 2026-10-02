@@ -151,19 +151,18 @@ pub fn generate_backwards_compat(input: BackwardsCompatInput) -> syn::Result<Tok
         });
     }
 
-    let latest_var_ident = format_ident!("__V_{}", dag_plan.latest_variant_idx);
     let latest_wire_ty = &dag_plan.latest_wire_ty;
+    let current_tag_str = input.current_version.to_tag_string();
 
     let serialize_stmt = if dag_plan.target_is_wire {
         quote! {
-            let latest: #latest_wire_ty = ::core::clone::Clone::clone(self);
-            let helper = __VersionHelper::#latest_var_ident(latest);
+            let helper = __SerializeHelper::__Latest(self);
             ::serde::Serialize::serialize(&helper, __serializer)
         }
     } else {
         quote! {
             let latest: #latest_wire_ty = ::core::convert::Into::into(::core::clone::Clone::clone(self));
-            let helper = __VersionHelper::#latest_var_ident(latest);
+            let helper = __SerializeHelper::__Latest(&latest);
             ::serde::Serialize::serialize(&helper, __serializer)
         }
     };
@@ -174,11 +173,19 @@ pub fn generate_backwards_compat(input: BackwardsCompatInput) -> syn::Result<Tok
         const _: () = {
             use ::serde::de::Error as _;
 
-            #[allow(non_camel_case_types)]
-            #[derive(::serde::Serialize, ::serde::Deserialize)]
+            #[allow(non_camel_case_types, dead_code)]
+            #[derive(::serde::Deserialize)]
             #[serde(tag = #tag_field)]
             enum __VersionHelper {
                 #(#helper_variants,)*
+            }
+
+            #[allow(non_camel_case_types, dead_code)]
+            #[derive(::serde::Serialize)]
+            #[serde(tag = #tag_field)]
+            enum __SerializeHelper<'__a> {
+                #[serde(rename = #current_tag_str)]
+                __Latest(&'__a #latest_wire_ty),
             }
 
             impl ::serde::Serialize for #target_ty {
@@ -328,5 +335,29 @@ mod tests {
         assert!(rendered.contains("__VersionHelper :: __V_0 (val) => :: core :: convert :: TryInto :: < TargetModel > :: try_into (val) . map_err (:: serde :: de :: Error :: custom)"));
         assert!(rendered.contains("__VersionHelper :: __V_1 (val) => :: core :: convert :: TryInto :: < TargetModel > :: try_into (val) . map_err (:: serde :: de :: Error :: custom)"));
         assert!(rendered.contains("__VersionHelper :: __V_2 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
+    }
+
+    #[test]
+    fn test_serialize_helper_and_version_helper_derives() {
+        let input: BackwardsCompatInput = syn::parse2(quote! {
+            #[version = 3]
+            pub compat TargetModel {
+                1: ModelV1 => 2,
+                2: ModelV2 => 3,
+                3: ModelV3,
+            }
+        })
+        .unwrap();
+
+        let generated = generate_backwards_compat(input).unwrap();
+        let rendered = generated.to_string();
+
+        // __VersionHelper only derives Deserialize
+        assert!(rendered.contains("# [derive (:: serde :: Deserialize)]"));
+        // __SerializeHelper derives Serialize and only references ModelV3
+        assert!(rendered.contains("# [derive (:: serde :: Serialize)]"));
+        assert!(rendered.contains(
+            "enum __SerializeHelper < '__a > { # [serde (rename = \"3\")] __Latest (& '__a ModelV3) , }"
+        ));
     }
 }

@@ -15,11 +15,13 @@
 //! use backwards_compat::backwards_compat;
 //! use serde::{Deserialize, Serialize};
 //!
-//! #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+//! // 1. Define historical schemas (only Deserialize is required)
+//! #[derive(Debug, Clone, PartialEq, Deserialize)]
 //! pub struct ConfigV1 {
 //!     pub name: String,
 //! }
 //!
+//! // Current active wire schema (needs Serialize and Deserialize)
 //! #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 //! pub struct ConfigV2 {
 //!     pub name: String,
@@ -105,7 +107,7 @@
 //!     }
 //! }
 //!
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! #[derive(Debug, Clone, Deserialize)]
 //! pub struct ServerV1 { pub port: u32 }
 //!
 //! #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,9 +163,9 @@
 //! ```rust
 //! # use backwards_compat::backwards_compat;
 //! # use serde::{Deserialize, Serialize};
-//! # #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+//! # #[derive(Debug, Clone, PartialEq, Deserialize)]
 //! # pub struct V1 { pub val: i32 }
-//! # #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+//! # #[derive(Debug, Clone, PartialEq, Deserialize)]
 //! # pub struct V2 { pub val: i32 }
 //! # #[derive(Debug, Clone, PartialEq)]
 //! # pub struct V3 { pub val: i32 }
