@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat_decl;
+use backwards_compat::backwards_compat;
 use serde::{Deserialize, Serialize};
 
 // Historical schemas: only implement Deserialize (NOT Serialize)
@@ -41,6 +41,7 @@ impl From<LegacyV2> for LegacyV3 {
 }
 
 // Domain model
+#[backwards_compat(tag = "schema_v", version = 3, versions(1: LegacyV1, 2: LegacyV2, 3: LegacyV3))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModernModel {
     pub name: String,
@@ -65,15 +66,6 @@ impl From<ModernModel> for LegacyV3 {
             count: m.count,
             active: m.active,
         }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "schema_v", version = 3]
-    compat ModernModel {
-        1: LegacyV1,
-        2: LegacyV2,
-        3: LegacyV3,
     }
 }
 

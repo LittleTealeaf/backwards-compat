@@ -13,7 +13,7 @@ Declarative, compile-time verified schema versioning and backwards compatibility
 
 In applications with evolving data formats (such as configuration files, databases, event logs, or network APIs), schemas change over time. Manually maintaining backwards compatibility usually requires writing verbose intermediary enums, custom deserializers, and error-prone migration glue code.
 
-`backwards-compat` provides the `#[backwards_compat]` attribute macro to declaratively define schema transitions. It automatically generates `serde::Serialize` and `serde::Deserialize` implementations directly for your target domain model, as well as `From<V>` and `TryFrom<V>` implementations for manual in-code upgrades (a declarative alternative, `backwards_compat_decl!`, is also available):
+`backwards-compat` provides the `#[backwards_compat]` attribute macro to declaratively define schema transitions. It automatically generates `serde::Serialize` and `serde::Deserialize` implementations directly for your target domain model, as well as `From<V>` and `TryFrom<V>` implementations for manual in-code upgrades:
 - **Deserialization**: Detects the incoming schema version tag, deserializes into the matching versioned struct, and automatically runs the migration chain to produce your target model.
 - **Serialization**: Encodes your target model using the current active schema version and injects the version tag automatically.
 - **In-Code Conversion**: Converts legacy schema struct instances directly into the target model via `From::from` / `.into()` (or `TryFrom::try_from` / `.try_into()`).
@@ -30,7 +30,6 @@ In applications with evolving data formats (such as configuration files, databas
 - **Flexible Versioning**: Supports integer version tags (`1`, `2`, `3`) or string keys (`"1.0"`, `"2.0"`).
 - **Custom Tag Field**: Configure any version field name (e.g., `version`, `schema_version`, `_v`).
 - **Format Agnostic**: Works out of the box with JSON, TOML, RON, YAML, and any other format supported by Serde.
-- **Declarative Alternative**: A `backwards_compat_decl!` macro is available for cases where applying an attribute macro directly to a struct is not feasible.
 
 ---
 

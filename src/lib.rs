@@ -136,29 +136,4 @@
 //! #[derive(Debug, Clone, PartialEq)]
 //! pub struct V2 { pub val: i32 }
 //! ```
-//!
-//! ## Declarative Alternative
-//!
-//! If you prefer not to apply an attribute macro on your struct (e.g. if you are implementing compatibility across third-party types), you can use the `backwards_compat_decl!` declarative macro:
-//!
-//! ```rust
-//! use backwards_compat::backwards_compat_decl;
-//! use serde::Deserialize;
-//!
-//! #[derive(Debug, Clone, PartialEq, Deserialize)]
-//! pub struct RemoteV1 { pub val: i32 }
-//!
-//! #[derive(Debug, Clone, PartialEq)]
-//! pub struct RemoteV2 { pub val: i32 }
-//!
-//! impl From<RemoteV1> for RemoteV2 { fn from(v: RemoteV1) -> Self { Self { val: v.val } } }
-//!
-//! backwards_compat_decl! {
-//!     #[tag = "version", version = 2]
-//!     compat RemoteV2 {
-//!         1: RemoteV1,
-//!         2: RemoteV2,
-//!     }
-//! }
-//! ```
-pub use backwards_compat_derive::{backwards_compat, backwards_compat_decl};
+pub use backwards_compat_derive::backwards_compat;

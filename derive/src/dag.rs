@@ -40,10 +40,11 @@ enum NextTarget {
 pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
     let n = input.versions.len();
     if n == 0 {
-        return Err(Error::new_spanned(
-            &input.target_ty,
-            "at least one version entry must be declared",
-        ));
+        return Ok(DagPlan {
+            paths: Vec::new(),
+            latest_wire_ty: input.target_ty.clone(),
+            target_is_wire: true,
+        });
     }
 
     let current_idx_opt = input

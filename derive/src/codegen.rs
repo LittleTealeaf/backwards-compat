@@ -244,17 +244,24 @@ pub fn generate_backwards_compat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse::BackwardsCompatArgs;
+
+    fn parse_test_input(args_tokens: proc_macro2::TokenStream) -> BackwardsCompatInput {
+        let args: BackwardsCompatArgs = syn::parse2(args_tokens).unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::parse_quote!(pub);
+        args.into_input(target_ty, vis).unwrap()
+    }
 
     #[test]
     fn test_generate_conversions_infallible() {
-        let input: BackwardsCompatInput = syn::parse2(quote! {
-            #[version = 2]
-            pub compat TargetModel {
+        let input = parse_test_input(quote! {
+            version = 2,
+            versions = [
                 1: ModelV1 => 2,
                 2: ModelV2,
-            }
-        })
-        .unwrap();
+            ]
+        });
 
         let dag_plan = resolve_dag(&input).unwrap();
         let conversions = generate_conversions(&input, &dag_plan);
@@ -268,15 +275,14 @@ mod tests {
 
     #[test]
     fn test_generate_conversions_fallible_default_error() {
-        let input: BackwardsCompatInput = syn::parse2(quote! {
-            #[version = 2]
-            pub compat TargetModel {
+        let input = parse_test_input(quote! {
+            version = 2,
+            versions = [
                 #[fallible]
                 1: ModelV1 => 2,
                 2: ModelV2,
-            }
-        })
-        .unwrap();
+            ]
+        });
 
         let dag_plan = resolve_dag(&input).unwrap();
         let conversions = generate_conversions(&input, &dag_plan);
@@ -289,16 +295,15 @@ mod tests {
 
     #[test]
     fn test_generate_conversions_fallible_custom_error() {
-        let input: BackwardsCompatInput = syn::parse2(quote! {
-            #[version = 2]
-            #[error = CustomError]
-            pub compat TargetModel {
+        let input = parse_test_input(quote! {
+            version = 2,
+            error = CustomError,
+            versions = [
                 #[fallible]
                 1: ModelV1 => 2,
                 2: ModelV2,
-            }
-        })
-        .unwrap();
+            ]
+        });
 
         let dag_plan = resolve_dag(&input).unwrap();
         let conversions = generate_conversions(&input, &dag_plan);
@@ -311,15 +316,14 @@ mod tests {
 
     #[test]
     fn test_generate_conversions_skips_target_and_duplicates() {
-        let input: BackwardsCompatInput = syn::parse2(quote! {
-            #[version = 3]
-            pub compat TargetModel {
+        let input = parse_test_input(quote! {
+            version = 3,
+            versions = [
                 1: ModelV1 => 2,
                 2: ModelV1 => 3,
                 3: ModelV2,
-            }
-        })
-        .unwrap();
+            ]
+        });
 
         let dag_plan = resolve_dag(&input).unwrap();
         let conversions = generate_conversions(&input, &dag_plan);
@@ -335,16 +339,15 @@ mod tests {
 
     #[test]
     fn test_generate_backwards_compat_match_arms() {
-        let input: BackwardsCompatInput = syn::parse2(quote! {
-            #[version = 3]
-            pub compat TargetModel {
+        let input = parse_test_input(quote! {
+            version = 3,
+            versions = [
                 1: ModelV1 => 2,
                 #[fallible]
                 2: ModelV2 => 3,
                 3: ModelV3,
-            }
-        })
-        .unwrap();
+            ]
+        });
 
         let generated = generate_backwards_compat(&input, None, None).unwrap();
         let rendered = generated.to_string();
@@ -356,15 +359,14 @@ mod tests {
 
     #[test]
     fn test_serialize_helper_and_version_helper_derives() {
-        let input: BackwardsCompatInput = syn::parse2(quote! {
-            #[version = 3]
-            pub compat TargetModel {
+        let input = parse_test_input(quote! {
+            version = 3,
+            versions = [
                 1: ModelV1 => 2,
                 2: ModelV2 => 3,
                 3: ModelV3,
-            }
-        })
-        .unwrap();
+            ]
+        });
 
         let generated = generate_backwards_compat(&input, None, None).unwrap();
         let rendered = generated.to_string();
@@ -380,14 +382,13 @@ mod tests {
 
     #[test]
     fn test_generate_backwards_compat_target_is_wire_with_shadow() {
-        let input: BackwardsCompatInput = syn::parse2(quote! {
-            #[version = 3]
-            pub compat TargetModel {
+        let input = parse_test_input(quote! {
+            version = 3,
+            versions = [
                 1: ModelV1 => 2,
                 2: ModelV2 => 3,
-            }
-        })
-        .unwrap();
+            ]
+        });
 
         let shadow = format_ident!("TargetModelWire");
         let generated = generate_backwards_compat(&input, Some(&shadow), None).unwrap();
@@ -401,14 +402,13 @@ mod tests {
 
     #[test]
     fn test_generate_backwards_compat_target_is_wire_without_shadow_errors() {
-        let input: BackwardsCompatInput = syn::parse2(quote! {
-            #[version = 3]
-            pub compat TargetModel {
+        let input = parse_test_input(quote! {
+            version = 3,
+            versions = [
                 1: ModelV1 => 2,
                 2: ModelV2 => 3,
-            }
-        })
-        .unwrap();
+            ]
+        });
 
         let result = generate_backwards_compat(&input, None, None);
         assert!(result.is_err());

@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat_decl;
+use backwards_compat::backwards_compat;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -32,6 +32,12 @@ impl TryFrom<ServerConfigV1> for ServerConfigV2 {
     }
 }
 
+#[backwards_compat(
+    tag = "version",
+    version = 2,
+    error = MigrationError,
+    versions(#[fallible] 1: ServerConfigV1, #[fallible] 2: ServerConfigV2)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub port: u16,
@@ -51,14 +57,6 @@ impl TryFrom<ServerConfigV2> for ServerConfig {
 impl From<ServerConfig> for ServerConfigV2 {
     fn from(s: ServerConfig) -> Self {
         Self { port: s.port }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "version", version = 2, error = MigrationError]
-    compat ServerConfig {
-        #[fallible] 1: ServerConfigV1,
-        #[fallible] 2: ServerConfigV2,
     }
 }
 

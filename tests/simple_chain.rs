@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat_decl;
+use backwards_compat::backwards_compat;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -38,6 +38,11 @@ impl From<UserV2> for UserV3 {
     }
 }
 
+#[backwards_compat(
+    tag = "schema_version",
+    version = 3,
+    versions(1: UserV1, 2: UserV2, 3: UserV3)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub name: String,
@@ -62,15 +67,6 @@ impl From<User> for UserV3 {
             email: u.email,
             is_admin: u.is_admin,
         }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "schema_version", version = 3]
-    compat User {
-        1: UserV1,
-        2: UserV2,
-        3: UserV3,
     }
 }
 
