@@ -1,3 +1,6 @@
+#![deny(clippy::redundant_field_names)]
+#![deny(clippy::all)]
+
 use backwards_compat::backwards_compat;
 use serde::{Deserialize, Serialize};
 
