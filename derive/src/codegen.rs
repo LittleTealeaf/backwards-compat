@@ -196,37 +196,11 @@ pub fn generate_backwards_compat(
     } else {
         let ty = &dag_plan.latest_wire_ty;
         let stmt = quote! {
-            struct __WireConvert<'__b, __T: ?Sized>(&'__b __T);
+            use ::backwards_compat::__private::{
+                BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
+            };
 
-            trait __BorrowedWireConvert<__W> {
-                fn __convert_wire(&self) -> __W;
-            }
-
-            impl<'__b, __T: ?Sized, __W> __BorrowedWireConvert<__W> for &__WireConvert<'__b, __T>
-            where
-                &'__b __T: ::core::convert::Into<__W>,
-            {
-                #[inline]
-                fn __convert_wire(&self) -> __W {
-                    ::core::convert::Into::into(self.0)
-                }
-            }
-
-            trait __FallbackWireConvert<__W> {
-                fn __convert_wire(&self) -> __W;
-            }
-
-            impl<'__b, __T, __W> __FallbackWireConvert<__W> for __WireConvert<'__b, __T>
-            where
-                __T: ::core::clone::Clone + ::core::convert::Into<__W>,
-            {
-                #[inline]
-                fn __convert_wire(&self) -> __W {
-                    ::core::convert::Into::into(::core::clone::Clone::clone(self.0))
-                }
-            }
-
-            let latest: #ty = (&__WireConvert(self)).__convert_wire();
+            let latest: #ty = (&__WireConvert(self)).convert_wire();
             let helper = __SerializeHelper::__Latest(&latest);
             ::serde::Serialize::serialize(&helper, __serializer)
         };
@@ -291,6 +265,7 @@ pub fn generate_backwards_compat(
 
             #extra
 
+            #[doc(hidden)]
             #[allow(non_camel_case_types, dead_code)]
             #[derive(::serde::Deserialize)]
             #serde_tag_attr
@@ -298,6 +273,7 @@ pub fn generate_backwards_compat(
                 #(#helper_variants,)*
             }
 
+            #[doc(hidden)]
             #[allow(non_camel_case_types, dead_code)]
             #[derive(::serde::Serialize)]
             #serde_tag_attr
@@ -597,9 +573,7 @@ mod tests {
         let generated = generate_backwards_compat(&input, None, None).unwrap();
         let rendered = generated.to_string();
 
-        assert!(rendered.contains("struct __WireConvert < '__b , __T : ? Sized > (& '__b __T) ;"));
-        assert!(rendered.contains("trait __BorrowedWireConvert < __W >"));
-        assert!(rendered.contains("trait __FallbackWireConvert < __W >"));
-        assert!(rendered.contains("let latest : ModelV2 = (& __WireConvert (self)) . __convert_wire () ;"));
+        assert!(rendered.contains("use :: backwards_compat :: __private :: { BorrowedWireConvert as _ , FallbackWireConvert as _ , WireConvert as __WireConvert } ;"));
+        assert!(rendered.contains("let latest : ModelV2 = (& __WireConvert (self)) . convert_wire () ;"));
     }
 }

@@ -220,3 +220,36 @@
 //! pub struct V2 { pub val: i32 }
 //! ```
 pub use backwards_compat_derive::backwards_compat;
+
+#[doc(hidden)]
+pub mod __private {
+    pub struct WireConvert<'b, T: ?Sized>(pub &'b T);
+
+    pub trait BorrowedWireConvert<W> {
+        fn convert_wire(&self) -> W;
+    }
+
+    impl<'b, T: ?Sized, W> BorrowedWireConvert<W> for &WireConvert<'b, T>
+    where
+        &'b T: ::core::convert::Into<W>,
+    {
+        #[inline]
+        fn convert_wire(&self) -> W {
+            ::core::convert::Into::into(self.0)
+        }
+    }
+
+    pub trait FallbackWireConvert<W> {
+        fn convert_wire(&self) -> W;
+    }
+
+    impl<T, W> FallbackWireConvert<W> for WireConvert<'_, T>
+    where
+        T: ::core::clone::Clone + ::core::convert::Into<W>,
+    {
+        #[inline]
+        fn convert_wire(&self) -> W {
+            ::core::convert::Into::into(::core::clone::Clone::clone(self.0))
+        }
+    }
+}
