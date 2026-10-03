@@ -3,22 +3,21 @@ use syn::{Error, Result, Type};
 
 use crate::parse::{BackwardsCompatInput, VersionTag};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
+#[allow(dead_code, reason = "debug and DAG introspection fields")]
 pub struct MigrationStep {
     pub from_ty: Type,
     pub to_ty: Type,
     pub fallible: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
+#[allow(dead_code, reason = "debug and DAG introspection fields")]
 pub struct ResolvedPath {
     pub tag: VersionTag,
     pub steps: Vec<MigrationStep>,
 }
 
-#[allow(dead_code)]
 impl ResolvedPath {
     pub fn is_fallible(&self) -> bool {
         self.steps.iter().any(|s| s.fallible)
@@ -82,7 +81,7 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
             } else {
                 return Err(Error::new(
                     next_span,
-                    format!("target version `{}` does not exist", next_tag),
+                    format!("target version `{next_tag}` does not exist"),
                 ));
             }
         } else {
@@ -92,10 +91,10 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
             } else if i < n - 1 {
                 next_targets.push(NextTarget::VersionIndex(i + 1));
             } else if let Some(target_idx) = current_idx_opt {
-                if target_idx != i {
-                    next_targets.push(NextTarget::VersionIndex(target_idx));
-                } else {
+                if target_idx == i {
                     next_targets.push(NextTarget::TerminalTarget);
+                } else {
+                    next_targets.push(NextTarget::VersionIndex(target_idx));
                 }
             } else {
                 next_targets.push(NextTarget::TerminalTarget);
@@ -104,21 +103,21 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
     }
 
     // Cycle detection & dead-end detection
-    for i in 0..n {
+    for (i, v) in input.versions.iter().enumerate() {
         let mut visited_in_path = HashSet::new();
         let mut curr = i;
         visited_in_path.insert(curr);
 
-        loop {
-            match next_targets[curr] {
+        while let Some(&target) = next_targets.get(curr) {
+            match target {
                 NextTarget::TerminalTarget => break,
                 NextTarget::VersionIndex(next_idx) => {
                     if !visited_in_path.insert(next_idx) {
                         return Err(Error::new(
-                            input.versions[i].tag_span,
+                            v.tag_span,
                             format!(
                                 "cycle detected in backwards_compat migration graph starting at version `{}`",
-                                input.versions[i].tag
+                                v.tag
                             ),
                         ));
                     }
@@ -130,32 +129,37 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
 
     // Build resolved paths
     let mut paths = Vec::with_capacity(n);
-    for i in 0..n {
+    for (i, v) in input.versions.iter().enumerate() {
         let mut steps = Vec::new();
         let mut curr_node = i;
-        let mut curr_ty = input.versions[i].ty.clone();
+        let mut curr_ty = v.ty.clone();
 
-        loop {
-            match next_targets[curr_node] {
+        while let Some(&target) = next_targets.get(curr_node) {
+            match target {
                 NextTarget::TerminalTarget => {
                     let target_ty = &input.target_ty;
                     let curr_ty_str = quote::quote!(#curr_ty).to_string();
                     let target_ty_str = quote::quote!(#target_ty).to_string();
                     if curr_ty_str != target_ty_str {
+                        let fallible = input.versions.get(curr_node).is_some_and(|node| node.fallible);
                         steps.push(MigrationStep {
                             from_ty: curr_ty,
                             to_ty: input.target_ty.clone(),
-                            fallible: input.versions[curr_node].fallible,
+                            fallible,
                         });
                     }
                     break;
                 }
                 NextTarget::VersionIndex(next_idx) => {
-                    let next_ty = input.versions[next_idx].ty.clone();
+                    let Some(next_version) = input.versions.get(next_idx) else {
+                        break;
+                    };
+                    let next_ty = next_version.ty.clone();
+                    let fallible = input.versions.get(curr_node).is_some_and(|node| node.fallible);
                     steps.push(MigrationStep {
                         from_ty: curr_ty,
                         to_ty: next_ty.clone(),
-                        fallible: input.versions[curr_node].fallible,
+                        fallible,
                     });
                     curr_node = next_idx;
                     curr_ty = next_ty;
@@ -164,15 +168,14 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         }
 
         paths.push(ResolvedPath {
-            tag: input.versions[i].tag.clone(),
+            tag: v.tag.clone(),
             steps,
         });
     }
 
-    let (latest_wire_ty, target_is_wire) = match current_idx_opt {
-        Some(idx) => (input.versions[idx].ty.clone(), false),
-        None => (input.target_ty.clone(), true),
-    };
+    let (latest_wire_ty, target_is_wire) = current_idx_opt
+        .and_then(|idx| input.versions.get(idx))
+        .map_or_else(|| (input.target_ty.clone(), true), |v| (v.ty.clone(), false));
 
     Ok(DagPlan {
         paths,

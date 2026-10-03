@@ -14,23 +14,23 @@ impl VersionTag {
     /// Returns the string representation of the version tag.
     pub fn to_tag_string(&self) -> String {
         match self {
-            VersionTag::Int(i) => i.to_string(),
-            VersionTag::String(s) => s.clone(),
+            Self::Int(i) => i.to_string(),
+            Self::String(s) => s.clone(),
         }
     }
 
     /// Checks if two version tags represent the same tag value (either exact match or matching string representation).
-    pub fn matches(&self, other: &VersionTag) -> bool {
+    pub fn matches(&self, other: &Self) -> bool {
         self == other || self.to_tag_string() == other.to_tag_string()
     }
 
     /// Helper to construct a compile error associated with a specific span.
-    #[allow(dead_code)]
-    pub fn error(&self, span: proc_macro2::Span, msg: impl std::fmt::Display) -> syn::Error {
+    #[allow(dead_code, reason = "helper function for error reporting")]
+    pub fn error<D: core::fmt::Display>(span: proc_macro2::Span, msg: D) -> syn::Error {
         syn::Error::new(span, msg)
     }
 
-    /// Parse a VersionTag from a ParseStream, returning the tag and its span.
+    /// Parse a `VersionTag` from a `ParseStream`, returning the tag and its span.
     pub fn parse(input: ParseStream) -> syn::Result<(Self, proc_macro2::Span)> {
         if input.peek(syn::Ident) {
             return Err(syn::Error::new(
@@ -42,10 +42,10 @@ impl VersionTag {
         if input.peek(syn::LitInt) {
             let lit: syn::LitInt = input.parse()?;
             let val = lit.base10_parse::<u64>()?;
-            Ok((VersionTag::Int(val), lit.span()))
+            Ok((Self::Int(val), lit.span()))
         } else if input.peek(syn::LitStr) {
             let lit: syn::LitStr = input.parse()?;
-            Ok((VersionTag::String(lit.value()), lit.span()))
+            Ok((Self::String(lit.value()), lit.span()))
         } else {
             Err(syn::Error::new(
                 input.span(),
@@ -55,11 +55,11 @@ impl VersionTag {
     }
 }
 
-impl std::fmt::Display for VersionTag {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for VersionTag {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            VersionTag::Int(i) => write!(f, "{}", i),
-            VersionTag::String(s) => write!(f, "{}", s),
+            Self::Int(i) => write!(f, "{i}"),
+            Self::String(s) => write!(f, "{s}"),
         }
     }
 }
@@ -67,11 +67,11 @@ impl std::fmt::Display for VersionTag {
 impl quote::ToTokens for VersionTag {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         match self {
-            VersionTag::Int(i) => {
+            Self::Int(i) => {
                 let lit = syn::LitInt::new(&i.to_string(), proc_macro2::Span::call_site());
                 lit.to_tokens(tokens);
             }
-            VersionTag::String(s) => {
+            Self::String(s) => {
                 let lit = syn::LitStr::new(s, proc_macro2::Span::call_site());
                 lit.to_tokens(tokens);
             }
@@ -81,7 +81,7 @@ impl quote::ToTokens for VersionTag {
 
 /// Represents a single version entry inside the compat macro body.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "fields used across macro parsing and validation")]
 pub struct VersionEntry {
     pub outer_attrs: Vec<Attribute>,
     pub tag: VersionTag,
@@ -91,9 +91,212 @@ pub struct VersionEntry {
     pub explicit_next: Option<(VersionTag, proc_macro2::Span)>,
 }
 
+/// Arguments parsed from the `#[backwards_compat(...)]` attribute.
+#[derive(Debug, Clone)]
+#[allow(dead_code, reason = "fields used in macro attribute parsing")]
+pub struct BackwardsCompatArgs {
+    pub tag_field: String,
+    pub current_version: Option<(VersionTag, proc_macro2::Span)>,
+    pub error_ty: Option<syn::Type>,
+    pub dump: bool,
+    pub versions: Vec<VersionEntry>,
+}
+
+impl Parse for BackwardsCompatArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut tag_field = "version".to_owned();
+        let mut current_version = None;
+        let mut error_ty = None;
+        let mut dump = false;
+        let mut versions = Vec::new();
+
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            let ident_str = ident.to_string();
+
+            if ident_str == "tag" {
+                if input.peek(Token![=]) {
+                    input.parse::<Token![=]>()?;
+                    let s: syn::LitStr = input.parse()?;
+                    tag_field = s.value();
+                } else if input.peek(syn::token::Paren) {
+                    let inner;
+                    syn::parenthesized!(inner in input);
+                    let s: syn::LitStr = inner.parse()?;
+                    tag_field = s.value();
+                } else {
+                    return Err(syn::Error::new(ident.span(), "expected `=` or `()` for tag"));
+                }
+            } else if ident_str == "version" {
+                if input.peek(Token![=]) {
+                    input.parse::<Token![=]>()?;
+                    let (v, span) = VersionTag::parse(input)?;
+                    current_version = Some((v, span));
+                } else if input.peek(syn::token::Paren) {
+                    let inner;
+                    syn::parenthesized!(inner in input);
+                    let (v, span) = VersionTag::parse(&inner)?;
+                    current_version = Some((v, span));
+                } else {
+                    return Err(syn::Error::new(ident.span(), "expected `=` or `()` for version"));
+                }
+            } else if ident_str == "error" {
+                if input.peek(Token![=]) {
+                    input.parse::<Token![=]>()?;
+                    error_ty = Some(input.parse()?);
+                } else if input.peek(syn::token::Paren) {
+                    let inner;
+                    syn::parenthesized!(inner in input);
+                    error_ty = Some(inner.parse()?);
+                } else {
+                    return Err(syn::Error::new(ident.span(), "expected `=` or `()` for error"));
+                }
+            } else if ident_str == "dump" {
+                dump = true;
+            } else if ident_str == "versions" {
+                let content;
+                if input.peek(syn::token::Paren) {
+                    syn::parenthesized!(content in input);
+                } else if input.peek(Token![=]) && input.peek2(syn::token::Bracket) {
+                    input.parse::<Token![=]>()?;
+                    syn::bracketed!(content in input);
+                } else if input.peek(Token![=]) && input.peek2(syn::token::Brace) {
+                    input.parse::<Token![=]>()?;
+                    syn::braced!(content in input);
+                } else {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "expected `(...)`, `= [...]`, or `= { ... }` for versions",
+                    ));
+                }
+
+                while !content.is_empty() {
+                    let outer_attrs = content.call(Attribute::parse_outer)?;
+                    let mut fallible = false;
+                    let mut forwarded_version_attrs = Vec::new();
+
+                    for attr in outer_attrs {
+                        if attr.path().is_ident("fallible") || attr.path().is_ident("try_into") {
+                            fallible = true;
+                        } else {
+                            forwarded_version_attrs.push(attr);
+                        }
+                    }
+
+                    let (tag, tag_span) = VersionTag::parse(&content)?;
+                    content.parse::<Token![:]>()?;
+                    let ty: Type = content.parse()?;
+
+                    let explicit_next = if content.peek(Token![=>]) {
+                        content.parse::<Token![=>]>()?;
+                        let (next_tag, next_span) = VersionTag::parse(&content)?;
+                        Some((next_tag, next_span))
+                    } else {
+                        None
+                    };
+
+                    while content.peek(Token![,]) || content.peek(Token![;]) {
+                        if content.peek(Token![,]) {
+                            content.parse::<Token![,]>()?;
+                        } else {
+                            content.parse::<Token![;]>()?;
+                        }
+                    }
+
+                    versions.push(VersionEntry {
+                        outer_attrs: forwarded_version_attrs,
+                        tag,
+                        tag_span,
+                        ty,
+                        fallible,
+                        explicit_next,
+                    });
+                }
+            } else {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!("unknown attribute argument `{ident_str}`"),
+                ));
+            }
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        Ok(Self {
+            tag_field,
+            current_version,
+            error_ty,
+            dump,
+            versions,
+        })
+    }
+}
+
+impl BackwardsCompatArgs {
+    pub fn into_input(self, target_ty: syn::Type, vis: syn::Visibility) -> syn::Result<BackwardsCompatInput> {
+        let versions = self.versions;
+
+        if versions.is_empty() {
+            return Err(syn::Error::new_spanned(
+                &target_ty,
+                "at least one version entry must be declared",
+            ));
+        }
+
+        let (current_version, current_version_span) = if let Some((v, span)) = self.current_version {
+            let matches_declared = versions.iter().any(|entry| entry.tag.matches(&v));
+            let matches_explicit_next = versions.iter().any(|entry| {
+                entry
+                    .explicit_next
+                    .as_ref()
+                    .is_some_and(|(next_tag, _)| next_tag.matches(&v))
+            });
+            let is_implicit_terminal = versions.last().is_some_and(|entry| entry.explicit_next.is_none());
+
+            if !matches_declared && !matches_explicit_next && !is_implicit_terminal {
+                return Err(syn::Error::new(
+                    span,
+                    format!("version `{v}` does not match any declared version"),
+                ));
+            }
+            (v, span)
+        } else {
+            let last = versions.last().unwrap();
+            (last.tag.clone(), last.tag_span)
+        };
+
+        for (i, entry) in versions.iter().enumerate() {
+            if let Some(prev_slice) = versions.get(..i) {
+                for prev in prev_slice {
+                    if entry.tag.matches(&prev.tag) {
+                        return Err(syn::Error::new(
+                            entry.tag_span,
+                            format!("duplicate version tag `{}`", entry.tag),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(BackwardsCompatInput {
+            outer_attrs: Vec::new(),
+            vis,
+            target_ty,
+            tag_field: self.tag_field,
+            current_version,
+            current_version_span,
+            error_ty: self.error_ty,
+            dump: self.dump,
+            versions,
+        })
+    }
+}
+
 /// Represents the parsed input of a `backwards_compat!` macro invocation.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "fields used in macro code generation")]
 pub struct BackwardsCompatInput {
     pub outer_attrs: Vec<Attribute>,
     pub vis: Visibility,
@@ -108,7 +311,7 @@ pub struct BackwardsCompatInput {
 
 impl Parse for BackwardsCompatInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut tag_field = "version".to_string();
+        let mut tag_field = "version".to_owned();
         let mut current_version_opt: Option<(VersionTag, proc_macro2::Span)> = None;
         let mut error_ty = None;
         let mut dump = false;
@@ -135,7 +338,7 @@ impl Parse for BackwardsCompatInput {
                             let s: syn::LitStr = inner.parse()?;
                             tag_field = s.value();
                         } else {
-                            tag_field = "version".to_string();
+                            "version".clone_into(&mut tag_field);
                         }
                     } else if ident_str == "version" {
                         content.parse::<Ident>()?;
@@ -233,7 +436,7 @@ impl Parse for BackwardsCompatInput {
         if compat_ident != "compat" {
             return Err(syn::Error::new(
                 compat_ident.span(),
-                format!("expected `compat`, found `{}`", compat_ident),
+                format!("expected `compat`, found `{compat_ident}`"),
             ));
         }
 
@@ -262,12 +465,13 @@ impl Parse for BackwardsCompatInput {
 
             let ty: Type = content_stream.parse()?;
 
-            let mut explicit_next = None;
-            if content_stream.peek(Token![=>]) {
+            let explicit_next = if content_stream.peek(Token![=>]) {
                 content_stream.parse::<Token![=>]>()?;
                 let (next_tag, next_span) = VersionTag::parse(&content_stream)?;
-                explicit_next = Some((next_tag, next_span));
-            }
+                Some((next_tag, next_span))
+            } else {
+                None
+            };
 
             while content_stream.peek(Token![,]) || content_stream.peek(Token![;]) {
                 if content_stream.peek(Token![,]) {
@@ -294,49 +498,44 @@ impl Parse for BackwardsCompatInput {
             ));
         }
 
-        let (current_version, current_version_span) = match current_version_opt {
-            Some((v, span)) => {
-                let matches_declared = versions.iter().any(|entry| entry.tag.matches(&v));
-                let matches_explicit_next = versions.iter().any(|entry| {
-                    entry
-                        .explicit_next
-                        .as_ref()
-                        .map(|(next_tag, _)| next_tag.matches(&v))
-                        .unwrap_or(false)
-                });
-                let is_implicit_terminal = versions
-                    .last()
-                    .map(|entry| entry.explicit_next.is_none())
-                    .unwrap_or(false);
+        let (current_version, current_version_span) = if let Some((v, span)) = current_version_opt {
+            let matches_declared = versions.iter().any(|entry| entry.tag.matches(&v));
+            let matches_explicit_next = versions.iter().any(|entry| {
+                entry
+                    .explicit_next
+                    .as_ref()
+                    .is_some_and(|(next_tag, _)| next_tag.matches(&v))
+            });
+            let is_implicit_terminal = versions.last().is_some_and(|entry| entry.explicit_next.is_none());
 
-                if !matches_declared && !matches_explicit_next && !is_implicit_terminal {
-                    return Err(syn::Error::new(
-                        span,
-                        format!("version `{}` does not match any declared version", v),
-                    ));
-                }
-                (v, span)
+            if !matches_declared && !matches_explicit_next && !is_implicit_terminal {
+                return Err(syn::Error::new(
+                    span,
+                    format!("version `{v}` does not match any declared version"),
+                ));
             }
-            None => {
-                let last = versions.last().unwrap();
-                (last.tag.clone(), last.tag_span)
-            }
+            (v, span)
+        } else {
+            let last = versions.last().unwrap();
+            (last.tag.clone(), last.tag_span)
         };
 
         // Validation on parse:
         // Ensure no duplicate version tags among declared versions.
         for (i, entry) in versions.iter().enumerate() {
-            for prev in &versions[..i] {
-                if entry.tag.matches(&prev.tag) {
-                    return Err(syn::Error::new(
-                        entry.tag_span,
-                        format!("duplicate version tag `{}`", entry.tag),
-                    ));
+            if let Some(prev_slice) = versions.get(..i) {
+                for prev in prev_slice {
+                    if entry.tag.matches(&prev.tag) {
+                        return Err(syn::Error::new(
+                            entry.tag_span,
+                            format!("duplicate version tag `{}`", entry.tag),
+                        ));
+                    }
                 }
             }
         }
 
-        Ok(BackwardsCompatInput {
+        Ok(Self {
             outer_attrs: forwarded_attrs,
             vis,
             target_ty,
@@ -353,6 +552,195 @@ impl Parse for BackwardsCompatInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_args_basic() {
+        let input = quote::quote! {
+            tag = "schema_version",
+            version = 3,
+            dump,
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2 => 3,
+                3: ModelV3,
+            ]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        assert_eq!(args.tag_field, "schema_version");
+        assert_eq!(args.current_version.unwrap().0, VersionTag::Int(3));
+        assert!(args.dump);
+        assert_eq!(args.versions.len(), 3);
+        assert_eq!(args.versions[0].tag, VersionTag::Int(1));
+    }
+
+    #[test]
+    fn test_parse_args_paren() {
+        let input = quote::quote! {
+            tag("schema_version"),
+            version(3),
+            versions(
+                1: ModelV1 => 2,
+                #[fallible] 2: ModelV2 => 3,
+            )
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        assert_eq!(args.tag_field, "schema_version");
+        assert_eq!(args.current_version.unwrap().0, VersionTag::Int(3));
+        assert_eq!(args.versions.len(), 2);
+        assert!(args.versions[1].fallible);
+    }
+
+    #[test]
+    fn test_parse_args_error_ty() {
+        let input1 = quote::quote! {
+            error = MyCustomError,
+            versions = [ 1: ModelV1 ]
+        };
+        let args1: BackwardsCompatArgs = syn::parse2(input1).unwrap();
+        assert!(args1.error_ty.is_some());
+
+        let input2 = quote::quote! {
+            error(MyCustomError),
+            versions = [ 1: ModelV1 ]
+        };
+        let args2: BackwardsCompatArgs = syn::parse2(input2).unwrap();
+        assert!(args2.error_ty.is_some());
+    }
+
+    #[test]
+    fn test_parse_args_braced_versions() {
+        let input = quote::quote! {
+            versions = {
+                1: ModelV1 => 2,
+                2: ModelV2,
+            }
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        assert_eq!(args.versions.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_args_into_input_success() {
+        let input = quote::quote! {
+            tag = "custom_tag",
+            version = 2,
+            dump,
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2,
+            ]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::parse_quote!(pub);
+        let compat_input = args.into_input(target_ty, vis).unwrap();
+
+        assert_eq!(compat_input.tag_field, "custom_tag");
+        assert_eq!(compat_input.current_version, VersionTag::Int(2));
+        assert!(compat_input.dump);
+        assert_eq!(compat_input.versions.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_args_into_input_default_version() {
+        let input = quote::quote! {
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2,
+            ]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::Visibility::Inherited;
+        let compat_input = args.into_input(target_ty, vis).unwrap();
+
+        assert_eq!(compat_input.current_version, VersionTag::Int(2));
+    }
+
+    #[test]
+    fn test_parse_args_into_input_empty_versions_error() {
+        let input = quote::quote! {
+            versions = []
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::Visibility::Inherited;
+        let err = args.into_input(target_ty, vis).unwrap_err();
+        assert_eq!(err.to_string(), "at least one version entry must be declared");
+    }
+
+    #[test]
+    fn test_parse_args_into_input_duplicate_version_tag_error() {
+        let input = quote::quote! {
+            versions = [
+                1: ModelV1,
+                1: ModelV1Dup,
+            ]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::Visibility::Inherited;
+        let err = args.into_input(target_ty, vis).unwrap_err();
+        assert_eq!(err.to_string(), "duplicate version tag `1`");
+    }
+
+    #[test]
+    fn test_parse_args_into_input_invalid_current_version_error() {
+        let input = quote::quote! {
+            version = 99,
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2 => 1,
+            ]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::Visibility::Inherited;
+        let err = args.into_input(target_ty, vis).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "version `99` does not match any declared version"
+        );
+    }
+
+    #[test]
+    fn test_parse_args_invalid_keys() {
+        let input = quote::quote! {
+            unknown_arg = 123
+        };
+        let err = syn::parse2::<BackwardsCompatArgs>(input).unwrap_err();
+        assert_eq!(err.to_string(), "unknown attribute argument `unknown_arg`");
+    }
+
+    #[test]
+    fn test_parse_args_invalid_syntax() {
+        let input_tag = quote::quote! {
+            tag 123
+        };
+        let err_tag = syn::parse2::<BackwardsCompatArgs>(input_tag).unwrap_err();
+        assert_eq!(err_tag.to_string(), "expected `=` or `()` for tag");
+
+        let input_version = quote::quote! {
+            version 123
+        };
+        let err_version = syn::parse2::<BackwardsCompatArgs>(input_version).unwrap_err();
+        assert_eq!(err_version.to_string(), "expected `=` or `()` for version");
+
+        let input_error = quote::quote! {
+            error 123
+        };
+        let err_error = syn::parse2::<BackwardsCompatArgs>(input_error).unwrap_err();
+        assert_eq!(err_error.to_string(), "expected `=` or `()` for error");
+
+        let input_versions = quote::quote! {
+            versions: [1: ModelV1]
+        };
+        let err_versions = syn::parse2::<BackwardsCompatArgs>(input_versions).unwrap_err();
+        assert_eq!(
+            err_versions.to_string(),
+            "expected `(...)`, `= [...]`, or `= { ... }` for versions"
+        );
+    }
 
     #[test]
     fn test_parse_valid_compat_with_integers() {

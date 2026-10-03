@@ -8,12 +8,13 @@
 //! `backwards-compat` streamlines schema evolution by:
 //! 1. Automatically implementing `serde::Serialize` and `serde::Deserialize` directly for your target model.
 //! 2. Automatically implementing `From<V>` (or `TryFrom<V>`) for your target model from every declared historical version `V`, enabling effortless in-code migrations.
+//! 3. Implicitly generating wire structs, avoiding manual serialization boilerplate for the latest version.
 //!
-//! You declare previous schema versions and their transitions using the `compat TargetModel` syntax:
+//! You apply the `#[backwards_compat(...)]` attribute directly on your domain model:
 //!
 //! ```rust
 //! use backwards_compat::backwards_compat;
-//! use serde::{Deserialize, Serialize};
+//! use serde::Deserialize;
 //!
 //! // 1. Define historical schemas (only Deserialize is required)
 //! #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -21,54 +22,24 @@
 //!     pub name: String,
 //! }
 //!
-//! // Current active wire schema (needs Serialize and Deserialize)
-//! #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-//! pub struct ConfigV2 {
-//!     pub name: String,
-//!     pub port: u16,
-//! }
-//!
-//! impl From<ConfigV1> for ConfigV2 {
-//!     fn from(v1: ConfigV1) -> Self {
-//!         Self {
-//!             name: v1.name,
-//!             port: 8080,
-//!         }
-//!     }
-//! }
-//!
 //! // The target domain model Config does NOT need #[derive(Serialize, Deserialize)].
-//! // backwards_compat! generates Serialize and Deserialize implementations automatically,
-//! // as well as From<ConfigV1> and From<ConfigV2> for Config.
+//! // backwards_compat generates Serialize and Deserialize implementations automatically,
+//! // as well as an implicit ConfigShadowWire struct if needed.
+//! // It also automatically creates From<ConfigV1> to Config conversions based on the chain.
+//! #[backwards_compat(tag = "version", version = 2, versions(1: ConfigV1))]
 //! #[derive(Debug, Clone, PartialEq)]
 //! pub struct Config {
 //!     pub name: String,
 //!     pub port: u16,
 //! }
 //!
-//! impl From<ConfigV2> for Config {
-//!     fn from(v2: ConfigV2) -> Self {
+//! // 2. Implement the migration from previous versions
+//! impl From<ConfigV1> for Config {
+//!     fn from(v1: ConfigV1) -> Self {
 //!         Self {
-//!             name: v2.name,
-//!             port: v2.port,
+//!             name: v1.name,
+//!             port: 8080,
 //!         }
-//!     }
-//! }
-//!
-//! impl From<Config> for ConfigV2 {
-//!     fn from(c: Config) -> Self {
-//!         Self {
-//!             name: c.name,
-//!             port: c.port,
-//!         }
-//!     }
-//! }
-//!
-//! backwards_compat! {
-//!     #[tag = "version", version = 2]
-//!     compat Config {
-//!         1: ConfigV1,
-//!         2: ConfigV2,
 //!     }
 //! }
 //!
@@ -91,12 +62,12 @@
 //!
 //! ## Fallible In-Code Conversion (`TryFrom`)
 //!
-//! When schema transitions are marked `#[fallible]`, `backwards_compat!` generates `TryFrom<V>`
+//! When schema transitions are marked `#[fallible]`, `backwards_compat` generates `TryFrom<V>`
 //! implementations for the target model:
 //!
 //! ```rust
 //! use backwards_compat::backwards_compat;
-//! use serde::{Deserialize, Serialize};
+//! use serde::Deserialize;
 //!
 //! #[derive(Debug, PartialEq)]
 //! pub struct CustomError(pub String);
@@ -110,38 +81,15 @@
 //! #[derive(Debug, Clone, Deserialize)]
 //! pub struct ServerV1 { pub port: u32 }
 //!
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
-//! pub struct ServerV2 { pub port: u16 }
+//! #[backwards_compat(tag = "version", version = 2, error = CustomError, versions(#[fallible] 1: ServerV1))]
+//! #[derive(Debug, Clone, PartialEq)]
+//! pub struct Server { pub port: u16 }
 //!
-//! impl TryFrom<ServerV1> for ServerV2 {
+//! impl TryFrom<ServerV1> for Server {
 //!     type Error = CustomError;
 //!     fn try_from(v1: ServerV1) -> Result<Self, Self::Error> {
 //!         let port = u16::try_from(v1.port).map_err(|_| CustomError("overflow".into()))?;
 //!         Ok(Self { port })
-//!     }
-//! }
-//!
-//! #[derive(Debug, Clone, PartialEq)]
-//! pub struct Server { pub port: u16 }
-//!
-//! impl TryFrom<ServerV2> for Server {
-//!     type Error = CustomError;
-//!     fn try_from(v2: ServerV2) -> Result<Self, Self::Error> {
-//!         Ok(Self { port: v2.port })
-//!     }
-//! }
-//!
-//! impl From<Server> for ServerV2 {
-//!     fn from(s: Server) -> Self {
-//!         Self { port: s.port }
-//!     }
-//! }
-//!
-//! backwards_compat! {
-//!     #[tag = "version", version = 2, error = CustomError]
-//!     compat Server {
-//!         #[fallible] 1: ServerV1,
-//!         #[fallible] 2: ServerV2,
 //!     }
 //! }
 //!
@@ -162,21 +110,55 @@
 //!
 //! ```rust
 //! # use backwards_compat::backwards_compat;
-//! # use serde::{Deserialize, Serialize};
+//! # use serde::Deserialize;
 //! # #[derive(Debug, Clone, PartialEq, Deserialize)]
 //! # pub struct V1 { pub val: i32 }
 //! # #[derive(Debug, Clone, PartialEq, Deserialize)]
 //! # pub struct V2 { pub val: i32 }
-//! # #[derive(Debug, Clone, PartialEq)]
-//! # pub struct V3 { pub val: i32 }
 //! # impl From<V1> for V3 { fn from(v: V1) -> Self { Self { val: v.val } } }
 //! # impl From<V2> for V3 { fn from(v: V2) -> Self { Self { val: v.val } } }
-//! backwards_compat! {
-//!     #[tag = "version", version = 3]
-//!     compat V3 {
-//!         1: V1 => 3,
-//!         2: V2 => 3,
+//! #[backwards_compat(tag = "version", version = 3, versions(1: V1 => 3, 2: V2 => 3))]
+//! #[derive(Debug, Clone, PartialEq)]
+//! pub struct V3 { pub val: i32 }
+//! ```
+//!
+//! ## String Version Keys
+//!
+//! You can use string keys (such as `SemVer` strings) instead of integer versions:
+//!
+//! ```rust
+//! # use backwards_compat::backwards_compat;
+//! # use serde::Deserialize;
+//! # #[derive(Debug, Clone, PartialEq, Deserialize)]
+//! # pub struct V1 { pub val: i32 }
+//! # impl From<V1> for V2 { fn from(v: V1) -> Self { Self { val: v.val } } }
+//! #[backwards_compat(tag = "version", version = "2.0", versions("1.0": V1))]
+//! #[derive(Debug, Clone, PartialEq)]
+//! pub struct V2 { pub val: i32 }
+//! ```
+//!
+//! ## Declarative Alternative
+//!
+//! If you prefer not to apply an attribute macro on your struct (e.g. if you are implementing compatibility across third-party types), you can use the `backwards_compat_decl!` declarative macro:
+//!
+//! ```rust
+//! use backwards_compat::backwards_compat_decl;
+//! use serde::Deserialize;
+//!
+//! #[derive(Debug, Clone, PartialEq, Deserialize)]
+//! pub struct RemoteV1 { pub val: i32 }
+//!
+//! #[derive(Debug, Clone, PartialEq)]
+//! pub struct RemoteV2 { pub val: i32 }
+//!
+//! impl From<RemoteV1> for RemoteV2 { fn from(v: RemoteV1) -> Self { Self { val: v.val } } }
+//!
+//! backwards_compat_decl! {
+//!     #[tag = "version", version = 2]
+//!     compat RemoteV2 {
+//!         1: RemoteV1,
+//!         2: RemoteV2,
 //!     }
 //! }
 //! ```
-pub use backwards_compat_derive::backwards_compat;
+pub use backwards_compat_derive::{backwards_compat, backwards_compat_decl};

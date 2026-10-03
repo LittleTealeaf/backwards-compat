@@ -1,23 +1,23 @@
-use backwards_compat::backwards_compat;
+use backwards_compat::backwards_compat_decl;
+use core::error::Error;
 use serde::{Deserialize, Serialize};
-use std::error::Error;
 
 // =========================================================================
 // 1. Direct in-code `From` conversion (Infallible multi-hop chain)
 // =========================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InfallibleV1 {
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InfallibleV2 {
     pub name: String,
     pub count: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InfallibleV3 {
     pub name: String,
     pub count: u32,
@@ -38,12 +38,12 @@ impl From<InfallibleV2> for InfallibleV3 {
         Self {
             name: v2.name,
             count: v2.count,
-            extra: "default_extra".to_string(),
+            extra: "default_extra".to_owned(),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfallibleTarget {
     pub name: String,
     pub count: u32,
@@ -70,7 +70,7 @@ impl From<InfallibleTarget> for InfallibleV3 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "v", version = 3]
     compat InfallibleTarget {
         1: InfallibleV1,
@@ -82,7 +82,7 @@ backwards_compat! {
 #[test]
 fn test_infallible_from_and_into() {
     let v1 = InfallibleV1 {
-        name: "device_a".to_string(),
+        name: "device_a".to_owned(),
     };
 
     // Direct Target::from(v1)
@@ -91,42 +91,42 @@ fn test_infallible_from_and_into() {
     let target_into_v1: InfallibleTarget = v1.into();
 
     let expected = InfallibleTarget {
-        name: "device_a".to_string(),
+        name: "device_a".to_owned(),
         count: 10,
-        extra: "default_extra".to_string(),
+        extra: "default_extra".to_owned(),
     };
 
     assert_eq!(target_from_v1, expected);
     assert_eq!(target_into_v1, expected);
 
     let v2 = InfallibleV2 {
-        name: "device_b".to_string(),
+        name: "device_b".to_owned(),
         count: 42,
     };
     let target_from_v2 = InfallibleTarget::from(v2.clone());
     let target_into_v2: InfallibleTarget = v2.into();
 
     let expected_v2 = InfallibleTarget {
-        name: "device_b".to_string(),
+        name: "device_b".to_owned(),
         count: 42,
-        extra: "default_extra".to_string(),
+        extra: "default_extra".to_owned(),
     };
 
     assert_eq!(target_from_v2, expected_v2);
     assert_eq!(target_into_v2, expected_v2);
 
     let v3 = InfallibleV3 {
-        name: "device_c".to_string(),
+        name: "device_c".to_owned(),
         count: 99,
-        extra: "custom_extra".to_string(),
+        extra: "custom_extra".to_owned(),
     };
     let target_from_v3 = InfallibleTarget::from(v3.clone());
     let target_into_v3: InfallibleTarget = v3.into();
 
     let expected_v3 = InfallibleTarget {
-        name: "device_c".to_string(),
+        name: "device_c".to_owned(),
         count: 99,
-        extra: "custom_extra".to_string(),
+        extra: "custom_extra".to_owned(),
     };
 
     assert_eq!(target_from_v3, expected_v3);
@@ -137,7 +137,7 @@ fn test_infallible_from_and_into() {
 // 2. Direct in-code `TryFrom` conversion with custom `#[error = MyError]`
 // =========================================================================
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CustomModelError {
     #[error("Value exceeds limit at step 1: {0}")]
     LimitExceededV1(u32),
@@ -145,12 +145,12 @@ pub enum CustomModelError {
     LimitExceededV2(u32),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomErrorV1 {
     pub value: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomErrorV2 {
     pub value: u32,
 }
@@ -166,7 +166,7 @@ impl TryFrom<CustomErrorV1> for CustomErrorV2 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomErrorTarget {
     pub value: u32,
 }
@@ -188,7 +188,7 @@ impl From<CustomErrorTarget> for CustomErrorV2 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "version", version = 2, error = CustomModelError]
     compat CustomErrorTarget {
         #[fallible] 1: CustomErrorV1,
@@ -221,16 +221,16 @@ fn test_custom_error_try_from_success_and_failure() {
 // 3. Direct in-code `TryFrom` without `#[error = ...]` (fallback to Box<dyn Error + Send + Sync>)
 // =========================================================================
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("Parse error: {0}")]
 pub struct StepError(String);
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoxedV1 {
     pub raw: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoxedV2 {
     pub parsed: u64,
 }
@@ -244,7 +244,7 @@ impl TryFrom<BoxedV1> for BoxedV2 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoxedTarget {
     pub parsed: u64,
 }
@@ -254,7 +254,7 @@ impl TryFrom<BoxedV2> for BoxedTarget {
 
     fn try_from(v2: BoxedV2) -> Result<Self, Self::Error> {
         if v2.parsed == 0 {
-            return Err(StepError("zero is not allowed".to_string()));
+            return Err(StepError("zero is not allowed".to_owned()));
         }
         Ok(Self { parsed: v2.parsed })
     }
@@ -266,7 +266,7 @@ impl From<BoxedTarget> for BoxedV2 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "ver", version = 2]
     compat BoxedTarget {
         #[fallible] 1: BoxedV1,
@@ -278,21 +278,21 @@ backwards_compat! {
 fn test_boxed_error_try_from_success_and_failure() {
     // Success
     let v1_valid = BoxedV1 {
-        raw: "12345".to_string(),
+        raw: "12345".to_owned(),
     };
     let target = BoxedTarget::try_from(v1_valid).expect("should succeed");
     assert_eq!(target, BoxedTarget { parsed: 12345 });
 
     // Failure in step 1
     let v1_invalid = BoxedV1 {
-        raw: "not_a_number".to_string(),
+        raw: "not_a_number".to_owned(),
     };
     let err: Result<BoxedTarget, Box<dyn Error + Send + Sync>> = BoxedTarget::try_from(v1_invalid);
     assert!(err.is_err());
     assert!(err.unwrap_err().to_string().contains("invalid digit"));
 
     // Failure in step 2
-    let v1_zero = BoxedV1 { raw: "0".to_string() };
+    let v1_zero = BoxedV1 { raw: "0".to_owned() };
     let err2 = BoxedTarget::try_from(v1_zero);
     assert!(err2.is_err());
     assert!(err2.unwrap_err().to_string().contains("zero is not allowed"));
@@ -302,17 +302,17 @@ fn test_boxed_error_try_from_success_and_failure() {
 // 4. Multi-hop DAG jump with manual conversion (e.g. 1: V1 => 3, 2: V2 => 3, 3: V3)
 // =========================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DagV1 {
     pub legacy_payload: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DagV2 {
     pub intermediate_payload: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DagV3 {
     pub full_name: String,
     pub migrated_from: u32,
@@ -338,7 +338,7 @@ impl From<DagV2> for DagV3 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DagTarget {
     pub full_name: String,
     pub migrated_from: u32,
@@ -362,7 +362,7 @@ impl From<DagTarget> for DagV3 {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "dag_ver", version = 3]
     compat DagTarget {
         1: DagV1 => 3,
@@ -374,28 +374,28 @@ backwards_compat! {
 #[test]
 fn test_dag_jump_manual_conversion() {
     let v1 = DagV1 {
-        legacy_payload: "hello".to_string(),
+        legacy_payload: "hello".to_owned(),
     };
     let target1: DagTarget = DagTarget::from(v1.clone());
     let target1_into: DagTarget = v1.into();
     assert_eq!(
         target1,
         DagTarget {
-            full_name: "v1_migrated:hello".to_string(),
+            full_name: "v1_migrated:hello".to_owned(),
             migrated_from: 1,
         }
     );
     assert_eq!(target1_into, target1);
 
     let v2 = DagV2 {
-        intermediate_payload: "world".to_string(),
+        intermediate_payload: "world".to_owned(),
     };
     let target2: DagTarget = DagTarget::from(v2.clone());
     let target2_into: DagTarget = v2.into();
     assert_eq!(
         target2,
         DagTarget {
-            full_name: "v2_migrated:world".to_string(),
+            full_name: "v2_migrated:world".to_owned(),
             migrated_from: 2,
         }
     );
@@ -406,12 +406,12 @@ fn test_dag_jump_manual_conversion() {
 // 5. Redundant version tags pointing to the same type (deduplication)
 // =========================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedLegacy {
     pub info: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedCurrent {
     pub info: String,
 }
@@ -424,7 +424,7 @@ impl From<SharedLegacy> for SharedCurrent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeduplicatedTarget {
     pub info: String,
 }
@@ -441,7 +441,7 @@ impl From<DeduplicatedTarget> for SharedCurrent {
     }
 }
 
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "v", version = "v2"]
     compat DeduplicatedTarget {
         "v0": SharedLegacy => "v2",
@@ -454,7 +454,7 @@ backwards_compat! {
 #[test]
 fn test_deduplicated_version_tags_trait_impl() {
     let legacy = SharedLegacy {
-        info: "data".to_string(),
+        info: "data".to_owned(),
     };
     let target: DeduplicatedTarget = DeduplicatedTarget::from(legacy.clone());
     let target_into: DeduplicatedTarget = legacy.into();
@@ -462,7 +462,7 @@ fn test_deduplicated_version_tags_trait_impl() {
     assert_eq!(
         target,
         DeduplicatedTarget {
-            info: "shared:data".to_string()
+            info: "shared:data".to_owned()
         }
     );
     assert_eq!(target_into, target);
@@ -472,12 +472,12 @@ fn test_deduplicated_version_tags_trait_impl() {
 // 6. Target model included in the versions list (no reflexive From collision)
 // =========================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfTargetV1 {
     pub value: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfTargetModel {
     pub value: u32,
 }
@@ -491,7 +491,7 @@ impl From<SelfTargetV1> for SelfTargetModel {
 }
 
 // Target model is directly SelfTargetModel, which is also version 2
-backwards_compat! {
+backwards_compat_decl! {
     #[tag = "ver", version = 2]
     compat SelfTargetModel {
         1: SelfTargetV1,
@@ -500,7 +500,10 @@ backwards_compat! {
 }
 
 #[test]
-#[allow(clippy::useless_conversion)]
+#[allow(
+    clippy::useless_conversion,
+    reason = "blanket From<T> for T self-conversion test"
+)]
 fn test_target_in_versions_list() {
     let v1 = SelfTargetV1 { value: 5 };
     let model_from_v1 = SelfTargetModel::from(v1);
@@ -525,7 +528,7 @@ fn test_serde_deserialization_matches_manual_conversion() {
     });
     let serde_target_v1: InfallibleTarget = serde_json::from_value(json_v1).unwrap();
     let manual_v1 = InfallibleV1 {
-        name: "sensor_42".to_string(),
+        name: "sensor_42".to_owned(),
     };
     let manual_target_v1: InfallibleTarget = manual_v1.into();
     assert_eq!(serde_target_v1, manual_target_v1);
@@ -537,7 +540,7 @@ fn test_serde_deserialization_matches_manual_conversion() {
     });
     let serde_target_v2: InfallibleTarget = serde_json::from_value(json_v2).unwrap();
     let manual_v2 = InfallibleV2 {
-        name: "sensor_42".to_string(),
+        name: "sensor_42".to_owned(),
         count: 77,
     };
     let manual_target_v2: InfallibleTarget = manual_v2.into();
@@ -559,7 +562,7 @@ fn test_serde_deserialization_matches_manual_conversion() {
     });
     let serde_dag_target: DagTarget = serde_json::from_value(json_dag_v1).unwrap();
     let manual_dag_target = DagTarget::from(DagV1 {
-        legacy_payload: "test_dag".to_string(),
+        legacy_payload: "test_dag".to_owned(),
     });
     assert_eq!(serde_dag_target, manual_dag_target);
 
@@ -575,7 +578,7 @@ fn test_serde_deserialization_matches_manual_conversion() {
     });
     let serde_shared_v1: DeduplicatedTarget = serde_json::from_value(json_shared_v1).unwrap();
     let manual_shared: DeduplicatedTarget = SharedLegacy {
-        info: "shared_payload".to_string(),
+        info: "shared_payload".to_owned(),
     }
     .into();
     assert_eq!(serde_shared_v0, manual_shared);
