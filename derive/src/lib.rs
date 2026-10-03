@@ -16,9 +16,7 @@ fn is_serde_derive(path: &syn::Path, name: &str) -> bool {
 }
 
 fn is_forwarded_attr(attr: &syn::Attribute) -> bool {
-    const FORWARDED_ATTRS: &[&str] = &[
-        "doc", "serde", "allow", "warn", "deny", "forbid", "cfg", "cfg_attr",
-    ];
+    const FORWARDED_ATTRS: &[&str] = &["serde", "allow", "warn", "deny", "forbid", "cfg", "cfg_attr"];
     FORWARDED_ATTRS.iter().any(|&name| attr.path().is_ident(name))
 }
 
@@ -167,8 +165,9 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     if dag_plan.target_is_wire {
-        let shadow_ident = quote::format_ident!("__{}ShadowWire", target_ident);
-        let borrowed_ident = quote::format_ident!("__{}BorrowedWire", target_ident);
+        let call_site_span = proc_macro2::Span::call_site();
+        let shadow_ident = quote::format_ident!("__{}ShadowWire", target_ident, span = call_site_span);
+        let borrowed_ident = quote::format_ident!("__{}BorrowedWire", target_ident, span = call_site_span);
 
         let generics = &item_struct.generics;
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -184,6 +183,9 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
         let mut shadow_fields = item_struct.fields.clone();
         for field in &mut shadow_fields {
             field.attrs.retain(is_forwarded_attr);
+            if let Some(ref mut ident) = field.ident {
+                ident.set_span(call_site_span);
+            }
         }
 
         let owned_struct_def = quote::quote! {
@@ -249,10 +251,12 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
                         let field_attrs: Vec<_> =
                             f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
                         let field_ident = f.ident.as_ref().unwrap();
+                        let mut borrowed_field_ident = field_ident.clone();
+                        borrowed_field_ident.set_span(call_site_span);
                         let field_ty = &f.ty;
                         borrowed_named.push(quote::quote! {
                             #(#field_attrs)*
-                            #field_ident: &'__wire #field_ty
+                            #borrowed_field_ident: &'__wire #field_ty
                         });
                         field_idents.push(field_ident);
                     }
@@ -437,7 +441,7 @@ mod tests {
         let derive_attr: syn::Attribute = syn::parse_quote!(#[derive(Debug)]);
         let custom_attr: syn::Attribute = syn::parse_quote!(#[custom_attribute]);
 
-        assert!(is_forwarded_attr(&doc_attr));
+        assert!(!is_forwarded_attr(&doc_attr));
         assert!(is_forwarded_attr(&serde_attr));
         assert!(is_forwarded_attr(&allow_attr));
         assert!(is_forwarded_attr(&warn_attr));
