@@ -1,18 +1,18 @@
 use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct UserV1 {
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct UserV2 {
     pub name: String,
     pub email: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserV3 {
     pub name: String,
     pub email: String,
@@ -23,7 +23,7 @@ impl From<UserV1> for UserV2 {
     fn from(v1: UserV1) -> Self {
         Self {
             name: v1.name,
-            email: "unknown@example.com".to_string(),
+            email: "unknown@example.com".to_owned(),
         }
     }
 }
@@ -38,7 +38,7 @@ impl From<UserV2> for UserV3 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub name: String,
     pub email: String,
@@ -81,8 +81,8 @@ fn test_json_upgrade_from_v1() {
     assert_eq!(
         user,
         User {
-            name: "Alice".to_string(),
-            email: "unknown@example.com".to_string(),
+            name: "Alice".to_owned(),
+            email: "unknown@example.com".to_owned(),
             is_admin: false,
         }
     );
@@ -95,8 +95,8 @@ fn test_json_upgrade_from_v2() {
     assert_eq!(
         user,
         User {
-            name: "Bob".to_string(),
-            email: "bob@example.com".to_string(),
+            name: "Bob".to_owned(),
+            email: "bob@example.com".to_owned(),
             is_admin: false,
         }
     );
@@ -110,8 +110,8 @@ fn test_json_upgrade_from_v3() {
     assert_eq!(
         user,
         User {
-            name: "Charlie".to_string(),
-            email: "charlie@example.com".to_string(),
+            name: "Charlie".to_owned(),
+            email: "charlie@example.com".to_owned(),
             is_admin: true,
         }
     );
@@ -120,8 +120,8 @@ fn test_json_upgrade_from_v3() {
 #[test]
 fn test_serialization_uses_latest_version() {
     let user = User {
-        name: "Dana".to_string(),
-        email: "dana@example.com".to_string(),
+        name: "Dana".to_owned(),
+        email: "dana@example.com".to_owned(),
         is_admin: true,
     };
     let json = serde_json::to_string(&user).unwrap();
@@ -134,8 +134,8 @@ fn test_serialization_uses_latest_version() {
 #[test]
 fn test_ron_support() {
     let user = User {
-        name: "Eve".to_string(),
-        email: "eve@example.com".to_string(),
+        name: "Eve".to_owned(),
+        email: "eve@example.com".to_owned(),
         is_admin: false,
     };
     let ron_str = ron::to_string(&user).unwrap();
@@ -148,8 +148,8 @@ fn test_ron_support() {
 #[test]
 fn test_toml_support() {
     let user = User {
-        name: "Frank".to_string(),
-        email: "frank@example.com".to_string(),
+        name: "Frank".to_owned(),
+        email: "frank@example.com".to_owned(),
         is_admin: true,
     };
     let toml_str = toml::to_string(&user).unwrap();

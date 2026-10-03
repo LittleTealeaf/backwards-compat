@@ -2,7 +2,7 @@ use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum MigrationError {
     #[error("Legacy port {0} is invalid")]
     InvalidPort(u32),
@@ -10,12 +10,12 @@ pub enum MigrationError {
     Validation(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfigV1 {
     pub port: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfigV2 {
     pub port: u16,
 }
@@ -32,7 +32,7 @@ impl TryFrom<ServerConfigV1> for ServerConfigV2 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub port: u16,
 }
@@ -42,7 +42,7 @@ impl TryFrom<ServerConfigV2> for ServerConfig {
 
     fn try_from(v2: ServerConfigV2) -> Result<Self, Self::Error> {
         if v2.port == 0 {
-            return Err(MigrationError::Validation("Port cannot be 0".to_string()));
+            return Err(MigrationError::Validation("Port cannot be 0".to_owned()));
         }
         Ok(Self { port: v2.port })
     }

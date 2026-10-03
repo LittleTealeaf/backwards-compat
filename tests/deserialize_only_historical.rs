@@ -2,19 +2,19 @@ use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 
 // Historical schemas: only implement Deserialize (NOT Serialize)
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LegacyV1 {
     pub legacy_name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LegacyV2 {
     pub name: String,
     pub count: u32,
 }
 
 // Current wire schema: implements Serialize and Deserialize
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegacyV3 {
     pub name: String,
     pub count: u32,
@@ -41,7 +41,7 @@ impl From<LegacyV2> for LegacyV3 {
 }
 
 // Domain model
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModernModel {
     pub name: String,
     pub count: u32,
@@ -84,7 +84,7 @@ fn test_deserialization_from_historical_versions_without_serialize() {
     assert_eq!(
         model1,
         ModernModel {
-            name: "v1_item".to_string(),
+            name: "v1_item".to_owned(),
             count: 1,
             active: true,
         }
@@ -95,7 +95,7 @@ fn test_deserialization_from_historical_versions_without_serialize() {
     assert_eq!(
         model2,
         ModernModel {
-            name: "v2_item".to_string(),
+            name: "v2_item".to_owned(),
             count: 42,
             active: true,
         }
@@ -106,7 +106,7 @@ fn test_deserialization_from_historical_versions_without_serialize() {
     assert_eq!(
         model3,
         ModernModel {
-            name: "v3_item".to_string(),
+            name: "v3_item".to_owned(),
             count: 100,
             active: false,
         }
@@ -116,7 +116,7 @@ fn test_deserialization_from_historical_versions_without_serialize() {
 #[test]
 fn test_serialization_emits_current_version_tag_and_fields() {
     let model = ModernModel {
-        name: "test_serialize".to_string(),
+        name: "test_serialize".to_owned(),
         count: 7,
         active: true,
     };

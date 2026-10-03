@@ -25,7 +25,7 @@ use parse::{BackwardsCompatArgs, BackwardsCompatInput};
 #[proc_macro]
 pub fn backwards_compat_decl(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as BackwardsCompatInput);
-    match codegen::generate_backwards_compat(parsed, None, None) {
+    match codegen::generate_backwards_compat(&parsed, None, None) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -143,7 +143,7 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
             #from_impls
         };
 
-        let codegen_tokens = match codegen::generate_backwards_compat(input, Some(&shadow_ident), Some(shadow_tokens)) {
+        let codegen_tokens = match codegen::generate_backwards_compat(&input, Some(&shadow_ident), Some(shadow_tokens)) {
             Ok(t) => t,
             Err(err) => return err.to_compile_error().into(),
         };
@@ -154,7 +154,7 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
         .into()
     } else {
-        let codegen_tokens = match codegen::generate_backwards_compat(input, None, None) {
+        let codegen_tokens = match codegen::generate_backwards_compat(&input, None, None) {
             Ok(t) => t,
             Err(err) => return err.to_compile_error().into(),
         };

@@ -2,7 +2,7 @@ use backwards_compat::backwards_compat_decl;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum SchemaError {
     #[error("Validation error: {0}")]
     Validation(String),
@@ -16,13 +16,14 @@ pub struct SchemaV1 {
 }
 
 // V2: Untagged format with player counts and rounded score
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaV2 {
     pub player_count: usize,
     pub score: u32,
 }
 
 impl From<SchemaV1> for SchemaV2 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "intentional test score rounding")]
     fn from(v1: SchemaV1) -> Self {
         Self {
             player_count: v1.players.len(),
@@ -32,7 +33,7 @@ impl From<SchemaV1> for SchemaV2 {
 }
 
 // V3: Can be tagged (version "3") OR untagged legacy!
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaV3 {
     pub player_count: usize,
     pub score: u32,
@@ -50,7 +51,7 @@ impl From<SchemaV2> for SchemaV3 {
 }
 
 // V4: Tagged only (version "4")
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaV4 {
     pub player_count: usize,
     pub score: u32,
@@ -64,13 +65,13 @@ impl From<SchemaV3> for SchemaV4 {
             player_count: v3.player_count,
             score: v3.score,
             active: v3.active,
-            tag: "migrated".to_string(),
+            tag: "migrated".to_owned(),
         }
     }
 }
 
 // V5: Tagged only (version "5")
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaV5 {
     pub player_count: usize,
     pub score: u32,
@@ -92,7 +93,7 @@ impl From<SchemaV4> for SchemaV5 {
 }
 
 // Domain Model Target Struct
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalModel {
     pub player_count: usize,
     pub score: u32,
@@ -106,7 +107,7 @@ impl TryFrom<SchemaV5> for FinalModel {
 
     fn try_from(v5: SchemaV5) -> Result<Self, Self::Error> {
         if v5.player_count > 100 {
-            return Err(SchemaError::Validation("Too many players".to_string()));
+            return Err(SchemaError::Validation("Too many players".to_owned()));
         }
         Ok(Self {
             player_count: v5.player_count,
@@ -206,7 +207,7 @@ fn test_target_serde_roundtrip() {
         player_count: 12,
         score: 150,
         active: true,
-        tag: "pro".to_string(),
+        tag: "pro".to_owned(),
         revision: 2,
     };
     let json = serde_json::to_string(&model).unwrap();

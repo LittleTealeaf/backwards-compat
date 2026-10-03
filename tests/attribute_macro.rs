@@ -2,7 +2,7 @@ use backwards_compat::backwards_compat;
 use serde::{Deserialize, Serialize};
 
 // Case 1: Target is wire (shadow wire struct generated) with named fields
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct UserV1 {
     pub name: String,
 }
@@ -14,7 +14,7 @@ pub struct UserV1 {
         1: UserV1,
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub name: String,
     pub age: u32,
@@ -30,7 +30,7 @@ impl From<UserV1> for User {
 }
 
 // Case 2: Target is wire with tuple struct
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PointV1(pub i32);
 
 #[backwards_compat(
@@ -40,17 +40,17 @@ pub struct PointV1(pub i32);
         1: PointV1,
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Point(pub i32, pub i32);
 
 impl From<PointV1> for Point {
     fn from(v1: PointV1) -> Self {
-        Point(v1.0, 0)
+        Self(v1.0, 0)
     }
 }
 
 // Case 3: Target is wire with unit struct
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct EmptyV1;
 
 #[backwards_compat(
@@ -60,22 +60,22 @@ pub struct EmptyV1;
         1: EmptyV1,
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Empty;
 
 impl From<EmptyV1> for Empty {
     fn from(_: EmptyV1) -> Self {
-        Empty
+        Self
     }
 }
 
 // Case 4: Target is NOT wire (separate wire struct)
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SeparateV1 {
     pub val: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeparateWire {
     pub val: i32,
     pub extra: String,
@@ -85,7 +85,7 @@ impl From<SeparateV1> for SeparateWire {
     fn from(v1: SeparateV1) -> Self {
         Self {
             val: v1.val,
-            extra: "wire".to_string(),
+            extra: "wire".to_owned(),
         }
     }
 }
@@ -98,7 +98,7 @@ impl From<SeparateV1> for SeparateWire {
         2: SeparateWire,
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeparateTarget {
     pub val: i32,
     pub extra: String,
@@ -123,7 +123,7 @@ impl From<SeparateTarget> for SeparateWire {
 }
 
 // Case 5: Preserved serde attributes on target struct
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CamelV1 {
     pub first_name: String,
 }
@@ -135,7 +135,7 @@ pub struct CamelV1 {
         1: CamelV1,
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CamelUser {
     pub first_name: String,
@@ -146,13 +146,13 @@ impl From<CamelV1> for CamelUser {
     fn from(v1: CamelV1) -> Self {
         Self {
             first_name: v1.first_name,
-            last_name: "Doe".to_string(),
+            last_name: "Doe".to_owned(),
         }
     }
 }
 
 // Case 5b: Field-level serde attributes
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct FieldV1 {
     pub name: String,
 }
@@ -164,7 +164,7 @@ pub struct FieldV1 {
         1: FieldV1,
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldUser {
     #[serde(rename = "user_name")]
     pub name: String,
@@ -177,12 +177,12 @@ impl From<FieldV1> for FieldUser {
 }
 
 // Case 6: Fallible migration and DAG transitions
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DagV1 {
     pub raw: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DagV2 {
     pub count: usize,
 }
@@ -196,13 +196,13 @@ pub struct DagV2 {
         2: DagV2 => 3,
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DagTarget {
     pub count: usize,
 }
 
 impl TryFrom<DagV1> for DagTarget {
-    type Error = std::num::ParseIntError;
+    type Error = core::num::ParseIntError;
     fn try_from(v1: DagV1) -> Result<Self, Self::Error> {
         let count = v1.raw.parse()?;
         Ok(Self { count })
@@ -222,7 +222,7 @@ fn test_attribute_macro_named_struct_shadow_wire() {
     assert_eq!(
         user_from_v1,
         User {
-            name: "Alice".to_string(),
+            name: "Alice".to_owned(),
             age: 18,
         }
     );
@@ -232,7 +232,7 @@ fn test_attribute_macro_named_struct_shadow_wire() {
     assert_eq!(
         user_from_v2,
         User {
-            name: "Bob".to_string(),
+            name: "Bob".to_owned(),
             age: 30,
         }
     );
@@ -247,12 +247,12 @@ fn test_attribute_macro_named_struct_shadow_wire() {
 
     // Direct From conversion
     let direct_user = User::from(UserV1 {
-        name: "Carol".to_string(),
+        name: "Carol".to_owned(),
     });
     assert_eq!(
         direct_user,
         User {
-            name: "Carol".to_string(),
+            name: "Carol".to_owned(),
             age: 18,
         }
     );
@@ -263,7 +263,7 @@ fn test_attribute_macro_tuple_struct() {
     let pt = Point(10, 20);
     let serialized_res = serde_json::to_string(&pt);
     // In Serde, internally tagged enums cannot serialize tuple structs into maps
-    assert!(serialized_res.is_err());
+    serialized_res.unwrap_err();
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn test_attribute_macro_separate_wire() {
         target1,
         SeparateTarget {
             val: 100,
-            extra: "wire".to_string(),
+            extra: "wire".to_owned(),
         }
     );
 
@@ -298,7 +298,7 @@ fn test_attribute_macro_separate_wire() {
         target2,
         SeparateTarget {
             val: 200,
-            extra: "custom".to_string(),
+            extra: "custom".to_owned(),
         }
     );
 
@@ -315,8 +315,8 @@ fn test_attribute_macro_preserved_serde_attributes() {
     assert_eq!(
         user,
         CamelUser {
-            first_name: "John".to_string(),
-            last_name: "Smith".to_string(),
+            first_name: "John".to_owned(),
+            last_name: "Smith".to_owned(),
         }
     );
 
@@ -332,7 +332,7 @@ fn test_attribute_macro_field_serde_attributes() {
     assert_eq!(
         user,
         FieldUser {
-            name: "Alice".to_string(),
+            name: "Alice".to_owned(),
         }
     );
 
@@ -356,5 +356,5 @@ fn test_attribute_macro_fallible_and_dag() {
 
     let json_v1_invalid = r#"{"version": "1", "raw": "not_a_number"}"#;
     let res: Result<DagTarget, _> = serde_json::from_str(json_v1_invalid);
-    assert!(res.is_err());
+    res.unwrap_err();
 }

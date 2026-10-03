@@ -5,25 +5,25 @@ use serde::{Deserialize, Serialize};
 // 1. String Literal Version Keys ("0.1", "1.0", "2.0")
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub name: String,
     pub port: u16,
     pub features: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfigV0_1 {
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfigV1_0 {
     pub name: String,
     pub port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfigV2_0 {
     pub name: String,
     pub port: u16,
@@ -44,7 +44,7 @@ impl From<AppConfigV1_0> for AppConfigV2_0 {
         Self {
             name: v1.name,
             port: v1.port,
-            features: vec!["default".to_string()],
+            features: vec!["default".to_owned()],
         }
     }
 }
@@ -85,9 +85,9 @@ fn test_string_keys_json_upgrade_from_v0_1() {
     assert_eq!(
         config,
         AppConfig {
-            name: "MyApp".to_string(),
+            name: "MyApp".to_owned(),
             port: 8080,
-            features: vec!["default".to_string()],
+            features: vec!["default".to_owned()],
         }
     );
 }
@@ -99,9 +99,9 @@ fn test_string_keys_json_upgrade_from_v1_0() {
     assert_eq!(
         config,
         AppConfig {
-            name: "MyApp".to_string(),
+            name: "MyApp".to_owned(),
             port: 9000,
-            features: vec!["default".to_string()],
+            features: vec!["default".to_owned()],
         }
     );
 }
@@ -113,9 +113,9 @@ fn test_string_keys_json_upgrade_from_v2_0() {
     assert_eq!(
         config,
         AppConfig {
-            name: "MyApp".to_string(),
+            name: "MyApp".to_owned(),
             port: 3000,
-            features: vec!["auth".to_string(), "metrics".to_string()],
+            features: vec!["auth".to_owned(), "metrics".to_owned()],
         }
     );
 }
@@ -123,15 +123,14 @@ fn test_string_keys_json_upgrade_from_v2_0() {
 #[test]
 fn test_string_keys_serialization_emits_target_version() {
     let config = AppConfig {
-        name: "CloudService".to_string(),
+        name: "CloudService".to_owned(),
         port: 443,
-        features: vec!["tls".to_string(), "http2".to_string()],
+        features: vec!["tls".to_owned(), "http2".to_owned()],
     };
     let json = serde_json::to_string(&config).unwrap();
     assert!(
         json.contains(r#""version":"2.0""#),
-        "JSON output should contain target version '2.0': {}",
-        json
+        "JSON output should contain target version '2.0': {json}"
     );
 
     let roundtrip: AppConfig = serde_json::from_str(&json).unwrap();
@@ -141,15 +140,14 @@ fn test_string_keys_serialization_emits_target_version() {
 #[test]
 fn test_string_keys_ron_support() {
     let config = AppConfig {
-        name: "RonApp".to_string(),
+        name: "RonApp".to_owned(),
         port: 8000,
-        features: vec!["cache".to_string()],
+        features: vec!["cache".to_owned()],
     };
     let ron_str = ron::to_string(&config).unwrap();
     assert!(
         ron_str.contains("version") && ron_str.contains(r#""2.0""#),
-        "RON output should contain version '2.0': {}",
-        ron_str
+        "RON output should contain version '2.0': {ron_str}"
     );
 
     let roundtrip: AppConfig = ron::from_str(&ron_str).unwrap();
@@ -161,9 +159,9 @@ fn test_string_keys_ron_support() {
     assert_eq!(
         migrated_v0,
         AppConfig {
-            name: "OldRon".to_string(),
+            name: "OldRon".to_owned(),
             port: 8080,
-            features: vec!["default".to_string()],
+            features: vec!["default".to_owned()],
         }
     );
 
@@ -172,9 +170,9 @@ fn test_string_keys_ron_support() {
     assert_eq!(
         migrated_v1,
         AppConfig {
-            name: "MidRon".to_string(),
+            name: "MidRon".to_owned(),
             port: 5000,
-            features: vec!["default".to_string()],
+            features: vec!["default".to_owned()],
         }
     );
 }
@@ -182,15 +180,14 @@ fn test_string_keys_ron_support() {
 #[test]
 fn test_string_keys_toml_support() {
     let config = AppConfig {
-        name: "TomlApp".to_string(),
+        name: "TomlApp".to_owned(),
         port: 7000,
-        features: vec!["toml_support".to_string()],
+        features: vec!["toml_support".to_owned()],
     };
     let toml_str = toml::to_string(&config).unwrap();
     assert!(
         toml_str.contains(r#"version = "2.0""#),
-        "TOML output should contain version = '2.0': {}",
-        toml_str
+        "TOML output should contain version = '2.0': {toml_str}"
     );
 
     let roundtrip: AppConfig = toml::from_str(&toml_str).unwrap();
@@ -202,9 +199,9 @@ fn test_string_keys_toml_support() {
     assert_eq!(
         migrated_v0,
         AppConfig {
-            name: "OldToml".to_string(),
+            name: "OldToml".to_owned(),
             port: 8080,
-            features: vec!["default".to_string()],
+            features: vec!["default".to_owned()],
         }
     );
 
@@ -213,9 +210,9 @@ fn test_string_keys_toml_support() {
     assert_eq!(
         migrated_v1,
         AppConfig {
-            name: "MidToml".to_string(),
+            name: "MidToml".to_owned(),
             port: 5000,
-            features: vec!["default".to_string()],
+            features: vec!["default".to_owned()],
         }
     );
 }
@@ -229,24 +226,24 @@ fn test_string_keys_toml_support() {
 //    Crucially: V1 does NOT implement From<V1> for V2.
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyModel {
     pub message: String,
     pub count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JumpV1 {
     pub msg: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JumpV2 {
     pub intermediate_note: String,
     pub intermediate_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JumpV3 {
     pub message: String,
     pub count: usize,
@@ -309,7 +306,7 @@ fn test_dag_jump_from_v1_bypasses_v2() {
     assert_eq!(
         model,
         MyModel {
-            message: "v1_shortcut: hello from v1".to_string(),
+            message: "v1_shortcut: hello from v1".to_owned(),
             count: 42,
         }
     );
@@ -322,7 +319,7 @@ fn test_dag_jump_from_v2() {
     assert_eq!(
         model,
         MyModel {
-            message: "v2_step: hello from v2".to_string(),
+            message: "v2_step: hello from v2".to_owned(),
             count: 99,
         }
     );
@@ -335,7 +332,7 @@ fn test_dag_jump_from_v3() {
     assert_eq!(
         model,
         MyModel {
-            message: "hello from v3".to_string(),
+            message: "hello from v3".to_owned(),
             count: 7,
         }
     );
@@ -344,14 +341,13 @@ fn test_dag_jump_from_v3() {
 #[test]
 fn test_dag_jump_serialization_emits_target_version() {
     let model = MyModel {
-        message: "hello target".to_string(),
+        message: "hello target".to_owned(),
         count: 100,
     };
     let json = serde_json::to_string(&model).unwrap();
     assert!(
         json.contains(r#""version":"3""#),
-        "Serialized JSON should contain target version '3': {}",
-        json
+        "Serialized JSON should contain target version '3': {json}"
     );
 
     let roundtrip: MyModel = serde_json::from_str(&json).unwrap();
@@ -376,13 +372,13 @@ pub struct TelemetryEvent {
     pub temperature_c: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelemetryV1 {
     pub dev_id: u32,
     pub raw_temp: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelemetryV2 {
     pub device_str: String,
     pub temp_str: String,
@@ -422,12 +418,12 @@ impl TryFrom<TelemetryV2> for TelemetryV4 {
             .map_err(|_| format!("Invalid temperature value: '{}'", v2.temp_str))?;
 
         if temp < -273.15 {
-            return Err(format!("Temperature {} is below absolute zero (-273.15 C)", temp));
+            return Err(format!("Temperature {temp} is below absolute zero (-273.15 C)"));
         }
 
         Ok(Self {
             device_id: v2.device_str,
-            timestamp: 1700000000,
+            timestamp: 1_700_000_000,
             temperature_c: temp,
         })
     }
@@ -439,7 +435,7 @@ impl From<TelemetryV3> for TelemetryV4 {
         let celsius = (v3.temp_f - 32.0) * 5.0 / 9.0;
         Self {
             device_id: v3.id,
-            timestamp: 1700000000,
+            timestamp: 1_700_000_000,
             temperature_c: celsius,
         }
     }
@@ -486,8 +482,8 @@ fn test_fallible_branch_v1_success() {
     assert_eq!(
         event,
         TelemetryEvent {
-            device_id: "DEV-101".to_string(),
-            timestamp: 1700000000,
+            device_id: "DEV-101".to_owned(),
+            timestamp: 1_700_000_000,
             temperature_c: 25.5,
         }
     );
@@ -500,8 +496,7 @@ fn test_fallible_branch_v1_failure_invalid_number() {
     let err = serde_json::from_str::<TelemetryEvent>(raw).unwrap_err();
     assert!(
         err.to_string().contains("Invalid temperature value: 'NOT_A_NUM'"),
-        "Error message should mention parsing failure: {}",
-        err
+        "Error message should mention parsing failure: {err}"
     );
 }
 
@@ -512,8 +507,7 @@ fn test_fallible_branch_v1_failure_below_absolute_zero() {
     let err = serde_json::from_str::<TelemetryEvent>(raw).unwrap_err();
     assert!(
         err.to_string().contains("below absolute zero"),
-        "Error message should mention absolute zero: {}",
-        err
+        "Error message should mention absolute zero: {err}"
     );
 }
 
@@ -525,8 +519,8 @@ fn test_fallible_branch_v2_success() {
     assert_eq!(
         event,
         TelemetryEvent {
-            device_id: "SENSOR-ALPHA".to_string(),
-            timestamp: 1700000000,
+            device_id: "SENSOR-ALPHA".to_owned(),
+            timestamp: 1_700_000_000,
             temperature_c: 100.0,
         }
     );
@@ -539,8 +533,7 @@ fn test_fallible_branch_v2_failure() {
     let err = serde_json::from_str::<TelemetryEvent>(raw).unwrap_err();
     assert!(
         err.to_string().contains("Invalid temperature value: 'CORRUPT'"),
-        "Error message should mention parsing failure: {}",
-        err
+        "Error message should mention parsing failure: {err}"
     );
 }
 
@@ -552,8 +545,8 @@ fn test_infallible_branch_v3_success() {
     assert_eq!(
         event,
         TelemetryEvent {
-            device_id: "SENSOR-BETA".to_string(),
-            timestamp: 1700000000,
+            device_id: "SENSOR-BETA".to_owned(),
+            timestamp: 1_700_000_000,
             temperature_c: 0.0,
         }
     );
@@ -567,8 +560,8 @@ fn test_infallible_v4_success() {
     assert_eq!(
         event,
         TelemetryEvent {
-            device_id: "DIRECT-4".to_string(),
-            timestamp: 123456,
+            device_id: "DIRECT-4".to_owned(),
+            timestamp: 123_456,
             temperature_c: 18.2,
         }
     );
@@ -577,15 +570,14 @@ fn test_infallible_v4_success() {
 #[test]
 fn test_telemetry_serialization_emits_target_version() {
     let event = TelemetryEvent {
-        device_id: "DEV-MAIN".to_string(),
-        timestamp: 1700000000,
+        device_id: "DEV-MAIN".to_owned(),
+        timestamp: 1_700_000_000,
         temperature_c: 21.0,
     };
     let json = serde_json::to_string(&event).unwrap();
     assert!(
         json.contains(r#""version":"4""#),
-        "Serialization should emit target version '4': {}",
-        json
+        "Serialization should emit target version '4': {json}"
     );
 
     let roundtrip: TelemetryEvent = serde_json::from_str(&json).unwrap();

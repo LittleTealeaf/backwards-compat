@@ -13,16 +13,16 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
     let mut seen_types = HashSet::new();
     let mut impls = Vec::new();
 
-    let error_ty_tokens = match &input.error_ty {
-        Some(err_ty) => quote!(#err_ty),
-        None => {
+    let error_ty_tokens = input.error_ty.as_ref().map_or_else(
+        || {
             quote!(
                 ::std::boxed::Box<
                     dyn ::std::error::Error + ::core::marker::Send + ::core::marker::Sync + 'static,
                 >
             )
-        }
-    };
+        },
+        |err_ty| quote!(#err_ty),
+    );
 
     for (i, v) in input.versions.iter().enumerate() {
         let v_ty = &v.ty;
@@ -32,7 +32,9 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
             continue;
         }
 
-        let path = &dag_plan.paths[i];
+        let Some(path) = dag_plan.paths.get(i) else {
+            continue;
+        };
         if path.steps.len() <= 1 {
             continue;
         }
@@ -100,11 +102,11 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
 }
 
 pub fn generate_backwards_compat(
-    input: BackwardsCompatInput,
+    input: &BackwardsCompatInput,
     shadow_struct: Option<&syn::Ident>,
     extra_items: Option<TokenStream>,
 ) -> syn::Result<TokenStream> {
-    let dag_plan = resolve_dag(&input)?;
+    let dag_plan = resolve_dag(input)?;
 
     let target_ty = &input.target_ty;
     let tag_field = &input.tag_field;
@@ -123,7 +125,9 @@ pub fn generate_backwards_compat(
             #var_ident(#ty)
         });
 
-        let path = &dag_plan.paths[i];
+        let Some(path) = dag_plan.paths.get(i) else {
+            continue;
+        };
         let ty_str = quote!(#ty).to_string();
 
         if ty_str == target_ty_str || path.steps.is_empty() {
@@ -177,7 +181,7 @@ pub fn generate_backwards_compat(
         ::serde::Serialize::serialize(&helper, __serializer)
     };
 
-    let conversions = generate_conversions(&input, &dag_plan);
+    let conversions = generate_conversions(input, &dag_plan);
     let extra = extra_items.unwrap_or_default();
 
     let code = quote! {
@@ -342,7 +346,7 @@ mod tests {
         })
         .unwrap();
 
-        let generated = generate_backwards_compat(input, None, None).unwrap();
+        let generated = generate_backwards_compat(&input, None, None).unwrap();
         let rendered = generated.to_string();
 
         assert!(rendered.contains("__VersionHelper :: __V_0 (val) => :: core :: convert :: TryInto :: < TargetModel > :: try_into (val) . map_err (:: serde :: de :: Error :: custom)"));
@@ -362,7 +366,7 @@ mod tests {
         })
         .unwrap();
 
-        let generated = generate_backwards_compat(input, None, None).unwrap();
+        let generated = generate_backwards_compat(&input, None, None).unwrap();
         let rendered = generated.to_string();
 
         // __VersionHelper only derives Deserialize
@@ -386,7 +390,7 @@ mod tests {
         .unwrap();
 
         let shadow = format_ident!("TargetModelWire");
-        let generated = generate_backwards_compat(input, Some(&shadow), None).unwrap();
+        let generated = generate_backwards_compat(&input, Some(&shadow), None).unwrap();
         let rendered = generated.to_string();
 
         assert!(rendered.contains("__VersionHelper :: __V_2 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
@@ -406,7 +410,7 @@ mod tests {
         })
         .unwrap();
 
-        let result = generate_backwards_compat(input, None, None);
+        let result = generate_backwards_compat(&input, None, None);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),

@@ -2,11 +2,11 @@ use backwards_compat::backwards_compat;
 use serde::Deserialize;
 use thiserror::Error;
 
-fn default_port() -> u16 {
+const fn default_port() -> u16 {
     8080
 }
 
-fn default_timeout() -> u64 {
+const fn default_timeout() -> u64 {
     30
 }
 
@@ -19,12 +19,12 @@ fn default_timeout() -> u64 {
 //    - Multiple historical versions: ServerConfigV1 -> ServerConfigV2 -> ServerConfig
 // -----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ServerConfigV1 {
     pub host: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ServerConfigV2 {
     pub host: String,
     pub port: u16,
@@ -47,7 +47,7 @@ impl From<ServerConfigV1> for ServerConfigV2 {
         2: ServerConfigV2 => 3,
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct ServerConfig {
     #[serde(rename = "service-name")]
@@ -68,7 +68,7 @@ impl From<ServerConfigV2> for ServerConfig {
             port: v2.port,
             timeout_seconds: 30,
             use_tls: true,
-            active_endpoints: vec!["/health".to_string()],
+            active_endpoints: vec!["/health".to_owned()],
         }
     }
 }
@@ -77,12 +77,12 @@ impl From<ServerConfigV2> for ServerConfig {
 // 2. Fallible multi-step chain into implicit target struct
 // -----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct MetricV1 {
     pub metric_str: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct MetricV2 {
     pub raw_val: i64,
 }
@@ -90,7 +90,7 @@ pub struct MetricV2 {
 #[derive(Debug, Error)]
 pub enum MetricMigrationError {
     #[error("failed to parse metric value: {0}")]
-    Parse(#[from] std::num::ParseIntError),
+    Parse(#[from] core::num::ParseIntError),
     #[error("metric value cannot be negative: {0}")]
     Negative(i64),
 }
@@ -114,7 +114,7 @@ impl TryFrom<MetricV1> for MetricV2 {
         2: MetricV2 => 3,
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Metric {
     pub value: u64,
     #[serde(default)]
@@ -128,8 +128,8 @@ impl TryFrom<MetricV2> for Metric {
             return Err(MetricMigrationError::Negative(v2.raw_val));
         }
         Ok(Self {
-            value: v2.raw_val as u64,
-            unit: "count".to_string(),
+            value: v2.raw_val.cast_unsigned(),
+            unit: "count".to_owned(),
         })
     }
 }
@@ -138,12 +138,12 @@ impl TryFrom<MetricV2> for Metric {
 // 3. String version tags with multiple historical versions into implicit target
 // -----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DatabaseConfigV1 {
     pub url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DatabaseConfigV2 {
     pub host: String,
     pub port: u16,
@@ -166,7 +166,7 @@ impl From<DatabaseConfigV1> for DatabaseConfigV2 {
         "v2.0": DatabaseConfigV2 => "v3.0",
     )
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     pub host: String,
@@ -220,11 +220,11 @@ fn test_implicit_target_json_deserialization_chain() {
     assert_eq!(
         cfg1,
         ServerConfig {
-            name: "api.example.com".to_string(),
+            name: "api.example.com".to_owned(),
             port: 80,
             timeout_seconds: 30,
             use_tls: true,
-            active_endpoints: vec!["/health".to_string()],
+            active_endpoints: vec!["/health".to_owned()],
         }
     );
 
@@ -234,11 +234,11 @@ fn test_implicit_target_json_deserialization_chain() {
     assert_eq!(
         cfg2,
         ServerConfig {
-            name: "db.example.com".to_string(),
+            name: "db.example.com".to_owned(),
             port: 5432,
             timeout_seconds: 30,
             use_tls: true,
-            active_endpoints: vec!["/health".to_string()],
+            active_endpoints: vec!["/health".to_owned()],
         }
     );
 
@@ -255,11 +255,11 @@ fn test_implicit_target_json_deserialization_chain() {
     assert_eq!(
         cfg3_full,
         ServerConfig {
-            name: "worker.example.com".to_string(),
+            name: "worker.example.com".to_owned(),
             port: 9000,
             timeout_seconds: 60,
             use_tls: false,
-            active_endpoints: vec!["/jobs".to_string(), "/metrics".to_string()],
+            active_endpoints: vec!["/jobs".to_owned(), "/metrics".to_owned()],
         }
     );
 
@@ -273,7 +273,7 @@ fn test_implicit_target_json_deserialization_chain() {
     assert_eq!(
         cfg3_defaults,
         ServerConfig {
-            name: "default.example.com".to_string(),
+            name: "default.example.com".to_owned(),
             port: 8080,
             timeout_seconds: 30,
             use_tls: false,
@@ -285,11 +285,11 @@ fn test_implicit_target_json_deserialization_chain() {
 #[test]
 fn test_implicit_target_json_serialization_roundtrip() {
     let cfg = ServerConfig {
-        name: "gateway".to_string(),
+        name: "gateway".to_owned(),
         port: 443,
         timeout_seconds: 15,
         use_tls: true,
-        active_endpoints: vec!["/".to_string()],
+        active_endpoints: vec!["/".to_owned()],
     };
 
     let serialized = serde_json::to_string(&cfg).unwrap();
@@ -372,11 +372,11 @@ fn test_implicit_target_ron_support() {
 
     // V3 ron serialization and deserialization
     let cfg3 = ServerConfig {
-        name: "ron.v3.com".to_string(),
+        name: "ron.v3.com".to_owned(),
         port: 8080,
         timeout_seconds: 45,
         use_tls: true,
-        active_endpoints: vec!["/status".to_string()],
+        active_endpoints: vec!["/status".to_owned()],
     };
     let serialized = ron::to_string(&cfg3).unwrap();
     assert!(serialized.contains("schema_version:\"3\""));
@@ -394,7 +394,7 @@ fn test_fallible_implicit_target_chain() {
         metric,
         Metric {
             value: 42,
-            unit: "count".to_string(),
+            unit: "count".to_owned(),
         }
     );
 
@@ -405,7 +405,7 @@ fn test_fallible_implicit_target_chain() {
         metric2,
         Metric {
             value: 100,
-            unit: "count".to_string(),
+            unit: "count".to_owned(),
         }
     );
 
@@ -416,7 +416,7 @@ fn test_fallible_implicit_target_chain() {
         metric3,
         Metric {
             value: 500,
-            unit: "".to_string(),
+            unit: String::new(),
         }
     );
 
@@ -443,7 +443,7 @@ fn test_string_keys_implicit_target_support() {
     assert_eq!(
         db1,
         DatabaseConfig {
-            host: "postgres://localhost".to_string(),
+            host: "postgres://localhost".to_owned(),
             port: 5432,
             pool_size: 10,
         }
@@ -455,7 +455,7 @@ fn test_string_keys_implicit_target_support() {
     assert_eq!(
         db2,
         DatabaseConfig {
-            host: "mysql.local".to_string(),
+            host: "mysql.local".to_owned(),
             port: 3306,
             pool_size: 10,
         }
@@ -467,7 +467,7 @@ fn test_string_keys_implicit_target_support() {
     assert_eq!(
         db3,
         DatabaseConfig {
-            host: "redis.local".to_string(),
+            host: "redis.local".to_owned(),
             port: 6379,
             pool_size: 0,
         }
@@ -475,7 +475,7 @@ fn test_string_keys_implicit_target_support() {
 
     // V3 serialization roundtrip
     let db = DatabaseConfig {
-        host: "primary.db".to_string(),
+        host: "primary.db".to_owned(),
         port: 5432,
         pool_size: 25,
     };
@@ -501,5 +501,5 @@ fn test_tuple_struct_implicit_target_from_conversion() {
 
     // Serde internally tagged enums cannot serialize/deserialize tuple structs
     let res = serde_json::to_string(&c2);
-    assert!(res.is_err());
+    res.unwrap_err();
 }

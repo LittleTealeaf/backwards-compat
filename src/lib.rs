@@ -124,7 +124,7 @@
 //!
 //! ## String Version Keys
 //!
-//! You can use string keys (such as SemVer strings) instead of integer versions:
+//! You can use string keys (such as `SemVer` strings) instead of integer versions:
 //!
 //! ```rust
 //! # use backwards_compat::backwards_compat;
