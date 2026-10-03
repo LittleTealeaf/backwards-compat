@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/LittleTealeaf/backwards-compat/compare/v0.6.0...v1.0.0) (2026-10-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove backwards_compat_decl and enhance attribute ergonomics ([#22](https://github.com/LittleTealeaf/backwards-compat/issues/22))
+
+### Features
+
+* remove backwards_compat_decl and enhance attribute ergonomics ([#22](https://github.com/LittleTealeaf/backwards-compat/issues/22)) ([ce79225](https://github.com/LittleTealeaf/backwards-compat/commit/ce79225e645ad4089f8c0ede7c747904c684d012))
+
 ## [0.6.0](https://github.com/LittleTealeaf/backwards-compat/compare/v0.5.0...v0.6.0) (2026-10-03)
 
 
