@@ -1,10 +1,19 @@
-use backwards_compat::backwards_compat_decl;
+use backwards_compat::backwards_compat;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // 1. String Literal Version Keys ("0.1", "1.0", "2.0")
 // ============================================================================
 
+#[backwards_compat(
+    tag = "version",
+    version = "2.0",
+    versions(
+        "0.1": AppConfigV0_1,
+        "1.0": AppConfigV1_0,
+        "2.0": AppConfigV2_0,
+    )
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub name: String,
@@ -66,15 +75,6 @@ impl From<AppConfig> for AppConfigV2_0 {
             port: cfg.port,
             features: cfg.features,
         }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "version"]
-    compat AppConfig {
-        "0.1": AppConfigV0_1,
-        "1.0": AppConfigV1_0,
-        "2.0": AppConfigV2_0,
     }
 }
 
@@ -226,6 +226,11 @@ fn test_string_keys_toml_support() {
 //    Crucially: V1 does NOT implement From<V1> for V2.
 // ============================================================================
 
+#[backwards_compat(
+    tag = "version",
+    version = 3,
+    versions(1: JumpV1 => 3, 2: JumpV2 => 3, 3: JumpV3)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyModel {
     pub message: String,
@@ -287,15 +292,6 @@ impl From<MyModel> for JumpV3 {
             message: m.message,
             count: m.count,
         }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "version"]
-    compat MyModel {
-        1: JumpV1 => 3,
-        2: JumpV2 => 3,
-        3: JumpV3,
     }
 }
 
@@ -365,6 +361,17 @@ fn test_dag_jump_serialization_emits_target_version() {
 //      4: TelemetryV4 (infallible to TelemetryEvent)
 // ============================================================================
 
+#[backwards_compat(
+    tag = "version",
+    version = 4,
+    versions(
+        1: TelemetryV1 => 2,
+        #[fallible]
+        2: TelemetryV2 => 4,
+        3: TelemetryV3 => 4,
+        4: TelemetryV4,
+    )
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TelemetryEvent {
     pub device_id: String,
@@ -460,17 +467,6 @@ impl From<TelemetryEvent> for TelemetryV4 {
             timestamp: event.timestamp,
             temperature_c: event.temperature_c,
         }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "version"]
-    compat TelemetryEvent {
-        1: TelemetryV1 => 2,
-        #[fallible]
-        2: TelemetryV2 => 4,
-        3: TelemetryV3 => 4,
-        4: TelemetryV4,
     }
 }
 

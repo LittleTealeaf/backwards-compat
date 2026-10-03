@@ -1,34 +1,44 @@
 use proc_macro::TokenStream;
-use syn::parse_macro_input;
 
 mod codegen;
 mod dag;
 mod parse;
 
-use parse::{BackwardsCompatArgs, BackwardsCompatInput};
+use parse::BackwardsCompatArgs;
 
-/// Declarative macro for backwards compatibility schema versioning.
-///
-/// This macro allows you to define a backwards compatible enum separately
-/// from the target model, useful when you don't want to attach an attribute macro.
-///
-/// # Example
-/// ```rust,ignore
-/// backwards_compat_decl! {
-///     #[tag = "version", version = 2]
-///     compat Config {
-///         1: ConfigV1,
-///         2: ConfigV2,
-///     }
-/// }
-/// ```
-#[proc_macro]
-pub fn backwards_compat_decl(input: TokenStream) -> TokenStream {
-    let parsed = parse_macro_input!(input as BackwardsCompatInput);
-    match codegen::generate_backwards_compat(&parsed, None, None) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
+fn is_serde_derive(path: &syn::Path, name: &str) -> bool {
+    if path.is_ident(name) {
+        return true;
     }
+    let mut iter = path.segments.iter();
+    match (iter.next(), iter.next(), iter.next()) {
+        (Some(first), Some(second), None) => first.ident == "serde" && second.ident == name,
+        _ => false,
+    }
+}
+
+fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
+    attrs.retain_mut(|attr| {
+        if !attr.path().is_ident("derive") {
+            return true;
+        }
+        let Ok(nested) =
+            attr.parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+        else {
+            return true;
+        };
+
+        let retained: Vec<syn::Path> = nested
+            .into_iter()
+            .filter(|path| !is_serde_derive(path, "Serialize") && !is_serde_derive(path, "Deserialize"))
+            .collect();
+
+        if retained.is_empty() {
+            return false;
+        }
+        *attr = syn::parse_quote!(#[derive(#(#retained),*)]);
+        true
+    });
 }
 
 /// Attribute macro for seamless, zero-boilerplate backwards compatibility versioning.
@@ -51,6 +61,7 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
     cleaned_item_struct
         .attrs
         .retain(|attr| !attr.path().is_ident("serde"));
+    clean_derive_attrs(&mut cleaned_item_struct.attrs);
     for field in &mut cleaned_item_struct.fields {
         field.attrs.retain(|attr| !attr.path().is_ident("serde"));
     }
@@ -84,7 +95,7 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         let shadow_struct_def = quote::quote! {
-            #[allow(non_camel_case_types, dead_code)]
+            #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
             #[doc(hidden)]
             #[derive(::serde::Serialize, ::serde::Deserialize)]
             #(#preserved_attrs)*

@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat_decl;
+use backwards_compat::backwards_compat;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -97,6 +97,18 @@ impl From<SchemaV4> for SchemaV5 {
 }
 
 // Domain Model Target Struct
+#[backwards_compat(
+    tag = "version",
+    version = 5,
+    error = SchemaError,
+    versions(
+        1: SchemaV1,
+        2: SchemaV2,
+        3: SchemaV3,
+        4: SchemaV4,
+        #[fallible] 5: SchemaV5,
+    )
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalModel {
     pub player_count: usize,
@@ -132,17 +144,6 @@ impl From<FinalModel> for SchemaV5 {
             tag: m.tag,
             revision: m.revision,
         }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "version", version = 5, error = SchemaError]
-    compat FinalModel {
-        1: SchemaV1,
-        2: SchemaV2,
-        3: SchemaV3,
-        4: SchemaV4,
-        #[fallible] 5: SchemaV5,
     }
 }
 

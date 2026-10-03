@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat_decl;
+use backwards_compat::backwards_compat;
 use core::error::Error;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,11 @@ impl From<InfallibleV2> for InfallibleV3 {
     }
 }
 
+#[backwards_compat(
+    tag = "v",
+    version = 3,
+    versions(1: InfallibleV1, 2: InfallibleV2, 3: InfallibleV3)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfallibleTarget {
     pub name: String,
@@ -67,15 +72,6 @@ impl From<InfallibleTarget> for InfallibleV3 {
             count: target.count,
             extra: target.extra,
         }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "v", version = 3]
-    compat InfallibleTarget {
-        1: InfallibleV1,
-        2: InfallibleV2,
-        3: InfallibleV3,
     }
 }
 
@@ -166,6 +162,12 @@ impl TryFrom<CustomErrorV1> for CustomErrorV2 {
     }
 }
 
+#[backwards_compat(
+    tag = "version",
+    version = 2,
+    error = CustomModelError,
+    versions(#[fallible] 1: CustomErrorV1, #[fallible] 2: CustomErrorV2)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomErrorTarget {
     pub value: u32,
@@ -185,14 +187,6 @@ impl TryFrom<CustomErrorV2> for CustomErrorTarget {
 impl From<CustomErrorTarget> for CustomErrorV2 {
     fn from(t: CustomErrorTarget) -> Self {
         Self { value: t.value }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "version", version = 2, error = CustomModelError]
-    compat CustomErrorTarget {
-        #[fallible] 1: CustomErrorV1,
-        #[fallible] 2: CustomErrorV2,
     }
 }
 
@@ -244,6 +238,11 @@ impl TryFrom<BoxedV1> for BoxedV2 {
     }
 }
 
+#[backwards_compat(
+    tag = "ver",
+    version = 2,
+    versions(#[fallible] 1: BoxedV1, #[fallible] 2: BoxedV2)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoxedTarget {
     pub parsed: u64,
@@ -263,14 +262,6 @@ impl TryFrom<BoxedV2> for BoxedTarget {
 impl From<BoxedTarget> for BoxedV2 {
     fn from(t: BoxedTarget) -> Self {
         Self { parsed: t.parsed }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "ver", version = 2]
-    compat BoxedTarget {
-        #[fallible] 1: BoxedV1,
-        #[fallible] 2: BoxedV2,
     }
 }
 
@@ -338,6 +329,11 @@ impl From<DagV2> for DagV3 {
     }
 }
 
+#[backwards_compat(
+    tag = "dag_ver",
+    version = 3,
+    versions(1: DagV1 => 3, 2: DagV2 => 3, 3: DagV3)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DagTarget {
     pub full_name: String,
@@ -359,15 +355,6 @@ impl From<DagTarget> for DagV3 {
             full_name: t.full_name,
             migrated_from: t.migrated_from,
         }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "dag_ver", version = 3]
-    compat DagTarget {
-        1: DagV1 => 3,
-        2: DagV2 => 3,
-        3: DagV3,
     }
 }
 
@@ -424,6 +411,16 @@ impl From<SharedLegacy> for SharedCurrent {
     }
 }
 
+#[backwards_compat(
+    tag = "v",
+    version = "v2",
+    versions(
+        "v0": SharedLegacy => "v2",
+        "v1": SharedLegacy => "v2",
+        "v1_alt": SharedLegacy => "v2",
+        "v2": SharedCurrent,
+    )
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeduplicatedTarget {
     pub info: String,
@@ -438,16 +435,6 @@ impl From<SharedCurrent> for DeduplicatedTarget {
 impl From<DeduplicatedTarget> for SharedCurrent {
     fn from(t: DeduplicatedTarget) -> Self {
         Self { info: t.info }
-    }
-}
-
-backwards_compat_decl! {
-    #[tag = "v", version = "v2"]
-    compat DeduplicatedTarget {
-        "v0": SharedLegacy => "v2",
-        "v1": SharedLegacy => "v2",
-        "v1_alt": SharedLegacy => "v2",
-        "v2": SharedCurrent,
     }
 }
 
@@ -477,6 +464,7 @@ pub struct SelfTargetV1 {
     pub value: u32,
 }
 
+#[backwards_compat(tag = "ver", version = 2, versions(1: SelfTargetV1))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfTargetModel {
     pub value: u32,
@@ -487,15 +475,6 @@ impl From<SelfTargetV1> for SelfTargetModel {
         Self {
             value: v1.value + 100,
         }
-    }
-}
-
-// Target model is directly SelfTargetModel, which is also version 2
-backwards_compat_decl! {
-    #[tag = "ver", version = 2]
-    compat SelfTargetModel {
-        1: SelfTargetV1,
-        2: SelfTargetModel,
     }
 }
 
