@@ -18,9 +18,34 @@ jobs:
     name: Release Please (SemVer)
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           config-file: .github/release-config.json
           manifest-file: .github/release-manifest.json
+
+  build-and-deploy:
+    name: Build & Deploy Docs
+    runs-on: ubuntu-latest
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build & Deploy Docs
+        id: deployment
+        uses: LittleTealeaf/github-actions/cargo-doc-pages@2530963f9fa6539fff754a95271939294ca516d7
