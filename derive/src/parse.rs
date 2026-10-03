@@ -253,9 +253,7 @@ impl BackwardsCompatArgs {
                     .as_ref()
                     .is_some_and(|(next_tag, _)| next_tag.matches(&v))
             });
-            let is_implicit_terminal = versions
-                .last()
-                .is_some_and(|entry| entry.explicit_next.is_none());
+            let is_implicit_terminal = versions.last().is_some_and(|entry| entry.explicit_next.is_none());
 
             if !matches_declared && !matches_explicit_next && !is_implicit_terminal {
                 return Err(syn::Error::new(
@@ -508,9 +506,7 @@ impl Parse for BackwardsCompatInput {
                     .as_ref()
                     .is_some_and(|(next_tag, _)| next_tag.matches(&v))
             });
-            let is_implicit_terminal = versions
-                .last()
-                .is_some_and(|entry| entry.explicit_next.is_none());
+            let is_implicit_terminal = versions.last().is_some_and(|entry| entry.explicit_next.is_none());
 
             if !matches_declared && !matches_explicit_next && !is_implicit_terminal {
                 return Err(syn::Error::new(

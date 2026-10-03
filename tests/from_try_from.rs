@@ -1,6 +1,6 @@
 use backwards_compat::backwards_compat_decl;
-use serde::{Deserialize, Serialize};
 use core::error::Error;
+use serde::{Deserialize, Serialize};
 
 // =========================================================================
 // 1. Direct in-code `From` conversion (Infallible multi-hop chain)
@@ -500,7 +500,10 @@ backwards_compat_decl! {
 }
 
 #[test]
-#[allow(clippy::useless_conversion, reason = "blanket From<T> for T self-conversion test")]
+#[allow(
+    clippy::useless_conversion,
+    reason = "blanket From<T> for T self-conversion test"
+)]
 fn test_target_in_versions_list() {
     let v1 = SelfTargetV1 { value: 5 };
     let model_from_v1 = SelfTargetModel::from(v1);

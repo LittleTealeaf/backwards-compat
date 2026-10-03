@@ -143,10 +143,11 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
             #from_impls
         };
 
-        let codegen_tokens = match codegen::generate_backwards_compat(&input, Some(&shadow_ident), Some(shadow_tokens)) {
-            Ok(t) => t,
-            Err(err) => return err.to_compile_error().into(),
-        };
+        let codegen_tokens =
+            match codegen::generate_backwards_compat(&input, Some(&shadow_ident), Some(shadow_tokens)) {
+                Ok(t) => t,
+                Err(err) => return err.to_compile_error().into(),
+            };
 
         quote::quote! {
             #cleaned_item_struct

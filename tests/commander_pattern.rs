@@ -23,7 +23,11 @@ pub struct SchemaV2 {
 }
 
 impl From<SchemaV1> for SchemaV2 {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "intentional test score rounding")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "intentional test score rounding"
+    )]
     fn from(v1: SchemaV1) -> Self {
         Self {
             player_count: v1.players.len(),

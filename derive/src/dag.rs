@@ -175,10 +175,7 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
 
     let (latest_wire_ty, target_is_wire) = current_idx_opt
         .and_then(|idx| input.versions.get(idx))
-        .map_or_else(
-            || (input.target_ty.clone(), true),
-            |v| (v.ty.clone(), false),
-        );
+        .map_or_else(|| (input.target_ty.clone(), true), |v| (v.ty.clone(), false));
 
     Ok(DagPlan {
         paths,
