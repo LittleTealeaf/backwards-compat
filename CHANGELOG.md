@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/LittleTealeaf/backwards-compat/compare/v1.0.0...v1.1.0) (2026-10-03)
+
+
+### Features
+
+* zero-copy serialization, generics/lifetimes, adjacent tagging, and expanded docs ([#24](https://github.com/LittleTealeaf/backwards-compat/issues/24)) ([f3313b6](https://github.com/LittleTealeaf/backwards-compat/commit/f3313b62b9e671588cadad150ae956ca00d9550d))
+
 ## [1.0.0](https://github.com/LittleTealeaf/backwards-compat/compare/v0.6.0...v1.0.0) (2026-10-03)
 
 
