@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/LittleTealeaf/backwards-compat/compare/v0.5.0...v0.6.0) (2026-10-03)
+
+
+### Features
+
+* implement #[backwards_compat] attribute macro with implicit wire structs ([#19](https://github.com/LittleTealeaf/backwards-compat/issues/19)) ([96739e6](https://github.com/LittleTealeaf/backwards-compat/commit/96739e62e6050c9b18ab7ee6fa9dc0ffe70544b7))
+
 ## [0.5.0](https://github.com/LittleTealeaf/backwards-compat/compare/v0.4.0...v0.5.0) (2026-10-02)
 
 
