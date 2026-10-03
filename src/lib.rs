@@ -8,7 +8,8 @@
 //! `backwards-compat` streamlines schema evolution by:
 //! 1. Automatically implementing `serde::Serialize` and `serde::Deserialize` directly for your target model.
 //! 2. Automatically implementing `From<V>` (or `TryFrom<V>`) for your target model from every declared historical version `V`, enabling effortless in-code migrations.
-//! 3. Implicitly generating wire structs, avoiding manual serialization boilerplate for the latest version.
+//! 3. Implicitly generating zero-allocation wire structs, avoiding manual serialization boilerplate for the latest version.
+//! 4. Supporting generics, lifetimes, adjacent tagging, and custom DAG upgrade graphs.
 //!
 //! You apply the `#[backwards_compat(...)]` attribute directly on your domain model:
 //!
@@ -24,10 +25,10 @@
 //!
 //! // The target domain model Config does NOT need #[derive(Serialize, Deserialize)].
 //! // backwards_compat generates Serialize and Deserialize implementations automatically,
-//! // as well as an implicit ConfigShadowWire struct if needed.
+//! // as well as an implicit zero-copy shadow wire struct.
 //! // It also automatically creates From<ConfigV1> to Config conversions based on the chain.
 //! #[backwards_compat(tag = "version", version = 2, versions(1: ConfigV1))]
-//! #[derive(Debug, Clone, PartialEq)]
+//! #[derive(Debug, PartialEq)]
 //! pub struct Config {
 //!     pub name: String,
 //!     pub port: u16,
@@ -60,10 +61,10 @@
 //! assert_eq!(into_config, config);
 //! ```
 //!
-//! ## Fallible In-Code Conversion (`TryFrom`)
+//! ## Fallible In-Code Conversion (`TryFrom` & Aliases)
 //!
-//! When schema transitions are marked `#[fallible]`, `backwards_compat` generates `TryFrom<V>`
-//! implementations for the target model:
+//! When schema transitions are marked `#[fallible]` (or aliases `#[try]`, `#[try_from]`, `#[try_into]`),
+//! `backwards_compat` generates `TryFrom<V>` implementations for the target model:
 //!
 //! ```rust
 //! use backwards_compat::backwards_compat;
@@ -81,8 +82,13 @@
 //! #[derive(Debug, Clone, Deserialize)]
 //! pub struct ServerV1 { pub port: u32 }
 //!
-//! #[backwards_compat(tag = "version", version = 2, error = CustomError, versions(#[fallible] 1: ServerV1))]
-//! #[derive(Debug, Clone, PartialEq)]
+//! #[backwards_compat(
+//!     tag = "version",
+//!     version = 2,
+//!     error = CustomError,
+//!     versions(#[try_from] 1: ServerV1)
+//! )]
+//! #[derive(Debug, PartialEq)]
 //! pub struct Server { pub port: u16 }
 //!
 //! impl TryFrom<ServerV1> for Server {
@@ -101,6 +107,83 @@
 //!
 //! let v1_invalid = ServerV1 { port: 70000 };
 //! assert!(Server::try_from(v1_invalid).is_err());
+//! ```
+//!
+//! ## Adjacent Tagging (`content = "..."`)
+//!
+//! For tuple structs, scalar types, and newtypes that Serde cannot internally tag, configure adjacent tagging:
+//!
+//! ```rust
+//! use backwards_compat::backwards_compat;
+//! use serde::Deserialize;
+//!
+//! #[derive(Debug, PartialEq, Deserialize)]
+//! pub struct ScalarV1(pub u32);
+//!
+//! #[backwards_compat(
+//!     tag = "t",
+//!     content = "c",
+//!     version = 2,
+//!     versions(1: ScalarV1)
+//! )]
+//! #[derive(Debug, PartialEq)]
+//! pub struct ScalarTarget(pub String);
+//!
+//! impl From<ScalarV1> for ScalarTarget {
+//!     fn from(v1: ScalarV1) -> Self {
+//!         Self(v1.0.to_string())
+//!     }
+//! }
+//!
+//! let json = r#"{"t":"1","c":42}"#;
+//! let target: ScalarTarget = serde_json::from_str(json).unwrap();
+//! assert_eq!(target.0, "42");
+//!
+//! let serialized = serde_json::to_string(&target).unwrap();
+//! assert_eq!(serialized, r#"{"t":"2","c":"42"}"#);
+//! ```
+//!
+//! ## Generics and Lifetimes
+//!
+//! `#[backwards_compat]` fully supports generic parameters, lifetime parameters, and `where` clauses:
+//!
+//! ```rust
+//! use backwards_compat::backwards_compat;
+//! use serde::Deserialize;
+//!
+//! #[derive(Debug, PartialEq, Deserialize)]
+//! pub struct GenericRecordV1<'a, T> {
+//!     pub name: &'a str,
+//!     pub payload: T,
+//! }
+//!
+//! #[backwards_compat(
+//!     tag = "version",
+//!     version = 2,
+//!     versions(1: GenericRecordV1<'a, T>)
+//! )]
+//! #[derive(Debug, PartialEq)]
+//! pub struct GenericRecord<'a, T: Clone>
+//! where
+//!     T: std::fmt::Debug,
+//! {
+//!     pub name: &'a str,
+//!     pub payload: T,
+//!     pub extra: bool,
+//! }
+//!
+//! impl<'a, T: Clone> From<GenericRecordV1<'a, T>> for GenericRecord<'a, T>
+//! where
+//!     T: std::fmt::Debug,
+//! {
+//!     fn from(v1: GenericRecordV1<'a, T>) -> Self {
+//!         Self {
+//!             name: v1.name,
+//!             payload: v1.payload,
+//!             extra: true,
+//!         }
+//!     }
+//! }
 //! ```
 //!
 //! ## DAG Transitions

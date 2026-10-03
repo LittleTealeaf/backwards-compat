@@ -358,3 +358,258 @@ fn test_attribute_macro_fallible_and_dag() {
     let res: Result<DagTarget, _> = serde_json::from_str(json_v1_invalid);
     res.unwrap_err();
 }
+
+// Case 7: Non-Cloneable domain struct when target_is_wire is true
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct NonCloneV1 {
+    pub message: String,
+}
+
+#[backwards_compat(
+    tag = "version",
+    version = 2,
+    versions(
+        1: NonCloneV1,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct NonCloneTarget {
+    pub message: String,
+    pub count: usize,
+}
+
+impl From<NonCloneV1> for NonCloneTarget {
+    fn from(v1: NonCloneV1) -> Self {
+        Self {
+            message: v1.message,
+            count: 0,
+        }
+    }
+}
+
+#[test]
+fn test_attribute_macro_non_cloneable_serialization() {
+    let target = NonCloneTarget {
+        message: "hello_world".to_owned(),
+        count: 42,
+    };
+
+    let serialized = serde_json::to_string(&target).unwrap();
+    assert!(serialized.contains(r#""version":"2""#));
+    assert!(serialized.contains(r#""message":"hello_world""#));
+    assert!(serialized.contains(r#""count":42"#));
+
+    let deserialized: NonCloneTarget = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(deserialized, target);
+
+    let v1_json = r#"{"version": "1", "message": "from_v1"}"#;
+    let from_v1: NonCloneTarget = serde_json::from_str(v1_json).unwrap();
+    assert_eq!(
+        from_v1,
+        NonCloneTarget {
+            message: "from_v1".to_owned(),
+            count: 0,
+        }
+    );
+}
+
+// Case 8: Fallible aliases testing #[try], #[try_from], #[try_into], #[falliable]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AliasV1 {
+    pub raw: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AliasV2 {
+    pub raw: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AliasV3 {
+    pub raw: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AliasV4 {
+    pub raw: String,
+}
+
+#[backwards_compat(
+    tag = "version",
+    version = 5,
+    versions(
+        #[r#try]
+        1: AliasV1 => 2,
+        #[try_from]
+        2: AliasV2 => 3,
+        #[try_into]
+        3: AliasV3 => 4,
+        #[falliable]
+        4: AliasV4 => 5,
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasTarget {
+    pub val: u32,
+}
+
+impl TryFrom<AliasV1> for AliasV2 {
+    type Error = core::num::ParseIntError;
+    fn try_from(v: AliasV1) -> Result<Self, Self::Error> {
+        let _num: u32 = v.raw.parse()?;
+        Ok(Self { raw: v.raw })
+    }
+}
+
+impl TryFrom<AliasV2> for AliasV3 {
+    type Error = core::num::ParseIntError;
+    fn try_from(v: AliasV2) -> Result<Self, Self::Error> {
+        let _num: u32 = v.raw.parse()?;
+        Ok(Self { raw: v.raw })
+    }
+}
+
+impl TryFrom<AliasV3> for AliasV4 {
+    type Error = core::num::ParseIntError;
+    fn try_from(v: AliasV3) -> Result<Self, Self::Error> {
+        let _num: u32 = v.raw.parse()?;
+        Ok(Self { raw: v.raw })
+    }
+}
+
+impl TryFrom<AliasV4> for AliasTarget {
+    type Error = core::num::ParseIntError;
+    fn try_from(v: AliasV4) -> Result<Self, Self::Error> {
+        let val = v.raw.parse()?;
+        Ok(Self { val })
+    }
+}
+
+#[test]
+fn test_attribute_macro_fallible_aliases() {
+    let json_v1 = r#"{"version": "1", "raw": "100"}"#;
+    let target1: AliasTarget = serde_json::from_str(json_v1).unwrap();
+    assert_eq!(target1, AliasTarget { val: 100 });
+
+    let json_v2 = r#"{"version": "2", "raw": "200"}"#;
+    let target2: AliasTarget = serde_json::from_str(json_v2).unwrap();
+    assert_eq!(target2, AliasTarget { val: 200 });
+
+    let json_v3 = r#"{"version": "3", "raw": "300"}"#;
+    let target3: AliasTarget = serde_json::from_str(json_v3).unwrap();
+    assert_eq!(target3, AliasTarget { val: 300 });
+
+    let json_v4 = r#"{"version": "4", "raw": "400"}"#;
+    let target4: AliasTarget = serde_json::from_str(json_v4).unwrap();
+    assert_eq!(target4, AliasTarget { val: 400 });
+
+    let json_v1_err = r#"{"version": "1", "raw": "invalid"}"#;
+    let err_res: Result<AliasTarget, _> = serde_json::from_str(json_v1_err);
+    err_res.unwrap_err();
+}
+
+// Case 9: Adjacent tagging with tuple struct
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdjPointV1(pub i32);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdjPointV2(pub i32, pub i32);
+
+impl From<AdjPointV1> for AdjPointV2 {
+    fn from(v1: AdjPointV1) -> Self {
+        Self(v1.0, 0)
+    }
+}
+
+#[backwards_compat(
+    tag = "version",
+    content = "data",
+    version = 2,
+    versions(
+        1: AdjPointV1 => 2,
+        2: AdjPointV2,
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdjPoint(pub i32, pub i32);
+
+impl From<AdjPointV2> for AdjPoint {
+    fn from(v2: AdjPointV2) -> Self {
+        Self(v2.0, v2.1)
+    }
+}
+
+impl From<AdjPoint> for AdjPointV2 {
+    fn from(target: AdjPoint) -> Self {
+        Self(target.0, target.1)
+    }
+}
+
+#[test]
+fn test_attribute_macro_adjacent_tagging_tuple_struct() {
+    let pt = AdjPoint(10, 20);
+    let serialized = serde_json::to_string(&pt).unwrap();
+    assert!(serialized.contains(r#""version":"2""#));
+    assert!(serialized.contains(r#""data":[10,20]"#));
+
+    let deserialized: AdjPoint = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(deserialized, pt);
+
+    let v1_json = r#"{"version": "1", "data": 42}"#;
+    let from_v1: AdjPoint = serde_json::from_str(v1_json).unwrap();
+    assert_eq!(from_v1, AdjPoint(42, 0));
+}
+
+// Case 10: Explicit wire struct with From<&Target> (target does not implement Clone)
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExplicitWireV2 {
+    pub message: String,
+    pub count: usize,
+}
+
+#[backwards_compat(
+    tag = "version",
+    version = 2,
+    versions(
+        2: ExplicitWireV2,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct NonCloneExplicitTarget {
+    pub message: String,
+    pub count: usize,
+}
+
+impl From<ExplicitWireV2> for NonCloneExplicitTarget {
+    fn from(wire: ExplicitWireV2) -> Self {
+        Self {
+            message: wire.message,
+            count: wire.count,
+        }
+    }
+}
+
+impl From<&NonCloneExplicitTarget> for ExplicitWireV2 {
+    fn from(target: &NonCloneExplicitTarget) -> Self {
+        Self {
+            message: target.message.clone(),
+            count: target.count,
+        }
+    }
+}
+
+#[test]
+fn test_attribute_macro_explicit_wire_borrowed_conversion() {
+    let target = NonCloneExplicitTarget {
+        message: "borrowed_wire_test".to_owned(),
+        count: 77,
+    };
+
+    let serialized = serde_json::to_string(&target).unwrap();
+    assert!(serialized.contains(r#""version":"2""#));
+    assert!(serialized.contains(r#""message":"borrowed_wire_test""#));
+    assert!(serialized.contains(r#""count":77"#));
+
+    let deserialized: NonCloneExplicitTarget = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(deserialized, target);
+}

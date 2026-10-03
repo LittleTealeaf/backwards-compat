@@ -91,11 +91,21 @@ pub struct VersionEntry {
     pub explicit_next: Option<(VersionTag, proc_macro2::Span)>,
 }
 
+const FALLIBLE_ATTRS: &[&str] = &[
+    "fallible",
+    "falliable",
+    "try",
+    "try_from",
+    "try_into",
+    "try_from_version",
+];
+
 /// Arguments parsed from the `#[backwards_compat(...)]` attribute.
 #[derive(Debug, Clone)]
 #[allow(dead_code, reason = "fields used in macro attribute parsing")]
 pub struct BackwardsCompatArgs {
     pub tag_field: String,
+    pub content_field: Option<String>,
     pub current_version: Option<(VersionTag, proc_macro2::Span)>,
     pub error_ty: Option<syn::Type>,
     pub dump: bool,
@@ -105,6 +115,7 @@ pub struct BackwardsCompatArgs {
 impl Parse for BackwardsCompatArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut tag_field = "version".to_owned();
+        let mut content_field = None;
         let mut current_version = None;
         let mut error_ty = None;
         let mut dump = false;
@@ -126,6 +137,19 @@ impl Parse for BackwardsCompatArgs {
                     tag_field = s.value();
                 } else {
                     return Err(syn::Error::new(ident.span(), "expected `=` or `()` for tag"));
+                }
+            } else if ident_str == "content" {
+                if input.peek(Token![=]) {
+                    input.parse::<Token![=]>()?;
+                    let s: syn::LitStr = input.parse()?;
+                    content_field = Some(s.value());
+                } else if input.peek(syn::token::Paren) {
+                    let inner;
+                    syn::parenthesized!(inner in input);
+                    let s: syn::LitStr = inner.parse()?;
+                    content_field = Some(s.value());
+                } else {
+                    return Err(syn::Error::new(ident.span(), "expected `=` or `()` for content"));
                 }
             } else if ident_str == "version" {
                 if input.peek(Token![=]) {
@@ -176,7 +200,12 @@ impl Parse for BackwardsCompatArgs {
                     let mut forwarded_version_attrs = Vec::new();
 
                     for attr in outer_attrs {
-                        if attr.path().is_ident("fallible") || attr.path().is_ident("try_into") {
+                        let is_fallible = attr.path().get_ident().is_some_and(|id| {
+                            let name = id.to_string();
+                            let s = name.strip_prefix("r#").unwrap_or(&name);
+                            FALLIBLE_ATTRS.contains(&s)
+                        });
+                        if is_fallible {
                             fallible = true;
                         } else {
                             forwarded_version_attrs.push(attr);
@@ -226,6 +255,7 @@ impl Parse for BackwardsCompatArgs {
 
         Ok(Self {
             tag_field,
+            content_field,
             current_version,
             error_ty,
             dump,
@@ -235,7 +265,12 @@ impl Parse for BackwardsCompatArgs {
 }
 
 impl BackwardsCompatArgs {
-    pub fn into_input(self, target_ty: syn::Type, vis: syn::Visibility) -> syn::Result<BackwardsCompatInput> {
+    pub fn into_input(
+        self,
+        target_ty: syn::Type,
+        vis: syn::Visibility,
+        generics: syn::Generics,
+    ) -> syn::Result<BackwardsCompatInput> {
         let versions = self.versions;
 
         let (current_version, current_version_span) = if let Some((v, span)) = self.current_version {
@@ -279,7 +314,9 @@ impl BackwardsCompatArgs {
         Ok(BackwardsCompatInput {
             vis,
             target_ty,
+            generics,
             tag_field: self.tag_field,
+            content_field: self.content_field,
             current_version,
             current_version_span,
             error_ty: self.error_ty,
@@ -295,7 +332,9 @@ impl BackwardsCompatArgs {
 pub struct BackwardsCompatInput {
     pub vis: Visibility,
     pub target_ty: Type,
+    pub generics: syn::Generics,
     pub tag_field: String,
+    pub content_field: Option<String>,
     pub current_version: VersionTag,
     pub current_version_span: proc_macro2::Span,
     pub error_ty: Option<Type>,
@@ -417,7 +456,7 @@ mod tests {
         let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
         let target_ty: syn::Type = syn::parse_quote!(TargetModel);
         let vis: syn::Visibility = syn::parse_quote!(pub);
-        let compat_input = args.into_input(target_ty, vis).unwrap();
+        let compat_input = args.into_input(target_ty, vis, syn::Generics::default()).unwrap();
 
         assert_eq!(compat_input.tag_field, "custom_tag");
         assert_eq!(compat_input.current_version, VersionTag::Int(2));
@@ -436,7 +475,7 @@ mod tests {
         let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
         let target_ty: syn::Type = syn::parse_quote!(TargetModel);
         let vis: syn::Visibility = syn::Visibility::Inherited;
-        let compat_input = args.into_input(target_ty, vis).unwrap();
+        let compat_input = args.into_input(target_ty, vis, syn::Generics::default()).unwrap();
 
         assert_eq!(compat_input.current_version, VersionTag::Int(2));
     }
@@ -449,7 +488,7 @@ mod tests {
         let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
         let target_ty: syn::Type = syn::parse_quote!(TargetModel);
         let vis: syn::Visibility = syn::Visibility::Inherited;
-        let compat_input = args.into_input(target_ty, vis).unwrap();
+        let compat_input = args.into_input(target_ty, vis, syn::Generics::default()).unwrap();
         assert_eq!(compat_input.current_version, VersionTag::Int(1));
         assert!(compat_input.versions.is_empty());
     }
@@ -465,7 +504,9 @@ mod tests {
         let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
         let target_ty: syn::Type = syn::parse_quote!(TargetModel);
         let vis: syn::Visibility = syn::Visibility::Inherited;
-        let err = args.into_input(target_ty, vis).unwrap_err();
+        let err = args
+            .into_input(target_ty, vis, syn::Generics::default())
+            .unwrap_err();
         assert_eq!(err.to_string(), "duplicate version tag `1`");
     }
 
@@ -481,7 +522,9 @@ mod tests {
         let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
         let target_ty: syn::Type = syn::parse_quote!(TargetModel);
         let vis: syn::Visibility = syn::Visibility::Inherited;
-        let err = args.into_input(target_ty, vis).unwrap_err();
+        let err = args
+            .into_input(target_ty, vis, syn::Generics::default())
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             "version `99` does not match any declared version"
@@ -517,6 +560,12 @@ mod tests {
         let err_error = syn::parse2::<BackwardsCompatArgs>(input_error).unwrap_err();
         assert_eq!(err_error.to_string(), "expected `=` or `()` for error");
 
+        let input_content = quote::quote! {
+            content 123
+        };
+        let err_content = syn::parse2::<BackwardsCompatArgs>(input_content).unwrap_err();
+        assert_eq!(err_content.to_string(), "expected `=` or `()` for content");
+
         let input_versions = quote::quote! {
             versions: [1: ModelV1]
         };
@@ -525,6 +574,82 @@ mod tests {
             err_versions.to_string(),
             "expected `(...)`, `= [...]`, or `= { ... }` for versions"
         );
+    }
+
+    #[test]
+    fn test_parse_args_content_eq() {
+        let input = quote::quote! {
+            content = "data",
+            version = 1,
+            versions = [1: ModelV1]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        assert_eq!(args.content_field.as_deref(), Some("data"));
+
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::Visibility::Inherited;
+        let compat_input = args.into_input(target_ty, vis, syn::Generics::default()).unwrap();
+        assert_eq!(compat_input.content_field.as_deref(), Some("data"));
+    }
+
+    #[test]
+    fn test_parse_args_content_paren() {
+        let input = quote::quote! {
+            content("payload"),
+            version = 1,
+            versions = [1: ModelV1]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        assert_eq!(args.content_field.as_deref(), Some("payload"));
+
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::Visibility::Inherited;
+        let compat_input = args.into_input(target_ty, vis, syn::Generics::default()).unwrap();
+        assert_eq!(compat_input.content_field.as_deref(), Some("payload"));
+    }
+
+    #[test]
+    fn test_parse_args_content_omitted_is_none() {
+        let input = quote::quote! {
+            tag = "schema",
+            version = 1,
+            versions = [1: ModelV1]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        assert_eq!(args.content_field, None);
+
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::Visibility::Inherited;
+        let compat_input = args.into_input(target_ty, vis, syn::Generics::default()).unwrap();
+        assert_eq!(compat_input.content_field, None);
+    }
+
+    #[test]
+    fn test_parse_args_content_with_tag_and_version() {
+        let input = quote::quote! {
+            tag = "type",
+            content = "data",
+            version = 2,
+            dump,
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2,
+            ]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        assert_eq!(args.tag_field, "type");
+        assert_eq!(args.content_field.as_deref(), Some("data"));
+        assert_eq!(args.current_version.as_ref().unwrap().0, VersionTag::Int(2));
+        assert!(args.dump);
+
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::parse_quote!(pub);
+        let compat_input = args.into_input(target_ty, vis, syn::Generics::default()).unwrap();
+        assert_eq!(compat_input.tag_field, "type");
+        assert_eq!(compat_input.content_field.as_deref(), Some("data"));
+        assert_eq!(compat_input.current_version, VersionTag::Int(2));
+        assert!(compat_input.dump);
+        assert_eq!(compat_input.versions.len(), 2);
     }
 
     #[test]
@@ -540,5 +665,29 @@ mod tests {
             err.to_string(),
             "version keys must be string or integer literals (e.g. 1 or \"1\"), not identifiers like v1"
         );
+    }
+
+    #[test]
+    fn test_parse_args_fallible_attribute_aliases() {
+        let input = quote::quote! {
+            versions = [
+                #[fallible] 1: V1 => 2,
+                #[falliable] 2: V2 => 3,
+                #[r#try] 3: V3 => 4,
+                #[try_from] 4: V4 => 5,
+                #[try_into] 5: V5 => 6,
+                #[try_from_version] 6: V6 => 7,
+                7: V7,
+            ]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        assert_eq!(args.versions.len(), 7);
+        assert!(args.versions[0].fallible);
+        assert!(args.versions[1].fallible);
+        assert!(args.versions[2].fallible);
+        assert!(args.versions[3].fallible);
+        assert!(args.versions[4].fallible);
+        assert!(args.versions[5].fallible);
+        assert!(!args.versions[6].fallible);
     }
 }

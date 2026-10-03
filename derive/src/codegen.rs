@@ -8,7 +8,7 @@ use crate::parse::BackwardsCompatInput;
 
 pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) -> TokenStream {
     let target_ty = &input.target_ty;
-    let target_ty_str = quote!(#target_ty).to_string();
+    let (impl_generics, _, where_clause) = input.generics.split_for_impl();
 
     let mut seen_types = HashSet::new();
     let mut impls = Vec::new();
@@ -26,9 +26,8 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
 
     for (i, v) in input.versions.iter().enumerate() {
         let v_ty = &v.ty;
-        let v_ty_str = quote!(#v_ty).to_string();
 
-        if v_ty_str == target_ty_str {
+        if v_ty == target_ty {
             continue;
         }
 
@@ -39,7 +38,7 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
             continue;
         }
 
-        if !seen_types.insert(v_ty_str) {
+        if !seen_types.insert(v_ty) {
             continue;
         }
 
@@ -65,7 +64,7 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
             }
 
             impls.push(quote! {
-                impl ::core::convert::TryFrom<#v_ty> for #target_ty {
+                impl #impl_generics ::core::convert::TryFrom<#v_ty> for #target_ty #where_clause {
                     type Error = #error_ty_tokens;
 
                     fn try_from(val: #v_ty) -> ::core::result::Result<Self, Self::Error> {
@@ -85,7 +84,7 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
             }
 
             impls.push(quote! {
-                impl ::core::convert::From<#v_ty> for #target_ty {
+                impl #impl_generics ::core::convert::From<#v_ty> for #target_ty #where_clause {
                     fn from(val: #v_ty) -> Self {
                         let cur = val;
                         #(#step_tokens)*
@@ -101,9 +100,18 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
     }
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code, reason = "fields used in macro code generation and testing")]
+pub struct ShadowWireInfo<'a> {
+    pub owned_ident: &'a syn::Ident,
+    pub borrowed_ident: &'a syn::Ident,
+    pub borrowed_ty_in_helper: TokenStream,
+    pub construct_borrowed: TokenStream,
+}
+
 pub fn generate_backwards_compat(
     input: &BackwardsCompatInput,
-    shadow_struct: Option<&syn::Ident>,
+    shadow_info: Option<&ShadowWireInfo<'_>>,
     extra_items: Option<TokenStream>,
 ) -> syn::Result<TokenStream> {
     let dag_plan = resolve_dag(input)?;
@@ -111,10 +119,18 @@ pub fn generate_backwards_compat(
     let target_ty = &input.target_ty;
     let tag_field = &input.tag_field;
 
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
     let mut helper_variants = Vec::new();
     let mut match_arms = Vec::new();
 
-    let target_ty_str = quote!(#target_ty).to_string();
+    let has_lifetimes = input.generics.lifetimes().next().is_some();
+    let borrow_attr = if has_lifetimes {
+        quote!(#[serde(borrow)])
+    } else {
+        quote!()
+    };
+
     for (i, v) in input.versions.iter().enumerate() {
         let var_ident = format_ident!("__V_{}", i);
         let tag_str = v.tag.to_tag_string();
@@ -122,15 +138,14 @@ pub fn generate_backwards_compat(
 
         helper_variants.push(quote! {
             #[serde(rename = #tag_str)]
-            #var_ident(#ty)
+            #var_ident(#borrow_attr #ty)
         });
 
         let Some(path) = dag_plan.paths.get(i) else {
             continue;
         };
-        let ty_str = quote!(#ty).to_string();
 
-        if ty_str == target_ty_str || path.steps.is_empty() {
+        if ty == target_ty || path.steps.is_empty() {
             match_arms.push(quote! {
                 __VersionHelper::#var_ident(val) => ::core::result::Result::Ok(val)
             });
@@ -146,13 +161,14 @@ pub fn generate_backwards_compat(
     }
 
     if dag_plan.target_is_wire {
-        if let Some(shadow_ident) = shadow_struct {
+        if let Some(info) = shadow_info {
             let current_var_ident = format_ident!("__V_{}", input.versions.len());
             let current_tag_str = input.current_version.to_tag_string();
+            let owned_ident = info.owned_ident;
 
             helper_variants.push(quote! {
                 #[serde(rename = #current_tag_str)]
-                #current_var_ident(#shadow_ident)
+                #current_var_ident(#borrow_attr #owned_ident #ty_generics)
             });
 
             match_arms.push(quote! {
@@ -166,23 +182,108 @@ pub fn generate_backwards_compat(
         }
     }
 
-    let latest_wire_ty = if dag_plan.target_is_wire {
-        let shadow_ident = shadow_struct.unwrap();
-        quote!(#shadow_ident)
+    let (serialize_stmt, latest_wire_ty_in_helper) = if dag_plan.target_is_wire {
+        let info = shadow_info.unwrap();
+        let construct_borrowed = &info.construct_borrowed;
+        let ty_in_helper = &info.borrowed_ty_in_helper;
+
+        let stmt = quote! {
+            let latest = #construct_borrowed;
+            let helper = __SerializeHelper::__Latest(&latest);
+            ::serde::Serialize::serialize(&helper, __serializer)
+        };
+        (stmt, quote!(#ty_in_helper))
     } else {
         let ty = &dag_plan.latest_wire_ty;
-        quote!(#ty)
-    };
-    let current_tag_str = input.current_version.to_tag_string();
+        let stmt = quote! {
+            struct __WireConvert<'__b, __T: ?Sized>(&'__b __T);
 
-    let serialize_stmt = quote! {
-        let latest: #latest_wire_ty = ::core::convert::Into::into(::core::clone::Clone::clone(self));
-        let helper = __SerializeHelper::__Latest(&latest);
-        ::serde::Serialize::serialize(&helper, __serializer)
+            trait __BorrowedWireConvert<__W> {
+                fn __convert_wire(&self) -> __W;
+            }
+
+            impl<'__b, __T: ?Sized, __W> __BorrowedWireConvert<__W> for &__WireConvert<'__b, __T>
+            where
+                &'__b __T: ::core::convert::Into<__W>,
+            {
+                #[inline]
+                fn __convert_wire(&self) -> __W {
+                    ::core::convert::Into::into(self.0)
+                }
+            }
+
+            trait __FallbackWireConvert<__W> {
+                fn __convert_wire(&self) -> __W;
+            }
+
+            impl<'__b, __T, __W> __FallbackWireConvert<__W> for __WireConvert<'__b, __T>
+            where
+                __T: ::core::clone::Clone + ::core::convert::Into<__W>,
+            {
+                #[inline]
+                fn __convert_wire(&self) -> __W {
+                    ::core::convert::Into::into(::core::clone::Clone::clone(self.0))
+                }
+            }
+
+            let latest: #ty = (&__WireConvert(self)).__convert_wire();
+            let helper = __SerializeHelper::__Latest(&latest);
+            ::serde::Serialize::serialize(&helper, __serializer)
+        };
+        let ty_in_helper = quote!(#ty);
+        (stmt, ty_in_helper)
     };
+
+    let current_tag_str = input.current_version.to_tag_string();
 
     let conversions = generate_conversions(input, &dag_plan);
     let extra = extra_items.unwrap_or_default();
+
+    let mut de_generics = input.generics.clone();
+    let lifetime_idents: Vec<_> = input.generics.lifetimes().map(|lt| &lt.lifetime).collect();
+    let de_lifetime: syn::GenericParam = if lifetime_idents.is_empty() {
+        syn::parse_quote!('__de)
+    } else {
+        syn::parse_quote!('__de: #(#lifetime_idents)+*)
+    };
+    de_generics.params.insert(0, de_lifetime);
+    let (de_impl_generics, _, de_orig_where_clause) = de_generics.split_for_impl();
+
+    let mut de_where_clause = de_orig_where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
+        where_token: syn::token::Where::default(),
+        predicates: syn::punctuated::Punctuated::new(),
+    });
+    de_where_clause.predicates.push(syn::parse_quote!(
+        __VersionHelper #ty_generics: ::serde::Deserialize<'__de>
+    ));
+
+    let mut ser_helper_generics = input.generics.clone();
+    let ser_helper_lifetime: syn::GenericParam = syn::parse_quote!('__a);
+    ser_helper_generics.params.insert(0, ser_helper_lifetime);
+    let (_, ser_helper_ty_generics, _) = ser_helper_generics.split_for_impl();
+
+    let mut ser_where_clause = where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
+        where_token: syn::token::Where::default(),
+        predicates: syn::punctuated::Punctuated::new(),
+    });
+    ser_where_clause.predicates.push(syn::parse_quote!(
+        for<'__a> __SerializeHelper #ser_helper_ty_generics: ::serde::Serialize
+    ));
+
+    let generics = &input.generics;
+
+    let serde_tag_attr = input.content_field.as_ref().map_or_else(
+        || {
+            quote! {
+                #[serde(tag = #tag_field)]
+            }
+        },
+        |content| {
+            quote! {
+                #[serde(tag = #tag_field, content = #content)]
+            }
+        },
+    );
 
     let code = quote! {
         const _: () = {
@@ -192,20 +293,20 @@ pub fn generate_backwards_compat(
 
             #[allow(non_camel_case_types, dead_code)]
             #[derive(::serde::Deserialize)]
-            #[serde(tag = #tag_field)]
-            enum __VersionHelper {
+            #serde_tag_attr
+            enum __VersionHelper #generics #where_clause {
                 #(#helper_variants,)*
             }
 
             #[allow(non_camel_case_types, dead_code)]
             #[derive(::serde::Serialize)]
-            #[serde(tag = #tag_field)]
-            enum __SerializeHelper<'__a> {
+            #serde_tag_attr
+            enum __SerializeHelper #ser_helper_generics #where_clause {
                 #[serde(rename = #current_tag_str)]
-                __Latest(&'__a #latest_wire_ty),
+                __Latest(&'__a #latest_wire_ty_in_helper),
             }
 
-            impl ::serde::Serialize for #target_ty {
+            impl #impl_generics ::serde::Serialize for #target_ty #ser_where_clause {
                 fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
                 where
                     __S: ::serde::Serializer,
@@ -214,12 +315,12 @@ pub fn generate_backwards_compat(
                 }
             }
 
-            impl<'de> ::serde::Deserialize<'de> for #target_ty {
+            impl #de_impl_generics ::serde::Deserialize<'__de> for #target_ty #de_where_clause {
                 fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
                 where
-                    __D: ::serde::Deserializer<'de>,
+                    __D: ::serde::Deserializer<'__de>,
                 {
-                    let helper = <__VersionHelper as ::serde::Deserialize>::deserialize(__deserializer)?;
+                    let helper = <__VersionHelper #ty_generics as ::serde::Deserialize>::deserialize(__deserializer)?;
                     match helper {
                         #(#match_arms,)*
                     }
@@ -250,7 +351,7 @@ mod tests {
         let args: BackwardsCompatArgs = syn::parse2(args_tokens).unwrap();
         let target_ty: syn::Type = syn::parse_quote!(TargetModel);
         let vis: syn::Visibility = syn::parse_quote!(pub);
-        args.into_input(target_ty, vis).unwrap()
+        args.into_input(target_ty, vis, syn::Generics::default()).unwrap()
     }
 
     #[test]
@@ -390,13 +491,20 @@ mod tests {
             ]
         });
 
-        let shadow = format_ident!("TargetModelWire");
-        let generated = generate_backwards_compat(&input, Some(&shadow), None).unwrap();
+        let owned_shadow = format_ident!("TargetModelWire");
+        let borrowed_shadow = format_ident!("TargetModelBorrowedWire");
+        let shadow_info = ShadowWireInfo {
+            owned_ident: &owned_shadow,
+            borrowed_ident: &borrowed_shadow,
+            borrowed_ty_in_helper: quote!(TargetModelBorrowedWire<'__a>),
+            construct_borrowed: quote!(TargetModelBorrowedWire {}),
+        };
+        let generated = generate_backwards_compat(&input, Some(&shadow_info), None).unwrap();
         let rendered = generated.to_string();
 
         assert!(rendered.contains("__VersionHelper :: __V_2 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
         assert!(rendered.contains(
-            "enum __SerializeHelper < '__a > { # [serde (rename = \"3\")] __Latest (& '__a TargetModelWire) , }"
+            "enum __SerializeHelper < '__a > { # [serde (rename = \"3\")] __Latest (& '__a TargetModelBorrowedWire < '__a >) , }"
         ));
     }
 
@@ -416,5 +524,82 @@ mod tests {
             result.unwrap_err().to_string(),
             "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro"
         );
+    }
+
+    #[test]
+    fn test_generate_backwards_compat_generics_and_where_clause() {
+        let args: BackwardsCompatArgs = syn::parse2(quote! {
+            version = 2,
+            versions = [
+                1: GenericModelV1<T> => 2,
+                2: GenericModelV2<T>,
+            ]
+        })
+        .unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(GenericModel<T>);
+        let vis: syn::Visibility = syn::parse_quote!(pub);
+        let mut generics: syn::Generics = syn::parse_quote!(<T: Clone + 'static>);
+        generics.where_clause = syn::parse_quote!(where T: std::fmt::Debug);
+        let input = args.into_input(target_ty, vis, generics).unwrap();
+
+        let generated = generate_backwards_compat(&input, None, None).unwrap();
+        let rendered = generated.to_string();
+
+        assert!(
+            rendered.contains("enum __VersionHelper < T : Clone + 'static > where T : std :: fmt :: Debug")
+        );
+        assert!(
+            rendered.contains(
+                "enum __SerializeHelper < '__a , T : Clone + 'static > where T : std :: fmt :: Debug"
+            )
+        );
+        assert!(rendered.contains("impl < T : Clone + 'static > :: serde :: Serialize for GenericModel < T > where T : std :: fmt :: Debug"));
+        assert!(rendered.contains("impl < '__de , T : Clone + 'static > :: serde :: Deserialize < '__de > for GenericModel < T > where T : std :: fmt :: Debug"));
+    }
+
+    #[test]
+    fn test_generate_backwards_compat_adjacent_tagging() {
+        let args: BackwardsCompatArgs = syn::parse2(quote! {
+            tag = "type",
+            content = "data",
+            version = 2,
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2,
+            ]
+        })
+        .unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::parse_quote!(pub);
+        let input = args.into_input(target_ty, vis, syn::Generics::default()).unwrap();
+
+        let generated = generate_backwards_compat(&input, None, None).unwrap();
+        let rendered = generated.to_string();
+
+        assert!(rendered.contains("# [serde (tag = \"type\" , content = \"data\")] enum __VersionHelper"));
+        assert!(rendered.contains("# [serde (tag = \"type\" , content = \"data\")] enum __SerializeHelper"));
+    }
+
+    #[test]
+    fn test_generate_backwards_compat_explicit_wire_autoref() {
+        let args: BackwardsCompatArgs = syn::parse2(quote! {
+            version = 2,
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2,
+            ]
+        })
+        .unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel);
+        let vis: syn::Visibility = syn::parse_quote!(pub);
+        let input = args.into_input(target_ty, vis, syn::Generics::default()).unwrap();
+
+        let generated = generate_backwards_compat(&input, None, None).unwrap();
+        let rendered = generated.to_string();
+
+        assert!(rendered.contains("struct __WireConvert < '__b , __T : ? Sized > (& '__b __T) ;"));
+        assert!(rendered.contains("trait __BorrowedWireConvert < __W >"));
+        assert!(rendered.contains("trait __FallbackWireConvert < __W >"));
+        assert!(rendered.contains("let latest : ModelV2 = (& __WireConvert (self)) . __convert_wire () ;"));
     }
 }

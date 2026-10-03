@@ -23,10 +23,13 @@ In applications with evolving data formats (such as configuration files, databas
 ## Features
 
 - **Zero-Boilerplate Domain Models**: Your target struct does not need `#[derive(Serialize, Deserialize)]`—the attribute macro generates them directly.
+- **Zero-Copy Serialization**: Domain structs do not need `Clone`. Serialization borrows fields directly without cloning.
+- **Generics & Lifetimes**: Full support for structs with type parameters, lifetimes, and `where` clauses (e.g. `struct Model<'a, T>`).
+- **Adjacent Tagging**: Use `content = "..."` for tuple structs, scalar types, and newtypes that Serde cannot internally tag.
 - **Implicit Wire Structs**: The `#[backwards_compat(...)]` attribute implicitly creates a shadow wire struct if your target struct is the latest version, letting you skip declaring a final schema struct entirely.
 - **Direct In-Code Conversions**: Automatically implements `From<V>` (or `TryFrom<V>`) on your target domain model for every declared historical version `V`, allowing `TargetModel::from(v1)` or `v1.into()`.
 - **Linear & DAG Migrations**: Support straightforward sequential version upgrades (`1 -> 2 -> ... -> N`) or complex Directed Acyclic Graph (DAG) upgrades (e.g. `1 => 3`).
-- **Infallible & Fallible Migrations**: Seamless support for infallible migrations using `From` as well as fallible migrations using `TryFrom` with custom error types (`#[fallible]`).
+- **Infallible & Fallible Migrations**: Seamless support for infallible migrations using `From` as well as fallible migrations using `TryFrom` with custom error types (`#[fallible]`, `#[try]`, `#[try_from]`, `#[try_into]`).
 - **Flexible Versioning**: Supports integer version tags (`1`, `2`, `3`) or string keys (`"1.0"`, `"2.0"`).
 - **Custom Tag Field**: Configure any version field name (e.g., `version`, `schema_version`, `_v`).
 - **Format Agnostic**: Works out of the box with JSON, TOML, RON, YAML, and any other format supported by Serde.
@@ -39,7 +42,7 @@ Add `backwards-compat` and `serde` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-backwards-compat = "0.5"
+backwards-compat = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 ```
 
@@ -59,11 +62,11 @@ pub struct ConfigV1 {
     pub name: String,
 }
 
-// 2. Define the current domain model (no #[derive(Serialize, Deserialize)] needed)
+// 2. Define the current domain model (no #[derive(Serialize, Deserialize)] or Clone needed)
 // The macro automatically implements Serialize and Deserialize, and generates an
-// implicit wire struct for serialization logic.
+// implicit zero-copy wire struct for serialization logic.
 #[backwards_compat(tag = "version", version = 2, versions(1: ConfigV1))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct Config {
     pub name: String,
     pub port: u16,
@@ -104,7 +107,7 @@ fn main() {
 
 ### Fallible Migrations (`TryFrom` + Custom Error)
 
-When migrations can fail validation, mark steps as `#[fallible]`, specify the custom error type in the attribute (`error = ...`), and implement `TryFrom`:
+When migrations can fail validation, mark steps as `#[fallible]` (or `#[try]`, `#[try_from]`, `#[try_into]`), specify the custom error type in the attribute (`error = ...`), and implement `TryFrom`:
 
 ```rust
 use backwards_compat::backwards_compat;
@@ -124,8 +127,13 @@ pub struct ServerConfigV1 {
     pub port: u32,
 }
 
-#[backwards_compat(tag = "version", version = 2, error = ConfigError, versions(#[fallible] 1: ServerConfigV1))]
-#[derive(Debug, Clone, PartialEq)]
+#[backwards_compat(
+    tag = "version",
+    version = 2,
+    error = ConfigError,
+    versions(#[try_from] 1: ServerConfigV1)
+)]
+#[derive(Debug, PartialEq)]
 pub struct ServerConfig {
     pub port: u16,
 }
@@ -148,6 +156,76 @@ fn main() {
     let config: ServerConfig = ServerConfig::try_from(v1.clone()).unwrap();
     let config_into: ServerConfig = v1.try_into().unwrap();
     assert_eq!(config, config_into);
+}
+```
+
+### Adjacent Tagging (`content = "..."`)
+
+For tuple structs, primitive representations, or scalar types where Serde cannot use internal tagging, specify `content = "..."`:
+
+```rust
+use backwards_compat::backwards_compat;
+use serde::Deserialize;
+
+#[derive(Debug, PartialEq, Deserialize)]
+pub struct ScalarV1(pub u32);
+
+#[backwards_compat(
+    tag = "type",
+    content = "payload",
+    version = 2,
+    versions(1: ScalarV1)
+)]
+#[derive(Debug, PartialEq)]
+pub struct ScalarTarget(pub String);
+
+impl From<ScalarV1> for ScalarTarget {
+    fn from(v1: ScalarV1) -> Self {
+        Self(v1.0.to_string())
+    }
+}
+```
+
+### Generics and Lifetimes
+
+Domain models with lifetimes and generic parameters are supported out of the box:
+
+```rust
+use backwards_compat::backwards_compat;
+use serde::Deserialize;
+
+#[derive(Debug, PartialEq, Deserialize)]
+pub struct RecordV1<'a, T> {
+    pub key: &'a str,
+    pub val: T,
+}
+
+#[backwards_compat(
+    tag = "version",
+    version = 2,
+    versions(1: RecordV1<'a, T>)
+)]
+#[derive(Debug, PartialEq)]
+pub struct Record<'a, T: Clone>
+where
+    T: std::fmt::Debug,
+{
+    pub key: &'a str,
+    pub val: T,
+    pub active: bool,
+}
+
+impl<'a, T: Clone> From<RecordV1<'a, T>> for Record<'a, T>
+where
+    T: std::fmt::Debug,
+{
+    fn from(v1: RecordV1<'a, T>) -> Self {
+        Self {
+            key: v1.key,
+            val: v1.val,
+            active: true,
+        }
+    }
 }
 ```
 
@@ -184,12 +262,25 @@ pub struct DatabaseRecord {
 
 ---
 
+## Macro Attributes Reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `tag` | string | `"version"` | Tag field name in serialized output (e.g. `tag = "version"` or `tag("version")`). |
+| `content` | string | *none* | Content field name for adjacent tagging (e.g. `content = "data"`). |
+| `version` | int / string | *highest version* | Target schema version (e.g. `version = 2` or `version = "2.0"`). |
+| `error` | path | `Box<dyn Error + Send + Sync>` | Error type for `TryFrom` migrations (e.g. `error = MyError`). |
+| `dump` | flag | *disabled* | Prints the generated Rust token stream to `stderr` during compilation. |
+| `versions` | list / map | *empty* | List of version mappings (`versions(1: V1 => 2, #[try_from] 2: V2)`). |
+
+---
+
 ## How It Works
 
-Under the hood, `#[backwards_compat]` constructs an internal, private enum representing all declared schema versions with `#[serde(tag = ...)]`.
+Under the hood, `#[backwards_compat]` constructs an internal, private enum representing all declared schema versions with `#[serde(tag = ...)]` (or `#[serde(tag = ..., content = ...)]`).
 
 1. **On Deserialization**: Serde inspects the tag field and deserializes the payload into the appropriate version variant. The macro then traverses the shortest migration path in the dependency graph using your `From` or `TryFrom` implementations until it produces the target domain model.
-2. **On Serialization**: The macro converts your target domain model into the designated target version and serializes it, ensuring that the version tag is present.
+2. **On Serialization**: The macro serializes your target domain model using zero-copy shadow wire references, guaranteeing zero clones while ensuring that the version tag is present.
 3. **In-Code Conversions**: The macro generates `From<V> for TargetModel` (or `TryFrom<V> for TargetModel`) for all declared versions `V` by composing the transition steps along the shortest path.
 
 ---

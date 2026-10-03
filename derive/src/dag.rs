@@ -138,10 +138,7 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         while let Some(&target) = next_targets.get(curr_node) {
             match target {
                 NextTarget::TerminalTarget => {
-                    let target_ty = &input.target_ty;
-                    let curr_ty_str = quote::quote!(#curr_ty).to_string();
-                    let target_ty_str = quote::quote!(#target_ty).to_string();
-                    if curr_ty_str != target_ty_str {
+                    if curr_ty != input.target_ty {
                         let fallible = input.versions.get(curr_node).is_some_and(|node| node.fallible);
                         steps.push(MigrationStep {
                             from_ty: curr_ty,
