@@ -102,6 +102,7 @@ pub fn generate_conversions(input: &BackwardsCompatInput, dag_plan: &DagPlan) ->
 pub fn generate_backwards_compat(
     input: BackwardsCompatInput,
     shadow_struct: Option<&syn::Ident>,
+    extra_items: Option<TokenStream>,
 ) -> syn::Result<TokenStream> {
     let dag_plan = resolve_dag(&input)?;
 
@@ -177,10 +178,13 @@ pub fn generate_backwards_compat(
     };
 
     let conversions = generate_conversions(&input, &dag_plan);
+    let extra = extra_items.unwrap_or_default();
 
     let code = quote! {
         const _: () = {
             use ::serde::de::Error as _;
+
+            #extra
 
             #[allow(non_camel_case_types, dead_code)]
             #[derive(::serde::Deserialize)]
@@ -338,7 +342,7 @@ mod tests {
         })
         .unwrap();
 
-        let generated = generate_backwards_compat(input, None).unwrap();
+        let generated = generate_backwards_compat(input, None, None).unwrap();
         let rendered = generated.to_string();
 
         assert!(rendered.contains("__VersionHelper :: __V_0 (val) => :: core :: convert :: TryInto :: < TargetModel > :: try_into (val) . map_err (:: serde :: de :: Error :: custom)"));
@@ -358,7 +362,7 @@ mod tests {
         })
         .unwrap();
 
-        let generated = generate_backwards_compat(input, None).unwrap();
+        let generated = generate_backwards_compat(input, None, None).unwrap();
         let rendered = generated.to_string();
 
         // __VersionHelper only derives Deserialize
@@ -382,7 +386,7 @@ mod tests {
         .unwrap();
 
         let shadow = format_ident!("TargetModelWire");
-        let generated = generate_backwards_compat(input, Some(&shadow)).unwrap();
+        let generated = generate_backwards_compat(input, Some(&shadow), None).unwrap();
         let rendered = generated.to_string();
 
         assert!(rendered.contains("__VersionHelper :: __V_2 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
@@ -402,7 +406,7 @@ mod tests {
         })
         .unwrap();
 
-        let result = generate_backwards_compat(input, None);
+        let result = generate_backwards_compat(input, None, None);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
