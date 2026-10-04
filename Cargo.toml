@@ -1,6 +1,6 @@
 [package]
 name = "backwards-compat"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 description = "Streamlined backwards compatibility and schema versioning for Serde"
 license = "MIT OR Apache-2.0"
@@ -53,7 +53,7 @@ allow_attributes_without_reason = "warn"
 workspace = true
 
 [dependencies]
-backwards-compat-derive = { path = "derive", version = "1.1.0" } # x-release-please-version
+backwards-compat-derive = { path = "derive", version = "1.2.0" } # x-release-please-version
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]

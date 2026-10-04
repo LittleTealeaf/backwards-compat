@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/LittleTealeaf/backwards-compat/compare/v1.1.0...v1.2.0) (2026-10-04)
+
+
+### Features
+
+* support multiple schema versions sharing the same type ([#27](https://github.com/LittleTealeaf/backwards-compat/issues/27)) ([742f0a7](https://github.com/LittleTealeaf/backwards-compat/commit/742f0a70ed906923d1834cfee8f6f989675fa6bc))
+
 ## [1.1.0](https://github.com/LittleTealeaf/backwards-compat/compare/v1.0.0...v1.1.0) (2026-10-03)
 
 
