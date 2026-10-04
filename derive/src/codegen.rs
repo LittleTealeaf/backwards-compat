@@ -573,7 +573,7 @@ mod tests {
         let generated = generate_backwards_compat(&input, None, None).unwrap();
         let rendered = generated.to_string();
 
-        assert!(rendered.contains("use :: backwards_compat :: __private :: { BorrowedWireConvert as _ , FallbackWireConvert as _ , WireConvert as __WireConvert } ;"));
+        assert!(rendered.contains("use :: backwards_compat :: __private :: { BorrowedWireConvert as _ , FallbackWireConvert as _ , WireConvert as __WireConvert , } ;"));
         assert!(rendered.contains("let latest : ModelV2 = (& __WireConvert (self)) . convert_wire () ;"));
     }
 }
