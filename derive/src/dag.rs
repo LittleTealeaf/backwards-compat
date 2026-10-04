@@ -103,6 +103,18 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         }
     }
 
+    for (i, v) in input.versions.iter().enumerate() {
+        if v.explicit_next.is_none() && !v.tag.matches(&input.current_version) {
+            let last_same_idx = input.versions.iter().rposition(|cand| cand.ty == v.ty).unwrap();
+            if last_same_idx > i
+                && let Some(target) = next_targets.get(last_same_idx).copied()
+                && let Some(slot) = next_targets.get_mut(i)
+            {
+                *slot = target;
+            }
+        }
+    }
+
     // Cycle detection & dead-end detection
     for (i, v) in input.versions.iter().enumerate() {
         let mut visited_in_path = HashSet::new();
@@ -139,7 +151,15 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
             match target {
                 NextTarget::TerminalTarget => {
                     if curr_ty != input.target_ty {
-                        let fallible = input.versions.get(curr_node).is_some_and(|node| node.fallible);
+                        let transition_node = input
+                            .versions
+                            .iter()
+                            .rposition(|cand| cand.ty == curr_ty)
+                            .unwrap_or(curr_node);
+                        let fallible = input
+                            .versions
+                            .get(transition_node)
+                            .is_some_and(|node| node.fallible);
                         steps.push(MigrationStep {
                             from_ty: curr_ty,
                             to_ty: input.target_ty.clone(),
@@ -153,7 +173,15 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
                         break;
                     };
                     let next_ty = next_version.ty.clone();
-                    let fallible = input.versions.get(curr_node).is_some_and(|node| node.fallible);
+                    let transition_node = input
+                        .versions
+                        .iter()
+                        .rposition(|cand| cand.ty == curr_ty)
+                        .unwrap_or(curr_node);
+                    let fallible = input
+                        .versions
+                        .get(transition_node)
+                        .is_some_and(|node| node.fallible);
                     steps.push(MigrationStep {
                         from_ty: curr_ty,
                         to_ty: next_ty.clone(),
@@ -183,8 +211,10 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, reason = "index accesses in unit test assertions")]
 mod tests {
     use super::*;
+    use crate::parse::BackwardsCompatArgs;
     use syn::parse_quote;
 
     #[test]
@@ -240,5 +270,169 @@ mod tests {
             ],
         };
         assert!(path.is_fallible());
+    }
+
+    #[test]
+    fn test_dag_duplicate_types_sequential() {
+        let input_tokens = quote::quote! {
+            versions = [
+                1: V1,
+                2: V1,
+                3: V2,
+            ]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input_tokens).unwrap();
+        let input = args
+            .into_input(parse_quote!(Target), parse_quote!(pub), syn::Generics::default())
+            .unwrap();
+        let plan = resolve_dag(&input).unwrap();
+        assert_eq!(plan.paths.len(), 3);
+
+        let v1: Type = parse_quote!(V1);
+        let v2: Type = parse_quote!(V2);
+        let target: Type = parse_quote!(Target);
+
+        // Tag 1: V1 -> V2 -> Target (2 steps)
+        assert_eq!(plan.paths[0].tag, VersionTag::Int(1));
+        assert_eq!(plan.paths[0].steps.len(), 2);
+        assert_eq!(plan.paths[0].steps[0].from_ty, v1);
+        assert_eq!(plan.paths[0].steps[0].to_ty, v2);
+        assert_eq!(plan.paths[0].steps[1].from_ty, v2);
+        assert_eq!(plan.paths[0].steps[1].to_ty, target);
+
+        // Tag 2: V1 -> V2 -> Target (2 steps)
+        assert_eq!(plan.paths[1].tag, VersionTag::Int(2));
+        assert_eq!(plan.paths[1].steps.len(), 2);
+        assert_eq!(plan.paths[1].steps[0].from_ty, v1);
+        assert_eq!(plan.paths[1].steps[0].to_ty, v2);
+        assert_eq!(plan.paths[1].steps[1].from_ty, v2);
+        assert_eq!(plan.paths[1].steps[1].to_ty, target);
+
+        // Tag 3: V2 -> Target (1 step)
+        assert_eq!(plan.paths[2].tag, VersionTag::Int(3));
+        assert_eq!(plan.paths[2].steps.len(), 1);
+        assert_eq!(plan.paths[2].steps[0].from_ty, v2);
+        assert_eq!(plan.paths[2].steps[0].to_ty, target);
+    }
+
+    #[test]
+    fn test_dag_duplicate_types_alternating() {
+        let input_tokens = quote::quote! {
+            versions = [
+                1: V1,
+                2: V2,
+                3: V1,
+            ]
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input_tokens).unwrap();
+        let input = args
+            .into_input(parse_quote!(Target), parse_quote!(pub), syn::Generics::default())
+            .unwrap();
+        let plan = resolve_dag(&input).unwrap();
+        assert_eq!(plan.paths.len(), 3);
+
+        let v1: Type = parse_quote!(V1);
+        let v2: Type = parse_quote!(V2);
+        let target: Type = parse_quote!(Target);
+
+        // Tag 1: V1 -> Target (1 step)
+        assert_eq!(plan.paths[0].tag, VersionTag::Int(1));
+        assert_eq!(plan.paths[0].steps.len(), 1);
+        assert_eq!(plan.paths[0].steps[0].from_ty, v1);
+        assert_eq!(plan.paths[0].steps[0].to_ty, target);
+
+        // Tag 2: V2 -> V1 -> Target (2 steps)
+        assert_eq!(plan.paths[1].tag, VersionTag::Int(2));
+        assert_eq!(plan.paths[1].steps.len(), 2);
+        assert_eq!(plan.paths[1].steps[0].from_ty, v2);
+        assert_eq!(plan.paths[1].steps[0].to_ty, v1);
+        assert_eq!(plan.paths[1].steps[1].from_ty, v1);
+        assert_eq!(plan.paths[1].steps[1].to_ty, target);
+
+        // Tag 3: V1 -> Target (1 step)
+        assert_eq!(plan.paths[2].tag, VersionTag::Int(3));
+        assert_eq!(plan.paths[2].steps.len(), 1);
+        assert_eq!(plan.paths[2].steps[0].from_ty, v1);
+        assert_eq!(plan.paths[2].steps[0].to_ty, target);
+    }
+
+    #[test]
+    fn test_dag_duplicate_types_with_fallible() {
+        // Case 1: Latest occurrence of V1 (tag 2) is fallible
+        let input_tokens1 = quote::quote! {
+            versions = [
+                1: V1,
+                #[fallible] 2: V1,
+                3: V2,
+            ]
+        };
+        let args1: BackwardsCompatArgs = syn::parse2(input_tokens1).unwrap();
+        let input1 = args1
+            .into_input(parse_quote!(Target), parse_quote!(pub), syn::Generics::default())
+            .unwrap();
+        let plan1 = resolve_dag(&input1).unwrap();
+
+        // Tag 1 path: V1 -> V2 (fallible), V2 -> Target (infallible)
+        assert_eq!(plan1.paths[0].steps.len(), 2);
+        assert!(plan1.paths[0].steps[0].fallible);
+        assert!(!plan1.paths[0].steps[1].fallible);
+        assert!(plan1.paths[0].is_fallible());
+
+        // Tag 2 path: V1 -> V2 (fallible), V2 -> Target (infallible)
+        assert_eq!(plan1.paths[1].steps.len(), 2);
+        assert!(plan1.paths[1].steps[0].fallible);
+        assert!(!plan1.paths[1].steps[1].fallible);
+        assert!(plan1.paths[1].is_fallible());
+
+        // Tag 3 path: V2 -> Target (infallible)
+        assert_eq!(plan1.paths[2].steps.len(), 1);
+        assert!(!plan1.paths[2].steps[0].fallible);
+        assert!(!plan1.paths[2].is_fallible());
+
+        // Case 2: Earlier occurrence of V1 (tag 1) is fallible, but latest (tag 2) is infallible
+        let input_tokens2 = quote::quote! {
+            versions = [
+                #[fallible] 1: V1,
+                2: V1,
+                3: V2,
+            ]
+        };
+        let args2: BackwardsCompatArgs = syn::parse2(input_tokens2).unwrap();
+        let input2 = args2
+            .into_input(parse_quote!(Target), parse_quote!(pub), syn::Generics::default())
+            .unwrap();
+        let plan2 = resolve_dag(&input2).unwrap();
+
+        // Transition V1 -> V2 routes from latest V1 (tag 2), which is infallible
+        assert!(!plan2.paths[0].steps[0].fallible);
+        assert!(!plan2.paths[1].steps[0].fallible);
+        assert!(!plan2.paths[0].is_fallible());
+        assert!(!plan2.paths[1].is_fallible());
+
+        // Case 3: Terminal version is fallible
+        let input_tokens3 = quote::quote! {
+            versions = [
+                1: V1,
+                2: V1,
+                #[fallible] 3: V2,
+            ]
+        };
+        let args3: BackwardsCompatArgs = syn::parse2(input_tokens3).unwrap();
+        let input3 = args3
+            .into_input(parse_quote!(Target), parse_quote!(pub), syn::Generics::default())
+            .unwrap();
+        let plan3 = resolve_dag(&input3).unwrap();
+
+        // V2 -> Target step is fallible for all paths
+        assert!(!plan3.paths[0].steps[0].fallible);
+        assert!(plan3.paths[0].steps[1].fallible);
+        assert!(plan3.paths[0].is_fallible());
+
+        assert!(!plan3.paths[1].steps[0].fallible);
+        assert!(plan3.paths[1].steps[1].fallible);
+        assert!(plan3.paths[1].is_fallible());
+
+        assert!(plan3.paths[2].steps[0].fallible);
+        assert!(plan3.paths[2].is_fallible());
     }
 }

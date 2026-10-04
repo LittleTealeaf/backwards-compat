@@ -576,4 +576,65 @@ mod tests {
         assert!(rendered.contains("use :: backwards_compat :: __private :: { BorrowedWireConvert as _ , FallbackWireConvert as _ , WireConvert as __WireConvert , } ;"));
         assert!(rendered.contains("let latest : ModelV2 = (& __WireConvert (self)) . convert_wire () ;"));
     }
+
+    #[test]
+    fn test_generate_conversions_duplicate_types_sequential() {
+        let input = parse_test_input(quote! {
+            version = 3,
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV1 => 3,
+                3: ModelV2,
+            ]
+        });
+
+        let dag_plan = resolve_dag(&input).unwrap();
+        let conversions = generate_conversions(&input, &dag_plan);
+        let rendered = conversions.to_string();
+
+        let matches: Vec<_> = rendered
+            .match_indices("From < ModelV1 > for TargetModel")
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert!(!rendered.contains("From < ModelV2 > for TargetModel"));
+
+        let generated = generate_backwards_compat(&input, None, None).unwrap();
+        let full_rendered = generated.to_string();
+
+        assert!(full_rendered.contains("# [serde (rename = \"1\")] __V_0 (ModelV1)"));
+        assert!(full_rendered.contains("# [serde (rename = \"2\")] __V_1 (ModelV1)"));
+        assert!(full_rendered.contains("# [serde (rename = \"3\")] __V_2 (ModelV2)"));
+        assert!(full_rendered.contains("__VersionHelper :: __V_0 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
+        assert!(full_rendered.contains("__VersionHelper :: __V_1 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
+        assert!(full_rendered.contains("__VersionHelper :: __V_2 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
+    }
+
+    #[test]
+    fn test_generate_conversions_duplicate_types_alternating() {
+        let input = parse_test_input(quote! {
+            version = 3,
+            versions = [
+                1: ModelV1,
+                2: ModelV2,
+                3: ModelV1,
+            ]
+        });
+
+        let dag_plan = resolve_dag(&input).unwrap();
+        let conversions = generate_conversions(&input, &dag_plan);
+        let rendered = conversions.to_string();
+
+        assert!(rendered.contains("impl :: core :: convert :: From < ModelV2 > for TargetModel"));
+        assert!(!rendered.contains("From < ModelV1 > for TargetModel"));
+
+        let generated = generate_backwards_compat(&input, None, None).unwrap();
+        let full_rendered = generated.to_string();
+
+        assert!(full_rendered.contains("# [serde (rename = \"1\")] __V_0 (ModelV1)"));
+        assert!(full_rendered.contains("# [serde (rename = \"2\")] __V_1 (ModelV2)"));
+        assert!(full_rendered.contains("# [serde (rename = \"3\")] __V_2 (ModelV1)"));
+        assert!(full_rendered.contains("__VersionHelper :: __V_0 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
+        assert!(full_rendered.contains("__VersionHelper :: __V_1 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
+        assert!(full_rendered.contains("__VersionHelper :: __V_2 (val) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (val))"));
+    }
 }

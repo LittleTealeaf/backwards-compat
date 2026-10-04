@@ -219,6 +219,74 @@
 //! #[derive(Debug, Clone, PartialEq)]
 //! pub struct V2 { pub val: i32 }
 //! ```
+//!
+//! ## Multiple Versions Sharing the Same Type
+//!
+//! Multiple historical version tags can map to the exact same Rust data type (for example, when the wire format was unchanged across minor releases or when a previous data type is reused).
+//!
+//! When multiple versions share a type (such as `versions(1: V1, 2: V1, 3: V2)` or `versions(1: V1, 2: V2, 3: V1)`), transitions automatically branch and route conversions from the *latest* occurrence of each type in the migration graph:
+//!
+//! ```rust
+//! use backwards_compat::backwards_compat;
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Debug, Clone, PartialEq, Deserialize)]
+//! pub struct PayloadV1 {
+//!     pub data: String,
+//! }
+//!
+//! #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+//! pub struct PayloadV2 {
+//!     pub data: String,
+//!     pub extra: u32,
+//! }
+//!
+//! impl From<PayloadV1> for PayloadV2 {
+//!     fn from(v1: PayloadV1) -> Self {
+//!         Self {
+//!             data: v1.data,
+//!             extra: 0,
+//!         }
+//!     }
+//! }
+//!
+//! #[backwards_compat(
+//!     tag = "version",
+//!     version = 3,
+//!     versions(1: PayloadV1, 2: PayloadV1, 3: PayloadV2)
+//! )]
+//! #[derive(Debug, Clone, PartialEq)]
+//! pub struct Payload {
+//!     pub data: String,
+//!     pub extra: u32,
+//! }
+//!
+//! impl From<PayloadV2> for Payload {
+//!     fn from(v2: PayloadV2) -> Self {
+//!         Self {
+//!             data: v2.data,
+//!             extra: v2.extra,
+//!         }
+//!     }
+//! }
+//!
+//! impl From<Payload> for PayloadV2 {
+//!     fn from(p: Payload) -> Self {
+//!         Self {
+//!             data: p.data,
+//!             extra: p.extra,
+//!         }
+//!     }
+//! }
+//!
+//! let v1_json = r#"{"version": "1", "data": "hello"}"#;
+//! let p1: Payload = serde_json::from_str(v1_json).unwrap();
+//! assert_eq!(p1, Payload { data: "hello".into(), extra: 0 });
+//!
+//! let v2_json = r#"{"version": "2", "data": "world"}"#;
+//! let p2: Payload = serde_json::from_str(v2_json).unwrap();
+//! assert_eq!(p2, Payload { data: "world".into(), extra: 0 });
+//! ```
 pub use backwards_compat_derive::backwards_compat;
 
 #[doc(hidden)]

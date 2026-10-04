@@ -136,6 +136,23 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 /// )]
 /// pub struct ScalarTarget(pub String);
 /// ```
+///
+/// ### 4. Multiple Versions Sharing the Same Type
+///
+/// Multiple historical version tags can map to the same Rust data type (e.g. `versions(1: V1, 2: V1, 3: V2)` or `versions(1: V1, 2: V2, 3: V1)`).
+/// Transitions automatically branch and route conversions from the *latest* occurrence of each type.
+///
+/// ```rust,ignore
+/// #[backwards_compat(
+///     tag = "version",
+///     version = 3,
+///     versions(1: ConfigV1, 2: ConfigV1, 3: ConfigV2)
+/// )]
+/// pub struct Config {
+///     pub name: String,
+///     pub port: u16,
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = syn::parse_macro_input!(attr as BackwardsCompatArgs);
