@@ -260,6 +260,52 @@ pub struct DatabaseRecord {
 }
 ```
 
+### Pre-Backwards-Compat (Unversioned) Schemas (`_: Type` / `_: Self`)
+
+When introducing `#[backwards_compat]` to an existing model that was previously serialized without any version tag field, use `_` (or `none` / `untagged`) as the version key inside `versions(...)`:
+
+```rust
+use backwards_compat::backwards_compat;
+use serde::Deserialize;
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ConfigV0 {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ConfigV1 {
+    pub name: String,
+    pub host: String,
+}
+
+#[backwards_compat(
+    tag = "version",
+    version = 2,
+    versions(
+        _: ConfigV0, // Unversioned payloads upgrade ConfigV0 -> ConfigV1 -> Config
+        1: ConfigV1,
+    )
+)]
+#[derive(Debug, PartialEq)]
+pub struct Config {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+}
+```
+
+If your struct's fields haven't changed yet and you want to start writing `"version": "1"` while still accepting legacy unversioned payloads, use `_: Self`:
+
+```rust
+#[backwards_compat(tag = "version", version = 1, versions(_: Self))]
+#[derive(Debug, PartialEq)]
+pub struct Config {
+    pub name: String,
+    pub port: u16,
+}
+```
+
 ---
 
 ## Macro Attributes Reference

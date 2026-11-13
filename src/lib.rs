@@ -287,10 +287,87 @@
 //! let p2: Payload = serde_json::from_str(v2_json).unwrap();
 //! assert_eq!(p2, Payload { data: "world".into(), extra: 0 });
 //! ```
+//!
+//! ## Pre-Backwards-Compat (Unversioned) Schemas (`_: Type` / `_: Self`)
+//!
+//! When adopting `#[backwards_compat]` on an existing system that previously serialized payloads
+//! without a version tag field, use `_` (or aliases `none` / `untagged`) as the version key in `versions(...)`:
+//!
+//! ```rust
+//! use backwards_compat::backwards_compat;
+//! use serde::Deserialize;
+//!
+//! #[derive(Debug, Clone, PartialEq, Deserialize)]
+//! pub struct ConfigV0 {
+//!     pub name: String,
+//! }
+//!
+//! #[derive(Debug, Clone, PartialEq, Deserialize)]
+//! pub struct ConfigV1 {
+//!     pub name: String,
+//!     pub host: String,
+//! }
+//!
+//! impl From<ConfigV0> for ConfigV1 {
+//!     fn from(v0: ConfigV0) -> Self {
+//!         Self { name: v0.name, host: "localhost".into() }
+//!     }
+//! }
+//!
+//! impl From<ConfigV1> for Config {
+//!     fn from(v1: ConfigV1) -> Self {
+//!         Self { name: v1.name, host: v1.host, port: 8080 }
+//!     }
+//! }
+//!
+//! #[backwards_compat(
+//!     tag = "version",
+//!     version = 2,
+//!     versions(
+//!         _: ConfigV0,
+//!         1: ConfigV1,
+//!     )
+//! )]
+//! #[derive(Debug, PartialEq)]
+//! pub struct Config {
+//!     pub name: String,
+//!     pub host: String,
+//!     pub port: u16,
+//! }
+//!
+//! // Deserializing an unversioned legacy payload upgrades ConfigV0 -> ConfigV1 -> Config:
+//! let unversioned = r#"{"name": "legacy-app"}"#;
+//! let cfg: Config = serde_json::from_str(unversioned).unwrap();
+//! assert_eq!(cfg, Config { name: "legacy-app".into(), host: "localhost".into(), port: 8080 });
+//! ```
+//!
+//! If the schema has not changed yet and you simply want to start emitting a version tag while still accepting
+//! unversioned payloads, use `_: Self`:
+//!
+//! ```rust
+//! use backwards_compat::backwards_compat;
+//!
+//! #[backwards_compat(tag = "version", version = 1, versions(_: Self))]
+//! #[derive(Debug, PartialEq)]
+//! pub struct AppSettings {
+//!     pub debug: bool,
+//! }
+//!
+//! let legacy = r#"{"debug": true}"#;
+//! let tagged = r#"{"version": "1", "debug": true}"#;
+//! assert_eq!(
+//!     serde_json::from_str::<AppSettings>(legacy).unwrap(),
+//!     serde_json::from_str::<AppSettings>(tagged).unwrap()
+//! );
+//! ```
 pub use backwards_compat_derive::backwards_compat;
+
+mod content;
 
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::content::{Content, ContentDeserializer};
+
     pub struct WireConvert<'b, T: ?Sized>(pub &'b T);
 
     pub trait BorrowedWireConvert<W> {
