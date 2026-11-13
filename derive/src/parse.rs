@@ -3,17 +3,24 @@ use syn::{
     parse::{Parse, ParseStream},
 };
 
-/// Represents a version tag, which can be either an integer or a string literal.
+/// Represents a version tag, which can be unversioned (`_`), an integer, or a string literal.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VersionTag {
+    Untagged,
     Int(u64),
     String(String),
 }
 
 impl VersionTag {
+    /// Returns true if this version tag represents the unversioned (`_`) pre-backwards-compat entry.
+    pub const fn is_untagged(&self) -> bool {
+        matches!(self, Self::Untagged)
+    }
+
     /// Returns the string representation of the version tag.
     pub fn to_tag_string(&self) -> String {
         match self {
+            Self::Untagged => "_".to_owned(),
             Self::Int(i) => i.to_string(),
             Self::String(s) => s.clone(),
         }
@@ -21,7 +28,11 @@ impl VersionTag {
 
     /// Checks if two version tags represent the same tag value (either exact match or matching string representation).
     pub fn matches(&self, other: &Self) -> bool {
-        self == other || self.to_tag_string() == other.to_tag_string()
+        match (self, other) {
+            (Self::Untagged, Self::Untagged) => true,
+            (Self::Untagged, _) | (_, Self::Untagged) => false,
+            _ => self == other || self.to_tag_string() == other.to_tag_string(),
+        }
     }
 
     /// Helper to construct a compile error associated with a specific span.
@@ -30,12 +41,34 @@ impl VersionTag {
         syn::Error::new(span, msg)
     }
 
+    /// Parse a concrete (`Int` or `String`) `VersionTag` from a `ParseStream`, disallowing `_` / `untagged`.
+    pub fn parse_concrete(input: ParseStream, context: &str) -> syn::Result<(Self, proc_macro2::Span)> {
+        let (tag, span) = Self::parse(input)?;
+        if tag.is_untagged() {
+            return Err(syn::Error::new(
+                span,
+                format!("unversioned `_` cannot be used as {context}"),
+            ));
+        }
+        Ok((tag, span))
+    }
+
     /// Parse a `VersionTag` from a `ParseStream`, returning the tag and its span.
     pub fn parse(input: ParseStream) -> syn::Result<(Self, proc_macro2::Span)> {
+        if input.peek(Token![_]) {
+            let underscore: Token![_] = input.parse()?;
+            return Ok((Self::Untagged, underscore.span));
+        }
+
         if input.peek(syn::Ident) {
+            let ident: Ident = input.parse()?;
+            let s = ident.to_string();
+            if matches!(s.as_str(), "none" | "None" | "untagged") {
+                return Ok((Self::Untagged, ident.span()));
+            }
             return Err(syn::Error::new(
-                input.span(),
-                "version keys must be string or integer literals (e.g. 1 or \"1\"), not identifiers like v1",
+                ident.span(),
+                "version keys must be string or integer literals (e.g. 1 or \"1\"), or `_` for unversioned, not identifiers like v1",
             ));
         }
 
@@ -49,7 +82,7 @@ impl VersionTag {
         } else {
             Err(syn::Error::new(
                 input.span(),
-                "expected integer or string literal for version tag",
+                "expected integer or string literal (or `_` for unversioned) for version tag",
             ))
         }
     }
@@ -58,6 +91,7 @@ impl VersionTag {
 impl core::fmt::Display for VersionTag {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Untagged => write!(f, "_"),
             Self::Int(i) => write!(f, "{i}"),
             Self::String(s) => write!(f, "{s}"),
         }
@@ -67,6 +101,10 @@ impl core::fmt::Display for VersionTag {
 impl quote::ToTokens for VersionTag {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         match self {
+            Self::Untagged => {
+                let underscore = Token![_](proc_macro2::Span::call_site());
+                underscore.to_tokens(tokens);
+            }
             Self::Int(i) => {
                 let lit = syn::LitInt::new(&i.to_string(), proc_macro2::Span::call_site());
                 lit.to_tokens(tokens);
@@ -154,12 +192,12 @@ impl Parse for BackwardsCompatArgs {
             } else if ident_str == "version" {
                 if input.peek(Token![=]) {
                     input.parse::<Token![=]>()?;
-                    let (v, span) = VersionTag::parse(input)?;
+                    let (v, span) = VersionTag::parse_concrete(input, "`version`")?;
                     current_version = Some((v, span));
                 } else if input.peek(syn::token::Paren) {
                     let inner;
                     syn::parenthesized!(inner in input);
-                    let (v, span) = VersionTag::parse(&inner)?;
+                    let (v, span) = VersionTag::parse_concrete(&inner, "`version`")?;
                     current_version = Some((v, span));
                 } else {
                     return Err(syn::Error::new(ident.span(), "expected `=` or `()` for version"));
@@ -218,7 +256,7 @@ impl Parse for BackwardsCompatArgs {
 
                     let explicit_next = if content.peek(Token![=>]) {
                         content.parse::<Token![=>]>()?;
-                        let (next_tag, next_span) = VersionTag::parse(&content)?;
+                        let (next_tag, next_span) = VersionTag::parse_concrete(&content, "target of `=>`")?;
                         Some((next_tag, next_span))
                     } else {
                         None
@@ -271,7 +309,15 @@ impl BackwardsCompatArgs {
         vis: syn::Visibility,
         generics: syn::Generics,
     ) -> syn::Result<BackwardsCompatInput> {
-        let versions = self.versions;
+        let mut versions = self.versions;
+        for entry in &mut versions {
+            if let syn::Type::Path(ref tp) = entry.ty
+                && tp.qself.is_none()
+                && tp.path.is_ident("Self")
+            {
+                entry.ty = target_ty.clone();
+            }
+        }
 
         let (current_version, current_version_span) = if let Some((v, span)) = self.current_version {
             if !versions.is_empty() {
@@ -292,7 +338,7 @@ impl BackwardsCompatArgs {
                 }
             }
             (v, span)
-        } else if let Some(last) = versions.last() {
+        } else if let Some(last) = versions.iter().rfind(|entry| !entry.tag.is_untagged()) {
             (last.tag.clone(), last.tag_span)
         } else {
             (VersionTag::Int(1), proc_macro2::Span::call_site())
@@ -663,7 +709,66 @@ mod tests {
         let err = syn::parse2::<BackwardsCompatArgs>(input).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "version keys must be string or integer literals (e.g. 1 or \"1\"), not identifiers like v1"
+            "version keys must be string or integer literals (e.g. 1 or \"1\"), or `_` for unversioned, not identifiers like v1"
+        );
+    }
+
+    #[test]
+    fn test_parse_args_untagged_wildcard_and_aliases() {
+        for key in [
+            quote::quote!(_),
+            quote::quote!(none),
+            quote::quote!(None),
+            quote::quote!(untagged),
+        ] {
+            let input = quote::quote! {
+                version = 2,
+                versions = [
+                    #key: ModelV0,
+                    1: ModelV1,
+                ]
+            };
+            let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+            assert_eq!(args.versions.len(), 2);
+            assert_eq!(args.versions[0].tag, VersionTag::Untagged);
+            assert_eq!(args.versions[1].tag, VersionTag::Int(1));
+        }
+    }
+
+    #[test]
+    fn test_parse_args_untagged_self_normalized_and_default_version() {
+        let input = quote::quote! {
+            versions(_: Self)
+        };
+        let args: BackwardsCompatArgs = syn::parse2(input).unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(TargetModel<T>);
+        let vis: syn::Visibility = syn::parse_quote!(pub);
+        let compat_input = args
+            .into_input(target_ty.clone(), vis, syn::Generics::default())
+            .unwrap();
+        assert_eq!(compat_input.current_version, VersionTag::Int(1));
+        assert_eq!(compat_input.versions.len(), 1);
+        assert_eq!(compat_input.versions[0].tag, VersionTag::Untagged);
+        assert_eq!(compat_input.versions[0].ty, target_ty);
+    }
+
+    #[test]
+    fn test_parse_args_untagged_invalid_contexts() {
+        let err1 = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            version = _,
+            versions(1: ModelV1)
+        })
+        .unwrap_err();
+        assert_eq!(err1.to_string(), "unversioned `_` cannot be used as `version`");
+
+        let err2 = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            version = 2,
+            versions(1: ModelV1 => _)
+        })
+        .unwrap_err();
+        assert_eq!(
+            err2.to_string(),
+            "unversioned `_` cannot be used as target of `=>`"
         );
     }
 

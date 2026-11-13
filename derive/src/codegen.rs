@@ -132,6 +132,9 @@ pub fn generate_backwards_compat(
     };
 
     for (i, v) in input.versions.iter().enumerate() {
+        if v.tag.is_untagged() {
+            continue;
+        }
         let var_ident = format_ident!("__V_{}", i);
         let tag_str = v.tag.to_tag_string();
         let ty = &v.ty;
@@ -182,6 +185,54 @@ pub fn generate_backwards_compat(
         }
     }
 
+    let untagged_info = if let Some((untagged_idx, untagged_v)) = input
+        .versions
+        .iter()
+        .enumerate()
+        .find(|(_, v)| v.tag.is_untagged())
+    {
+        let untagged_ty = &untagged_v.ty;
+        let path = dag_plan.paths.get(untagged_idx);
+
+        let (de_ty_tokens, convert_tokens, needs_extra_where_bound) = if untagged_ty == target_ty {
+            if let Some(info) = shadow_info {
+                let owned_ident = info.owned_ident;
+                (
+                    quote!(#owned_ident #ty_generics),
+                    quote!(::core::result::Result::Ok(::core::convert::Into::into(val))),
+                    !dag_plan.target_is_wire,
+                )
+            } else {
+                return Err(syn::Error::new_spanned(
+                    &input.target_ty,
+                    "using the domain struct as the unversioned wire format is only supported when using the #[backwards_compat] attribute macro",
+                ));
+            }
+        } else if path.is_none_or(|p| p.steps.is_empty()) {
+            (
+                quote!(#untagged_ty),
+                quote!(::core::result::Result::Ok(val)),
+                true,
+            )
+        } else if path.is_some_and(super::dag::ResolvedPath::is_fallible) {
+            (
+                quote!(#untagged_ty),
+                quote!(::core::convert::TryInto::<#target_ty>::try_into(val).map_err(::serde::de::Error::custom)),
+                true,
+            )
+        } else {
+            (
+                quote!(#untagged_ty),
+                quote!(::core::result::Result::Ok(::core::convert::Into::into(val))),
+                true,
+            )
+        };
+
+        Some((de_ty_tokens, convert_tokens, needs_extra_where_bound))
+    } else {
+        None
+    };
+
     let (serialize_stmt, latest_wire_ty_in_helper) = if dag_plan.target_is_wire {
         let info = shadow_info.unwrap();
         let construct_borrowed = &info.construct_borrowed;
@@ -230,6 +281,11 @@ pub fn generate_backwards_compat(
     de_where_clause.predicates.push(syn::parse_quote!(
         __VersionHelper #ty_generics: ::serde::Deserialize<'__de>
     ));
+    if let Some((ref de_ty_tokens, _, true)) = untagged_info {
+        de_where_clause.predicates.push(syn::parse_quote!(
+            #de_ty_tokens: ::serde::Deserialize<'__de>
+        ));
+    }
 
     let mut ser_helper_generics = input.generics.clone();
     let ser_helper_lifetime: syn::GenericParam = syn::parse_quote!('__a);
@@ -258,6 +314,32 @@ pub fn generate_backwards_compat(
             }
         },
     );
+
+    let deserialize_body = if let Some((ref de_ty_tokens, ref convert_tokens, _)) = untagged_info {
+        quote! {
+            let content = <::backwards_compat::__private::Content<'__de> as ::serde::Deserialize>::deserialize(__deserializer)?;
+            if content.has_map_key(#tag_field) {
+                let helper = <__VersionHelper #ty_generics as ::serde::Deserialize>::deserialize(
+                    ::backwards_compat::__private::ContentDeserializer::<__D::Error>::new(content),
+                )?;
+                match helper {
+                    #(#match_arms,)*
+                }
+            } else {
+                let val = <#de_ty_tokens as ::serde::Deserialize>::deserialize(
+                    ::backwards_compat::__private::ContentDeserializer::<__D::Error>::new(content),
+                )?;
+                #convert_tokens
+            }
+        }
+    } else {
+        quote! {
+            let helper = <__VersionHelper #ty_generics as ::serde::Deserialize>::deserialize(__deserializer)?;
+            match helper {
+                #(#match_arms,)*
+            }
+        }
+    };
 
     let code = quote! {
         const _: () = {
@@ -296,10 +378,7 @@ pub fn generate_backwards_compat(
                 where
                     __D: ::serde::Deserializer<'__de>,
                 {
-                    let helper = <__VersionHelper #ty_generics as ::serde::Deserialize>::deserialize(__deserializer)?;
-                    match helper {
-                        #(#match_arms,)*
-                    }
+                    #deserialize_body
                 }
             }
 

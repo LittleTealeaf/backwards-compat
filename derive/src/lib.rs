@@ -71,6 +71,7 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 /// # Version Entry Directives
 ///
 /// - **`tag: Type`**: Sequential chain step (e.g. `1: ModelV1 => 2: ModelV2 => 3`).
+/// - **`_: Type` / `none: Type` / `untagged: Type`**: Pre-backwards-compat (unversioned) entry used when the version tag field is absent from the input payload. Use `_: Self` to accept both unversioned and current-version payloads into the target struct directly.
 /// - **`tag: Type => target_tag`**: Custom DAG transition jumping directly to a target version.
 /// - **`#[fallible]`, `#[r#try]`, `#[try_from]`, `#[try_into]`, `#[falliable]`**:
 ///   Marks a transition as fallible, generating `TryFrom` instead of `From`.
@@ -181,7 +182,9 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(err) => return err.to_compile_error().into(),
     };
 
-    if dag_plan.target_is_wire {
+    let needs_shadow_wire = dag_plan.target_is_wire || input.versions.iter().any(|v| v.ty == input.target_ty);
+
+    if needs_shadow_wire {
         let call_site_span = proc_macro2::Span::call_site();
         let shadow_ident = quote::format_ident!("__{}ShadowWire", target_ident, span = call_site_span);
         let borrowed_ident = quote::format_ident!("__{}BorrowedWire", target_ident, span = call_site_span);
