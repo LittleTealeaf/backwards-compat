@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/LittleTealeaf/backwards-compat/compare/v1.2.0...v1.3.0) (2026-11-13)
+
+
+### Features
+
+* support pre-versioned compatability ([#40](https://github.com/LittleTealeaf/backwards-compat/issues/40)) ([c101087](https://github.com/LittleTealeaf/backwards-compat/commit/c1010877fd04c5d56ebceb3b52c6810cc414ba8f))
+
 ## [1.2.0](https://github.com/LittleTealeaf/backwards-compat/compare/v1.1.0...v1.2.0) (2026-10-04)
 
 
