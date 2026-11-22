@@ -33,19 +33,151 @@ pub enum Content<'de> {
     Map(Vec<(Self, Self)>),
 }
 
-impl Content<'_> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagValue<'de> {
+    Int(u64),
+    NegativeInt(i64),
+    Str(&'de str),
+    String(String),
+    Other,
+}
+
+impl TagValue<'_> {
     #[must_use]
-    pub fn has_map_key(&self, key: &str) -> bool {
+    pub const fn as_u64(&self) -> Option<u64> {
+        match *self {
+            Self::Int(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(s) => Some(s),
+            Self::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for TagValue<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Int(n) => write!(f, "{n}"),
+            Self::NegativeInt(n) => write!(f, "{n}"),
+            Self::Str(s) => write!(f, "\"{s}\""),
+            Self::String(s) => write!(f, "\"{s}\""),
+            Self::Other => f.write_str("<non-version tag>"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ExtractedPayload<'de> {
+    Tagged {
+        tag: TagValue<'de>,
+        payload: Content<'de>,
+    },
+    Untagged(Content<'de>),
+    NotAMap(Content<'de>),
+    MissingContent {
+        tag: TagValue<'de>,
+    },
+}
+
+impl<'de> Content<'de> {
+    fn matches_key(&self, key: &str) -> bool {
         let key_bytes = key.as_bytes();
         match self {
-            Self::Map(entries) => entries.iter().any(|(k, _)| match k {
-                Self::Str(s) => *s == key,
-                Self::String(s) => s == key,
-                Self::Bytes(b) => *b == key_bytes,
-                Self::ByteBuf(b) => b.as_slice() == key_bytes,
-                _ => false,
-            }),
+            Self::Str(s) => *s == key,
+            Self::String(s) => s == key,
+            Self::Bytes(b) => *b == key_bytes,
+            Self::ByteBuf(b) => b.as_slice() == key_bytes,
             _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn has_map_key(&self, key: &str) -> bool {
+        match self {
+            Self::Map(entries) => entries.iter().any(|(k, _)| k.matches_key(key)),
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn into_tag_value(self) -> TagValue<'de> {
+        match self {
+            Self::U8(n) => TagValue::Int(u64::from(n)),
+            Self::U16(n) => TagValue::Int(u64::from(n)),
+            Self::U32(n) => TagValue::Int(u64::from(n)),
+            Self::U64(n) => TagValue::Int(n),
+            Self::U128(n) => u64::try_from(n).map_or(TagValue::Other, TagValue::Int),
+            Self::I8(n) => {
+                u64::try_from(n).map_or_else(|_| TagValue::NegativeInt(i64::from(n)), TagValue::Int)
+            }
+            Self::I16(n) => {
+                u64::try_from(n).map_or_else(|_| TagValue::NegativeInt(i64::from(n)), TagValue::Int)
+            }
+            Self::I32(n) => {
+                u64::try_from(n).map_or_else(|_| TagValue::NegativeInt(i64::from(n)), TagValue::Int)
+            }
+            Self::I64(n) => u64::try_from(n).map_or(TagValue::NegativeInt(n), TagValue::Int),
+            Self::I128(n) => u64::try_from(n).map_or_else(
+                |_| i64::try_from(n).map_or(TagValue::Other, TagValue::NegativeInt),
+                TagValue::Int,
+            ),
+            Self::Str(s) => TagValue::Str(s),
+            Self::String(s) => TagValue::String(s),
+            _ => TagValue::Other,
+        }
+    }
+
+    #[must_use]
+    pub fn extract_internal_tag(self, tag_field: &str) -> ExtractedPayload<'de> {
+        let mut cur = self;
+        while let Self::Newtype(inner) = cur {
+            cur = *inner;
+        }
+        match cur {
+            Self::Map(mut entries) => {
+                if let Some(pos) = entries.iter().position(|(k, _)| k.matches_key(tag_field)) {
+                    let (_, tag_content) = entries.remove(pos);
+                    ExtractedPayload::Tagged {
+                        tag: tag_content.into_tag_value(),
+                        payload: Self::Map(entries),
+                    }
+                } else {
+                    ExtractedPayload::Untagged(Self::Map(entries))
+                }
+            }
+            other => ExtractedPayload::NotAMap(other),
+        }
+    }
+
+    #[must_use]
+    pub fn extract_adjacent_tag(self, tag_field: &str, content_field: &str) -> ExtractedPayload<'de> {
+        let mut cur = self;
+        while let Self::Newtype(inner) = cur {
+            cur = *inner;
+        }
+        match cur {
+            Self::Map(mut entries) => {
+                let Some(tag_pos) = entries.iter().position(|(k, _)| k.matches_key(tag_field)) else {
+                    return ExtractedPayload::Untagged(Self::Map(entries));
+                };
+                let (_, tag_content) = entries.remove(tag_pos);
+                let tag = tag_content.into_tag_value();
+
+                if let Some(content_pos) = entries.iter().position(|(k, _)| k.matches_key(content_field)) {
+                    let (_, payload) = entries.remove(content_pos);
+                    ExtractedPayload::Tagged { tag, payload }
+                } else {
+                    ExtractedPayload::MissingContent { tag }
+                }
+            }
+            other => ExtractedPayload::NotAMap(other),
         }
     }
 
@@ -675,7 +807,7 @@ where
     }
 }
 
-struct VariantDeserializer<'de, E> {
+pub struct VariantDeserializer<'de, E> {
     value: Option<Content<'de>>,
     err: PhantomData<E>,
 }
@@ -824,4 +956,377 @@ where
         err: PhantomData,
     };
     visitor.visit_map(map_visitor)
+}
+
+pub struct VariantContentDeserializer<'de, E> {
+    variant: &'static str,
+    payload: Content<'de>,
+    err: PhantomData<E>,
+}
+
+impl<'de, E> VariantContentDeserializer<'de, E>
+where
+    E: de::Error,
+{
+    #[must_use]
+    pub const fn new(variant: &'static str, payload: Content<'de>) -> Self {
+        Self {
+            variant,
+            payload,
+            err: PhantomData,
+        }
+    }
+}
+
+impl<'de, E> EnumAccess<'de> for VariantContentDeserializer<'de, E>
+where
+    E: de::Error,
+{
+    type Error = E;
+    type Variant = VariantDeserializer<'de, E>;
+
+    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        let variant = VariantDeserializer {
+            value: Some(self.payload),
+            err: PhantomData,
+        };
+        seed.deserialize(self.variant.into_deserializer())
+            .map(|v| (v, variant))
+    }
+}
+
+impl<'de, E> Deserializer<'de> for VariantContentDeserializer<'de, E>
+where
+    E: de::Error,
+{
+    type Error = E;
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(de::Error::invalid_type(Unexpected::Enum, &visitor))
+    }
+
+    fn deserialize_enum<V>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_enum(self)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct identifier ignored_any
+    }
+}
+
+#[cold]
+#[must_use]
+pub fn unknown_version_error<E: de::Error>(
+    found: &TagValue<'_>,
+    current_int: Option<u64>,
+    supported: &[&str],
+    has_disabled_versions: bool,
+) -> E {
+    if matches!(found, TagValue::Other) {
+        return de::Error::invalid_type(
+            Unexpected::Other("non-version tag"),
+            &"an integer or string version tag",
+        );
+    }
+
+    let list = supported.join(", ");
+    if let TagValue::Int(n) = *found
+        && let Some(max) = current_int
+        && n > max
+    {
+        return de::Error::custom(format!(
+            "version {n} is newer than supported version {max} (supported versions: {list})"
+        ));
+    }
+
+    let gated_hint = if has_disabled_versions {
+        "; some versions may be disabled by feature flags"
+    } else {
+        ""
+    };
+    de::Error::custom(format!(
+        "unknown version {found} (supported versions: {list}{gated_hint})"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::de::value::Error as ValueError;
+
+    #[test]
+    fn test_into_tag_value_and_accessors() {
+        // Unsigned integers
+        assert_eq!(Content::U8(1).into_tag_value(), TagValue::Int(1));
+        assert_eq!(Content::U16(2).into_tag_value(), TagValue::Int(2));
+        assert_eq!(Content::U32(3).into_tag_value(), TagValue::Int(3));
+        assert_eq!(Content::U64(u64::MAX).into_tag_value(), TagValue::Int(u64::MAX));
+        assert_eq!(
+            Content::U128(u128::from(u64::MAX)).into_tag_value(),
+            TagValue::Int(u64::MAX)
+        );
+        assert_eq!(
+            Content::U128(u128::from(u64::MAX) + 1).into_tag_value(),
+            TagValue::Other
+        );
+
+        // Signed integers (positive, zero, negative, overflowing)
+        assert_eq!(Content::I8(7).into_tag_value(), TagValue::Int(7));
+        assert_eq!(Content::I8(-5).into_tag_value(), TagValue::NegativeInt(-5));
+        assert_eq!(Content::I16(0).into_tag_value(), TagValue::Int(0));
+        assert_eq!(Content::I16(-10).into_tag_value(), TagValue::NegativeInt(-10));
+        assert_eq!(Content::I32(42).into_tag_value(), TagValue::Int(42));
+        assert_eq!(Content::I32(-42).into_tag_value(), TagValue::NegativeInt(-42));
+        assert_eq!(Content::I64(99).into_tag_value(), TagValue::Int(99));
+        assert_eq!(
+            Content::I64(i64::MIN).into_tag_value(),
+            TagValue::NegativeInt(i64::MIN)
+        );
+        assert_eq!(
+            Content::I128(i128::from(u64::MAX)).into_tag_value(),
+            TagValue::Int(u64::MAX)
+        );
+        assert_eq!(
+            Content::I128(i128::from(u64::MAX) + 1).into_tag_value(),
+            TagValue::Other
+        );
+        assert_eq!(
+            Content::I128(i128::from(i64::MIN)).into_tag_value(),
+            TagValue::NegativeInt(i64::MIN)
+        );
+        assert_eq!(
+            Content::I128(i128::from(i64::MIN) - 1).into_tag_value(),
+            TagValue::Other
+        );
+
+        // Strings
+        assert_eq!(Content::Str("v1").into_tag_value(), TagValue::Str("v1"));
+        assert_eq!(
+            Content::String("v2".to_owned()).into_tag_value(),
+            TagValue::String("v2".to_owned())
+        );
+
+        // Non-tag values
+        assert_eq!(Content::Bool(true).into_tag_value(), TagValue::Other);
+        assert_eq!(Content::None.into_tag_value(), TagValue::Other);
+        assert_eq!(Content::Unit.into_tag_value(), TagValue::Other);
+
+        // Accessors & Display
+        let int_tag = TagValue::Int(5);
+        assert_eq!(int_tag.as_u64(), Some(5));
+        assert_eq!(int_tag.as_str(), None);
+        assert_eq!(int_tag.to_string(), "5");
+
+        let neg_tag = TagValue::NegativeInt(-3);
+        assert_eq!(neg_tag.as_u64(), None);
+        assert_eq!(neg_tag.as_str(), None);
+        assert_eq!(neg_tag.to_string(), "-3");
+
+        let str_tag = TagValue::Str("v1");
+        assert_eq!(str_tag.as_u64(), None);
+        assert_eq!(str_tag.as_str(), Some("v1"));
+        assert_eq!(str_tag.to_string(), "\"v1\"");
+
+        let string_tag = TagValue::String("v2".to_owned());
+        assert_eq!(string_tag.as_u64(), None);
+        assert_eq!(string_tag.as_str(), Some("v2"));
+        assert_eq!(string_tag.to_string(), "\"v2\"");
+
+        let other_tag = TagValue::Other;
+        assert_eq!(other_tag.as_u64(), None);
+        assert_eq!(other_tag.as_str(), None);
+        assert_eq!(other_tag.to_string(), "<non-version tag>");
+    }
+
+    #[test]
+    fn test_extract_internal_tag() {
+        // Tagged map removes tag key from remaining payload
+        let map = Content::Map(vec![
+            (Content::Str("version"), Content::U64(2)),
+            (Content::Str("name"), Content::Str("alice")),
+        ]);
+        match map.extract_internal_tag("version") {
+            ExtractedPayload::Tagged { tag, payload } => {
+                assert_eq!(tag, TagValue::Int(2));
+                assert!(!payload.has_map_key("version"));
+                assert!(payload.has_map_key("name"));
+            }
+            other => panic!("expected Tagged, got {other:?}"),
+        }
+
+        // Untagged map
+        let untagged = Content::Map(vec![(Content::Str("name"), Content::Str("bob"))]);
+        match untagged.extract_internal_tag("version") {
+            ExtractedPayload::Untagged(payload) => {
+                assert!(payload.has_map_key("name"));
+            }
+            other => panic!("expected Untagged, got {other:?}"),
+        }
+
+        // Newtype-wrapped map
+        let wrapped = Content::Newtype(Box::new(Content::Map(vec![
+            (Content::Str("version"), Content::Str("v1")),
+            (Content::Str("x"), Content::U8(1)),
+        ])));
+        match wrapped.extract_internal_tag("version") {
+            ExtractedPayload::Tagged { tag, payload } => {
+                assert_eq!(tag, TagValue::Str("v1"));
+                assert!(!payload.has_map_key("version"));
+                assert!(payload.has_map_key("x"));
+            }
+            other => panic!("expected Tagged, got {other:?}"),
+        }
+
+        // Non-map
+        match Content::Seq(vec![Content::U8(1)]).extract_internal_tag("version") {
+            ExtractedPayload::NotAMap(Content::Seq(items)) => assert_eq!(items.len(), 1),
+            other => panic!("expected NotAMap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_adjacent_tag() {
+        // Tagged + content map
+        let map = Content::Map(vec![
+            (Content::Str("version"), Content::U64(3)),
+            (Content::Str("data"), Content::Str("payload")),
+        ]);
+        match map.extract_adjacent_tag("version", "data") {
+            ExtractedPayload::Tagged {
+                tag,
+                payload: Content::Str(s),
+            } => {
+                assert_eq!(tag, TagValue::Int(3));
+                assert_eq!(s, "payload");
+            }
+            other => panic!("expected Tagged with Str payload, got {other:?}"),
+        }
+
+        // Tagged with missing content
+        let missing = Content::Map(vec![(Content::Str("version"), Content::U64(3))]);
+        match missing.extract_adjacent_tag("version", "data") {
+            ExtractedPayload::MissingContent { tag } => {
+                assert_eq!(tag, TagValue::Int(3));
+            }
+            other => panic!("expected MissingContent, got {other:?}"),
+        }
+
+        // Untagged map
+        let untagged = Content::Map(vec![(Content::Str("data"), Content::U64(99))]);
+        match untagged.extract_adjacent_tag("version", "data") {
+            ExtractedPayload::Untagged(payload) => {
+                assert!(payload.has_map_key("data"));
+            }
+            other => panic!("expected Untagged, got {other:?}"),
+        }
+
+        // Non-map
+        match Content::U64(42).extract_adjacent_tag("version", "data") {
+            ExtractedPayload::NotAMap(Content::U64(42)) => {}
+            other => panic!("expected NotAMap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_variant_content_deserializer() {
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+        struct OwnedPayload {
+            id: u32,
+        }
+
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+        struct BorrowedPayload<'a> {
+            name: &'a str,
+        }
+
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+        enum TestHelper<'a> {
+            Owned(OwnedPayload),
+            #[serde(borrow)]
+            Borrowed(BorrowedPayload<'a>),
+        }
+
+        let owned_content = Content::Map(vec![(Content::Str("id"), Content::U32(42))]);
+        let owned = TestHelper::deserialize(VariantContentDeserializer::<ValueError>::new(
+            "Owned",
+            owned_content,
+        ))
+        .unwrap();
+        assert_eq!(owned, TestHelper::Owned(OwnedPayload { id: 42 }));
+
+        let borrowed_content = Content::Map(vec![(Content::Str("name"), Content::Str("alice"))]);
+        let borrowed = TestHelper::deserialize(VariantContentDeserializer::<ValueError>::new(
+            "Borrowed",
+            borrowed_content,
+        ))
+        .unwrap();
+        assert_eq!(borrowed, TestHelper::Borrowed(BorrowedPayload { name: "alice" }));
+
+        let err = TestHelper::deserialize(VariantContentDeserializer::<ValueError>::new(
+            "UnknownVariant",
+            Content::Unit,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown variant `UnknownVariant`"));
+    }
+
+    #[test]
+    fn test_unknown_version_error() {
+        let err_other: ValueError = unknown_version_error(&TagValue::Other, Some(7), &["5", "6", "7"], false);
+        assert_eq!(
+            err_other.to_string(),
+            "invalid type: non-version tag, expected an integer or string version tag"
+        );
+
+        let err_future: ValueError =
+            unknown_version_error(&TagValue::Int(9), Some(7), &["5", "6", "7"], false);
+        assert_eq!(
+            err_future.to_string(),
+            "version 9 is newer than supported version 7 (supported versions: 5, 6, 7)"
+        );
+
+        let err_unknown_int: ValueError =
+            unknown_version_error(&TagValue::Int(3), Some(7), &["5", "6", "7"], false);
+        assert_eq!(
+            err_unknown_int.to_string(),
+            "unknown version 3 (supported versions: 5, 6, 7)"
+        );
+
+        let err_unknown_int_disabled: ValueError =
+            unknown_version_error(&TagValue::Int(3), Some(7), &["5", "6", "7"], true);
+        assert_eq!(
+            err_unknown_int_disabled.to_string(),
+            "unknown version 3 (supported versions: 5, 6, 7; some versions may be disabled by feature flags)"
+        );
+
+        let err_unknown_str: ValueError =
+            unknown_version_error(&TagValue::Str("v0"), None, &["\"v1\"", "\"v2\""], false);
+        assert_eq!(
+            err_unknown_str.to_string(),
+            "unknown version \"v0\" (supported versions: \"v1\", \"v2\")"
+        );
+
+        let err_unknown_str_disabled: ValueError =
+            unknown_version_error(&TagValue::Str("v0"), None, &["\"v1\"", "\"v2\""], true);
+        assert_eq!(
+            err_unknown_str_disabled.to_string(),
+            "unknown version \"v0\" (supported versions: \"v1\", \"v2\"; some versions may be disabled by feature flags)"
+        );
+    }
 }
