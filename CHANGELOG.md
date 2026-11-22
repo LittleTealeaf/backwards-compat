@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/LittleTealeaf/backwards-compat/compare/v2.0.0...v2.0.1) (2026-11-22)
+
+
+### Bug Fixes
+
+* mark single-field tuple shadow wire structs transparent ([#46](https://github.com/LittleTealeaf/backwards-compat/issues/46)) ([f662283](https://github.com/LittleTealeaf/backwards-compat/commit/f662283d12ff6b3bf6d16a80e6e2cf4232543665))
+
 ## [2.0.0](https://github.com/LittleTealeaf/backwards-compat/compare/v1.3.0...v2.0.0) (2026-11-22)
 
 
