@@ -371,6 +371,38 @@ fn build_borrowed_generics(
     (borrowed_generics, ty_in_helper)
 }
 
+fn should_mark_transparent(item_struct: &syn::ItemStruct) -> bool {
+    let syn::Fields::Unnamed(ref unnamed) = item_struct.fields else {
+        return false;
+    };
+    if unnamed.unnamed.len() != 1 {
+        return false;
+    }
+    if item_struct.attrs.iter().any(|attr| attr.path().is_ident("serde")) {
+        return false;
+    }
+    if let Some(field) = unnamed.unnamed.first() {
+        for attr in &field.attrs {
+            if attr.path().is_ident("serde") {
+                let mut has_skip = false;
+                let _ = attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("skip")
+                        || meta.path.is_ident("skip_serializing")
+                        || meta.path.is_ident("skip_deserializing")
+                    {
+                        has_skip = true;
+                    }
+                    Ok(())
+                });
+                if has_skip {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
     let call_site_span = proc_macro2::Span::call_site();
     let target_ident = &item_struct.ident;
@@ -388,6 +420,12 @@ fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
         .cloned()
         .collect();
 
+    let transparent_attr = if should_mark_transparent(item_struct) {
+        quote::quote!(#[serde(transparent)])
+    } else {
+        proc_macro2::TokenStream::new()
+    };
+
     let mut shadow_fields = item_struct.fields.clone();
     for field in &mut shadow_fields {
         field.attrs.retain(is_forwarded_attr);
@@ -400,6 +438,7 @@ fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
         #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
         #[doc(hidden)]
         #[derive(::serde::Deserialize)]
+        #transparent_attr
         #(#preserved_attrs)*
         struct #shadow_ident #generics #shadow_fields #semi
     };
@@ -458,6 +497,7 @@ fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
                     #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
                     #[doc(hidden)]
                     #[derive(::serde::Serialize)]
+                    #transparent_attr
                     #(#preserved_attrs)*
                     struct #borrowed_ident #borrowed_impl_generics ( #(#borrowed_unnamed,)* ) #borrowed_where_clause;
                 };
