@@ -1679,4 +1679,32 @@ mod tests {
         assert_eq!(input2.current_version, VersionTag::Int(2));
         assert_eq!(input2.serialize_version, VersionTag::Int(2));
     }
+
+    #[test]
+    fn test_version_tag_helpers_to_tokens_display_and_invalid_literal() {
+        let untagged = VersionTag::Untagged;
+        let int_tag = VersionTag::Int(42);
+        let str_tag = VersionTag::String("v1.0".to_owned());
+
+        assert_eq!(untagged.to_tag_string(), "_");
+        assert_eq!(int_tag.to_tag_string(), "42");
+        assert_eq!(str_tag.to_tag_string(), "v1.0");
+
+        assert_eq!(untagged.to_string(), "_");
+        assert_eq!(int_tag.to_string(), "42");
+        assert_eq!(str_tag.to_string(), "v1.0");
+
+        assert_eq!(untagged.to_token_stream().to_string(), "_");
+        assert_eq!(int_tag.to_token_stream().to_string(), "42");
+        assert_eq!(str_tag.to_token_stream().to_string(), "\"v1.0\"");
+
+        let err = VersionTag::error(proc_macro2::Span::call_site(), "boom");
+        assert_eq!(err.to_string(), "boom");
+
+        let bad_lit = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions(3.14: V1)
+        })
+        .unwrap_err();
+        assert!(bad_lit.to_string().contains("expected integer or string literal"));
+    }
 }
