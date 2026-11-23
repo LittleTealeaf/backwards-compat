@@ -77,8 +77,10 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 ///   is canonical for `#[current]` / `#[serialize]`.
 /// - **`_: Type` / `_: Self`**: Pre-backwards-compat (unversioned) entry used when the version tag
 ///   field is absent. Multiple `_` entries are supported and tried in declaration order (`#[serde(untagged)]`).
-/// - **`tag: Type => target_tag` / `tag: Type => Self`**: Custom DAG transition jumping directly to
-///   another declared version or directly to `Self`.
+/// - **`tag: Type => target_tag` / `tag: Type => TargetType` / `tag: Type => Self`**: Custom DAG
+///   transition jumping directly to another declared version by tag, by a matching declared type
+///   (or the domain type itself), or directly to `Self`. Duplicate entries sharing a type
+///   automatically inherit its explicit `=>` transition regardless of declaration order.
 /// - **`#[current]`**: Explicitly designates the active current schema version (required only when
 ///   it is not the last primary entry in `versions`).
 /// - **`#[serialize]` / `#[serialize(with = fn_path)]`**: Overrides which version is emitted during
