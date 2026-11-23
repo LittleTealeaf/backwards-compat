@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/LittleTealeaf/backwards-compat/compare/v2.0.1...v2.1.0) (2026-11-23)
+
+
+### Features
+
+* add #[backwards_compat_via] proxy redirection macro ([#48](https://github.com/LittleTealeaf/backwards-compat/issues/48)) ([aa6bb02](https://github.com/LittleTealeaf/backwards-compat/commit/aa6bb021e60e4052b28e2768fd9ae69cf5e33869))
+
 ## [2.0.1](https://github.com/LittleTealeaf/backwards-compat/compare/v2.0.0...v2.0.1) (2026-11-22)
 
 
