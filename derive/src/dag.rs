@@ -1059,4 +1059,76 @@ mod tests {
         assert!(plan2.paths[1].steps.is_empty());
         assert!(plan2.paths[2].steps.is_empty());
     }
+
+    #[test]
+    fn test_dag_error_cases_self_loop_missing_target_and_cycle() {
+        // Self-loop
+        let self_loop_args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            versions = [
+                1: V1 => 1,
+                2: Self,
+            ]
+        })
+        .unwrap();
+        let self_loop_input = self_loop_args
+            .into_input(parse_quote!(Target), parse_quote!(pub), syn::Generics::default())
+            .unwrap();
+        let err = resolve_dag(&self_loop_input).unwrap_err();
+        assert!(err.to_string().contains("self-loop transition in version `1`"));
+
+        // Missing target
+        let missing_args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            versions = [
+                1: V1 => 99,
+                2: Self,
+            ]
+        })
+        .unwrap();
+        let missing_input = missing_args
+            .into_input(parse_quote!(Target), parse_quote!(pub), syn::Generics::default())
+            .unwrap();
+        let err = resolve_dag(&missing_input).unwrap_err();
+        assert!(err.to_string().contains("target version `99` does not exist"));
+
+        // Cycle detection
+        let cycle_args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            versions = [
+                1: V1 => 2,
+                2: V2 => 1,
+                3: Self,
+            ]
+        })
+        .unwrap();
+        let cycle_input = cycle_args
+            .into_input(parse_quote!(Target), parse_quote!(pub), syn::Generics::default())
+            .unwrap();
+        let err = resolve_dag(&cycle_input).unwrap_err();
+        assert!(err.to_string().contains("cycle detected"));
+    }
+
+    #[test]
+    fn test_dag_current_version_absent_from_versions_fallback() {
+        let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            versions = [
+                1: V1 => 99,
+                2: V2,
+            ]
+        })
+        .unwrap();
+        let mut input = args
+            .into_input(parse_quote!(Target), parse_quote!(pub), syn::Generics::default())
+            .unwrap();
+        // Force current_version to a tag not present in `versions` to exercise `current_idx_opt == None`.
+        input.current_version = VersionTag::Int(99);
+        input.serialize_version = VersionTag::Int(99);
+
+        let plan = resolve_dag(&input).unwrap();
+        assert!(plan.target_is_wire);
+        assert!(plan.serialize_target_is_wire);
+        assert_eq!(plan.paths.len(), 2);
+        assert_eq!(plan.paths[0].steps.len(), 1);
+        assert_eq!(plan.paths[0].steps[0].to_ty, parse_quote!(Target));
+        assert_eq!(plan.paths[1].steps.len(), 1);
+        assert_eq!(plan.paths[1].steps[0].to_ty, parse_quote!(Target));
+    }
 }

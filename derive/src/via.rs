@@ -682,4 +682,11 @@ mod tests {
             "impl < 'a , T : Clone > :: serde :: Serialize for GenericDomain < 'a , T > where T : core :: fmt :: Debug , Proxy < 'a , T > : :: serde :: Serialize"
         ));
     }
+
+    #[test]
+    fn test_generate_via_dump_flag() {
+        let rendered = render_via("Proxy, dump", "struct DumpDomain { val: u32 }");
+        assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompat for DumpDomain"));
+        assert!(rendered.contains("impl :: serde :: Serialize for DumpDomain"));
+    }
 }

@@ -200,8 +200,21 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 /// ```
 #[proc_macro_attribute]
 pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = syn::parse_macro_input!(attr as BackwardsCompatArgs);
-    let item = syn::parse_macro_input!(item as syn::Item);
+    backwards_compat_impl(attr.into(), item.into()).into()
+}
+
+fn backwards_compat_impl(
+    attr: proc_macro2::TokenStream,
+    item: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let args = match syn::parse2::<BackwardsCompatArgs>(attr) {
+        Ok(a) => a,
+        Err(err) => return err.to_compile_error(),
+    };
+    let item = match syn::parse2::<syn::Item>(item) {
+        Ok(i) => i,
+        Err(err) => return err.to_compile_error(),
+    };
 
     let (cleaned_item_tokens, target_ident, vis, generics, built_shadow_fn): (
         proc_macro2::TokenStream,
@@ -260,8 +273,7 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
                 other,
                 "#[backwards_compat] can only be applied to structs or enums",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
@@ -270,12 +282,12 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let input = match args.into_input(target_ty, vis, generics) {
         Ok(i) => i,
-        Err(err) => return err.to_compile_error().into(),
+        Err(err) => return err.to_compile_error(),
     };
 
     let dag_plan = match dag::resolve_dag(&input) {
         Ok(p) => p,
-        Err(err) => return err.to_compile_error().into(),
+        Err(err) => return err.to_compile_error(),
     };
 
     let needs_shadow_wire = dag_plan.target_is_wire
@@ -295,24 +307,22 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
         let codegen_tokens =
             match codegen::generate_backwards_compat(&input, Some(&shadow_info), Some(built.shadow_tokens)) {
                 Ok(t) => t,
-                Err(err) => return err.to_compile_error().into(),
+                Err(err) => return err.to_compile_error(),
             };
 
         quote::quote! {
             #cleaned_item_tokens
             #codegen_tokens
         }
-        .into()
     } else {
         let codegen_tokens = match codegen::generate_backwards_compat(&input, None, None) {
             Ok(t) => t,
-            Err(err) => return err.to_compile_error().into(),
+            Err(err) => return err.to_compile_error(),
         };
         quote::quote! {
             #cleaned_item_tokens
             #codegen_tokens
         }
-        .into()
     }
 }
 
@@ -504,8 +514,21 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn backwards_compat_via(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = syn::parse_macro_input!(attr as via::ViaArgs);
-    let item = syn::parse_macro_input!(item as syn::Item);
+    backwards_compat_via_impl(attr.into(), item.into()).into()
+}
+
+fn backwards_compat_via_impl(
+    attr: proc_macro2::TokenStream,
+    item: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let args = match syn::parse2::<via::ViaArgs>(attr) {
+        Ok(a) => a,
+        Err(err) => return err.to_compile_error(),
+    };
+    let item = match syn::parse2::<syn::Item>(item) {
+        Ok(i) => i,
+        Err(err) => return err.to_compile_error(),
+    };
 
     match item {
         syn::Item::Struct(mut item_struct) => {
@@ -515,7 +538,6 @@ pub fn backwards_compat_via(attr: TokenStream, item: TokenStream) -> TokenStream
                 #item_struct
                 #codegen_tokens
             }
-            .into()
         }
         syn::Item::Enum(mut item_enum) => {
             clean_derive_attrs(&mut item_enum.attrs);
@@ -524,14 +546,12 @@ pub fn backwards_compat_via(attr: TokenStream, item: TokenStream) -> TokenStream
                 #item_enum
                 #codegen_tokens
             }
-            .into()
         }
         other => syn::Error::new_spanned(
             other,
             "#[backwards_compat_via] can only be applied to structs or enums",
         )
-        .to_compile_error()
-        .into(),
+        .to_compile_error(),
     }
 }
 
@@ -1179,5 +1199,173 @@ mod tests {
 
         syn::parse2::<syn::File>(built.shadow_tokens).unwrap();
         syn::parse2::<syn::Expr>(built.construct_borrowed).unwrap();
+    }
+
+    #[test]
+    fn test_build_borrowed_generics_with_const_param() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            pub struct Buf<const N: usize>([u8; N]);
+        };
+        let borrowed_ident = quote::format_ident!("__BufBorrowedWire");
+        let (borrowed_generics, ty_in_helper) = build_borrowed_generics(&item.generics, &borrowed_ident);
+
+        assert_eq!(
+            quote::quote!(#borrowed_generics).to_string(),
+            "< '__wire , const N : usize >"
+        );
+        assert_eq!(ty_in_helper.to_string(), "__BufBorrowedWire < '__a , N >");
+    }
+
+    #[test]
+    fn test_should_mark_transparent_edge_cases() {
+        let plain: syn::ItemStruct = syn::parse_quote! { struct Plain(u32); };
+        assert!(should_mark_transparent(&plain));
+
+        let multi: syn::ItemStruct = syn::parse_quote! { struct Multi(u32, u32); };
+        assert!(!should_mark_transparent(&multi));
+
+        let named: syn::ItemStruct = syn::parse_quote! { struct Named { a: u32 } };
+        assert!(!should_mark_transparent(&named));
+
+        let container_serde: syn::ItemStruct = syn::parse_quote! {
+            #[serde(rename_all = "camelCase")]
+            struct ContainerSerde(u32);
+        };
+        assert!(!should_mark_transparent(&container_serde));
+
+        let field_skip: syn::ItemStruct = syn::parse_quote! {
+            struct FieldSkip(#[serde(skip)] u32);
+        };
+        assert!(!should_mark_transparent(&field_skip));
+
+        let field_skip_ser: syn::ItemStruct = syn::parse_quote! {
+            struct FieldSkipSer(#[serde(skip_serializing)] u32);
+        };
+        assert!(!should_mark_transparent(&field_skip_ser));
+
+        let field_skip_de: syn::ItemStruct = syn::parse_quote! {
+            struct FieldSkipDe(#[serde(skip_deserializing)] u32);
+        };
+        assert!(!should_mark_transparent(&field_skip_de));
+
+        let field_non_skip: syn::ItemStruct = syn::parse_quote! {
+            struct FieldDefault(#[serde(default)] u32);
+        };
+        assert!(should_mark_transparent(&field_non_skip));
+    }
+
+    #[test]
+    fn test_backwards_compat_impl_error_paths() {
+        // Non-struct/non-enum item
+        let non_item = backwards_compat_impl(
+            quote::quote!(versions(1: Self)),
+            quote::quote!(
+                fn foo() {}
+            ),
+        )
+        .to_string();
+        assert!(non_item.contains("compile_error !"));
+        assert!(non_item.contains("can only be applied to structs or enums"));
+
+        // Invalid attr syntax
+        let bad_attr = backwards_compat_impl(
+            quote::quote!(unknown_key = 123),
+            quote::quote!(
+                struct S {
+                    a: u32,
+                }
+            ),
+        )
+        .to_string();
+        assert!(bad_attr.contains("compile_error !"));
+
+        // Invalid into_input (duplicate version tags)
+        let dup_tags = backwards_compat_impl(
+            quote::quote!(versions(1: V1, 1: V2)),
+            quote::quote!(
+                struct S {
+                    a: u32,
+                }
+            ),
+        )
+        .to_string();
+        assert!(dup_tags.contains("compile_error !"));
+
+        // Invalid resolve_dag (cycle)
+        let cycle = backwards_compat_impl(
+            quote::quote!(versions(1: V1 => 2, 2: V2 => 1, 3: Self)),
+            quote::quote!(
+                struct S {
+                    a: u32,
+                }
+            ),
+        )
+        .to_string();
+        assert!(cycle.contains("compile_error !"));
+        assert!(cycle.contains("cycle detected"));
+    }
+
+    #[test]
+    fn test_backwards_compat_via_impl_paths() {
+        // Valid struct with conflicting derives stripped
+        let struct_ts = backwards_compat_via_impl(
+            quote::quote!(Proxy, try_from),
+            quote::quote! {
+                #[derive(Debug, Clone, Serialize, Deserialize)]
+                pub struct Domain { pub a: u32 }
+            },
+        );
+        let struct_str = struct_ts.to_string();
+        assert!(!struct_str.contains("compile_error !"));
+        assert!(struct_str.contains("impl :: backwards_compat :: BackwardsCompat for Domain"));
+        assert!(!struct_str.contains("derive (Debug , Clone , Serialize"));
+        syn::parse2::<syn::File>(struct_ts).unwrap();
+
+        // Valid enum
+        let enum_ts = backwards_compat_via_impl(
+            quote::quote!(ProxyEnum, fallible),
+            quote::quote! {
+                #[derive(Debug, serde::Serialize, serde::Deserialize)]
+                pub enum DomainEnum { A, B(u32) }
+            },
+        );
+        let enum_str = enum_ts.to_string();
+        assert!(!enum_str.contains("compile_error !"));
+        assert!(enum_str.contains("impl :: backwards_compat :: BackwardsCompat for DomainEnum"));
+        syn::parse2::<syn::File>(enum_ts).unwrap();
+
+        // Non-struct/non-enum item
+        let fn_err = backwards_compat_via_impl(
+            quote::quote!(Proxy),
+            quote::quote!(
+                fn foo() {}
+            ),
+        )
+        .to_string();
+        assert!(fn_err.contains("compile_error !"));
+        assert!(fn_err.contains("can only be applied to structs or enums"));
+
+        // Invalid attr syntax (`Self` and empty)
+        let self_err = backwards_compat_via_impl(
+            quote::quote!(Self),
+            quote::quote!(
+                struct Domain;
+            ),
+        )
+        .to_string();
+        assert!(self_err.contains("compile_error !"));
+
+        let empty_err = backwards_compat_via_impl(
+            quote::quote!(),
+            quote::quote!(
+                struct Domain;
+            ),
+        )
+        .to_string();
+        assert!(empty_err.contains("compile_error !"));
+
+        // Invalid item syntax
+        let bad_item = backwards_compat_via_impl(quote::quote!(Proxy), quote::quote!(struct !!!)).to_string();
+        assert!(bad_item.contains("compile_error !"));
     }
 }

@@ -1659,4 +1659,101 @@ mod tests {
         assert!(!rendered.contains("__V_2"));
         syn::parse2::<syn::File>(generated).unwrap();
     }
+
+    #[test]
+    fn test_generate_backwards_compat_dump_string_shadow_and_missing_shadow_guards() {
+        // dump: true
+        let dump_input = parse_test_input(quote! {
+            dump,
+            versions = [
+                1: ModelV1,
+                2: ModelV2,
+            ]
+        });
+        let dump_gen = generate_backwards_compat(&dump_input, None, None).unwrap();
+        syn::parse2::<syn::File>(dump_gen).unwrap();
+
+        // String current_version with shadow wire
+        let str_shadow_input = parse_test_input(quote! {
+            versions = [
+                "1.0": ModelV1,
+                "2.0": Self,
+            ]
+        });
+        let owned_shadow = format_ident!("TargetModelWire");
+        let borrowed_shadow = format_ident!("TargetModelBorrowedWire");
+        let shadow_info = ShadowWireInfo {
+            owned_ident: &owned_shadow,
+            borrowed_ident: &borrowed_shadow,
+            borrowed_ty_in_helper: quote!(TargetModelBorrowedWire<'__a>),
+            construct_borrowed: quote!(TargetModelBorrowedWire {}),
+            is_unit_struct: false,
+        };
+        let str_gen = generate_backwards_compat(&str_shadow_input, Some(&shadow_info), None).unwrap();
+        let str_rendered = str_gen.to_string();
+        assert!(str_rendered.contains("const CURRENT_VERSION : Self :: Version = \"2.0\" ;"));
+        assert!(str_rendered.contains("__V_1 (TargetModelWire)"));
+        syn::parse2::<syn::File>(str_gen).unwrap();
+
+        // Untagged Self without shadow_info -> error
+        let untagged_self_input = parse_test_input(quote! {
+            versions = [
+                _: Self,
+                1: ModelV1,
+            ]
+        });
+        let err_untagged = generate_backwards_compat(&untagged_self_input, None, None).unwrap_err();
+        assert!(
+            err_untagged
+                .to_string()
+                .contains("using the domain struct as the unversioned wire format")
+        );
+
+        // serialize_with_fn + serialize_target_is_wire without shadow_info -> error
+        let ser_with_self_input = parse_test_input(quote! {
+            versions = [
+                #[serialize(with = my_ser)] 1: Self,
+                #[current] 2: ModelV2,
+            ]
+        });
+        // Note: 1: Self hits the version helper guard first unless only serialize_target_is_wire is true;
+        // verify it errors with the active wire format message.
+        let err_ser_with = generate_backwards_compat(&ser_with_self_input, None, None).unwrap_err();
+        assert!(
+            err_ser_with
+                .to_string()
+                .contains("using the domain struct as the active wire format")
+        );
+
+        // Direct serialize_with_fn + serialize_target_is_wire guard (when version arm is non-Self)
+        let mut ser_with_guard_input = parse_test_input(quote! {
+            versions = [
+                1: ModelV1,
+                2: ModelV2,
+            ]
+        });
+        ser_with_guard_input.serialize_version = crate::parse::VersionTag::Int(99);
+        ser_with_guard_input.serialize_with_fn = Some(syn::parse_quote!(my_ser));
+        let err_ser_with_guard = generate_backwards_compat(&ser_with_guard_input, None, None).unwrap_err();
+        assert!(
+            err_ser_with_guard
+                .to_string()
+                .contains("using the domain struct as the active wire format")
+        );
+
+        // Direct serialize_target_is_wire (without serialize_with_fn) guard
+        let mut ser_bare_guard_input = parse_test_input(quote! {
+            versions = [
+                1: ModelV1,
+                2: ModelV2,
+            ]
+        });
+        ser_bare_guard_input.serialize_version = crate::parse::VersionTag::Int(99);
+        let err_ser_bare_guard = generate_backwards_compat(&ser_bare_guard_input, None, None).unwrap_err();
+        assert!(
+            err_ser_bare_guard
+                .to_string()
+                .contains("using the domain struct as the active wire format")
+        );
+    }
 }
