@@ -203,6 +203,29 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
     backwards_compat_impl(attr.into(), item.into()).into()
 }
 
+fn respan_tokens(stream: proc_macro2::TokenStream, span: proc_macro2::Span) -> proc_macro2::TokenStream {
+    stream
+        .into_iter()
+        .map(|mut tt| {
+            match &mut tt {
+                proc_macro2::TokenTree::Group(group) => {
+                    let mut new_group =
+                        proc_macro2::Group::new(group.delimiter(), respan_tokens(group.stream(), span));
+                    new_group.set_span(span);
+                    *group = new_group;
+                }
+                _ => tt.set_span(span),
+            }
+            tt
+        })
+        .collect()
+}
+
+fn respan_to_call_site<T: quote::ToTokens + syn::parse::Parse>(node: &T) -> T {
+    let tokens = respan_tokens(quote::quote!(#node), proc_macro2::Span::call_site());
+    syn::parse2(tokens).expect("respanning a parsed syntax node must remain valid syntax")
+}
+
 fn backwards_compat_impl(
     attr: proc_macro2::TokenStream,
     item: proc_macro2::TokenStream,
@@ -233,15 +256,16 @@ fn backwards_compat_impl(
                 field.attrs.retain(|attr| !attr.path().is_ident("serde"));
             }
 
-            let target_ident = item_struct.ident.clone();
-            let vis = item_struct.vis.clone();
-            let generics = item_struct.generics.clone();
+            let shadow_struct = respan_to_call_site(&item_struct);
+            let target_ident = shadow_struct.ident.clone();
+            let vis = shadow_struct.vis.clone();
+            let generics = shadow_struct.generics.clone();
             (
                 quote::quote!(#cleaned_item_struct),
                 target_ident,
                 vis,
                 generics,
-                Box::new(move || build_struct_shadow_wire(&item_struct)),
+                Box::new(move || build_struct_shadow_wire(&shadow_struct)),
             )
         }
         syn::Item::Enum(item_enum) => {
@@ -257,15 +281,16 @@ fn backwards_compat_impl(
                 }
             }
 
-            let target_ident = item_enum.ident.clone();
-            let vis = item_enum.vis.clone();
-            let generics = item_enum.generics.clone();
+            let shadow_enum = respan_to_call_site(&item_enum);
+            let target_ident = shadow_enum.ident.clone();
+            let vis = shadow_enum.vis.clone();
+            let generics = shadow_enum.generics.clone();
             (
                 quote::quote!(#cleaned_item_enum),
                 target_ident,
                 vis,
                 generics,
-                Box::new(move || build_enum_shadow_wire(&item_enum)),
+                Box::new(move || build_enum_shadow_wire(&shadow_enum)),
             )
         }
         other => {
@@ -533,7 +558,8 @@ fn backwards_compat_via_impl(
     match item {
         syn::Item::Struct(mut item_struct) => {
             clean_derive_attrs(&mut item_struct.attrs);
-            let codegen_tokens = via::generate_via(&args, &item_struct.ident, &item_struct.generics);
+            let codegen_struct = respan_to_call_site(&item_struct);
+            let codegen_tokens = via::generate_via(&args, &codegen_struct.ident, &codegen_struct.generics);
             quote::quote! {
                 #item_struct
                 #codegen_tokens
@@ -541,7 +567,8 @@ fn backwards_compat_via_impl(
         }
         syn::Item::Enum(mut item_enum) => {
             clean_derive_attrs(&mut item_enum.attrs);
-            let codegen_tokens = via::generate_via(&args, &item_enum.ident, &item_enum.generics);
+            let codegen_enum = respan_to_call_site(&item_enum);
+            let codegen_tokens = via::generate_via(&args, &codegen_enum.ident, &codegen_enum.generics);
             quote::quote! {
                 #item_enum
                 #codegen_tokens
@@ -704,7 +731,7 @@ fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
                         #(#field_attrs)*
                         #borrowed_field_ident: &'__wire #field_ty
                     });
-                    field_idents.push(field_ident);
+                    field_idents.push(borrowed_field_ident);
                 }
                 let s_def = quote::quote! {
                     #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
@@ -1040,6 +1067,38 @@ fn build_enum_shadow_wire(item_enum: &syn::ItemEnum) -> BuiltShadowWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_respan_to_call_site_preserves_syntax() {
+        let item_struct: syn::ItemStruct = syn::parse_quote! {
+            #[serde(rename_all = "camelCase")]
+            pub struct Record<'a, T: Clone>
+            where
+                T: core::fmt::Debug,
+            {
+                pub label: &'a str,
+                pub value: T,
+            }
+        };
+        let respanned = respan_to_call_site(&item_struct);
+        assert_eq!(
+            quote::quote!(#respanned).to_string(),
+            quote::quote!(#item_struct).to_string()
+        );
+
+        let item_enum: syn::ItemEnum = syn::parse_quote! {
+            pub enum Event<T> {
+                Ping,
+                Tuple(u32, T),
+                Named { text: String },
+            }
+        };
+        let respanned_enum = respan_to_call_site(&item_enum);
+        assert_eq!(
+            quote::quote!(#respanned_enum).to_string(),
+            quote::quote!(#item_enum).to_string()
+        );
+    }
 
     #[test]
     fn test_is_serde_derive_variants() {
