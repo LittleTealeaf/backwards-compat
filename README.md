@@ -13,16 +13,18 @@ Declarative, compile-time verified schema versioning and backwards compatibility
 
 In applications with evolving data formats (such as configuration files, databases, event logs, or network APIs), schemas change over time. Manually maintaining backwards compatibility usually requires writing verbose intermediary enums, custom deserializers, and error-prone migration glue code.
 
-`backwards-compat` provides the `#[backwards_compat]` attribute macro to declaratively define schema transitions on `struct` and `enum` domain models. It automatically generates `serde::Serialize`, `serde::Deserialize`, `BackwardsCompat`, `BackwardsCompatDeserialize`, and transitive `From<V>` / `TryFrom<V>` implementations:
+`backwards-compat` provides the `#[backwards_compat]` and `#[backwards_compat_via]` attribute macros to declaratively define schema transitions on `struct` and `enum` domain models. It automatically generates `serde::Serialize`, `serde::Deserialize`, `BackwardsCompat`, `BackwardsCompatDeserialize`, and transitive `From<V>` / `TryFrom<V>` implementations:
 - **Deserialization**: Strictly matches native integer (`1`) or string (`"1.0"`) version tags, deserializes into the matching versioned wire type, and runs the migration chain to produce your target model (with rich errors for unknown, future, or feature-disabled versions).
 - **Serialization**: Encodes your target model with zero-copy shadow wire borrowing and emits the native version tag automatically (with optional `#[serialize]` overrides for rolling deployments).
+- **Proxy Redirection**: Use `#[backwards_compat_via(ProxyType, ...)]` to decouple a domain model from its versioned serialized DTO while inheriting all `BackwardsCompat` and `Migrated<T>` capabilities automatically.
 - **In-Code Conversion & Introspection**: Converts multi-step legacy schema structs via `From` / `TryFrom`, exposes schema metadata via `BackwardsCompat`, and supports opt-in source-version tracking via `Migrated<T>`.
 
 ---
 
 ## Features
 
-- **Structs & Enums**: Apply `#[backwards_compat]` to named structs, tuple structs, unit structs, or `enum` domain models.
+- **Structs & Enums**: Apply `#[backwards_compat]` or `#[backwards_compat_via]` to named structs, tuple structs, unit structs, or `enum` domain models.
+- **Proxy Redirection (`#[backwards_compat_via]`)**: Redirect `Serialize`, `Deserialize`, `BackwardsCompat`, and `BackwardsCompatDeserialize` through a separate versioned proxy type with infallible or fallible (`try_from`, `try_into`, `fallible`) conversions, custom `from` / `to` functions, and zero-clone `&Self` support.
 - **Native Integer & String Tags**: Emits native integer (`"version": 2`) or string (`"version": "2.0"`) tags with strict type matching, plus inline `|` aliases (`1 | "1": ModelV1`) for mixed or legacy tag compatibility.
 - **Zero-Boilerplate & Zero-Copy**: Your target type does not need `#[derive(Serialize, Deserialize)]` or `Clone`—serialization borrows fields directly without cloning.
 - **Metadata & Opt-In Migration Tracking**: Implements `BackwardsCompat` (`CURRENT_VERSION`, `SERIALIZE_VERSION`, `SUPPORTED_VERSIONS`, `ACCEPTS_UNTAGGED`) and `Migrated<T>` to detect when payloads were upgraded.
@@ -104,6 +106,103 @@ fn main() {
 ---
 
 ## Advanced Usage
+
+### Proxy Redirection (`#[backwards_compat_via]`)
+
+When you want to keep your domain model decoupled from its versioned wire representation (for example, keeping DTOs in a dedicated serialization module or enforcing domain invariants), apply `#[backwards_compat_via(ProxyType, ...)]`. Your domain type automatically inherits `Serialize`, `Deserialize`, `BackwardsCompat`, `BackwardsCompatDeserialize`, and `Migrated<T>` from `ProxyType`:
+
+```rust
+use backwards_compat::{BackwardsCompat, Migrated, backwards_compat, backwards_compat_via};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct TournamentWireV1 {
+    pub title: String,
+}
+
+#[backwards_compat(tag = "version", versions(1: TournamentWireV1, 2: Self))]
+pub struct SerializedTournament {
+    pub title: String,
+    pub max_players: u32,
+}
+
+impl From<TournamentWireV1> for SerializedTournament {
+    fn from(v1: TournamentWireV1) -> Self {
+        Self { title: v1.title, max_players: 16 }
+    }
+}
+
+// Domain model does not need #[derive(Clone, Serialize, Deserialize)].
+#[backwards_compat_via(SerializedTournament)]
+#[derive(Debug, PartialEq)]
+pub struct Tournament {
+    pub title: String,
+    pub max_players: u32,
+}
+
+impl From<SerializedTournament> for Tournament {
+    fn from(w: SerializedTournament) -> Self {
+        Self { title: w.title, max_players: w.max_players }
+    }
+}
+
+// Zero-clone serialization via From<&Tournament> (falls back to Clone + Into if omitted):
+impl From<&Tournament> for SerializedTournament {
+    fn from(t: &Tournament) -> Self {
+        Self { title: t.title.clone(), max_players: t.max_players }
+    }
+}
+
+# fn main() {
+// Metadata and Migrated<T> delegate directly to SerializedTournament:
+assert_eq!(Tournament::CURRENT_VERSION, 2);
+
+let migrated: Migrated<Tournament> =
+    serde_json::from_str(r#"{"version": 1, "title": "Spring Cup"}"#).unwrap();
+assert!(migrated.was_migrated());
+assert_eq!(migrated.source_version, Some(1));
+let tournament = migrated.into_inner();
+assert_eq!(tournament, Tournament { title: "Spring Cup".into(), max_players: 16 });
+
+let json = serde_json::to_string(&tournament).unwrap();
+assert!(json.contains(r#""version":2"#));
+# }
+```
+
+`#[backwards_compat_via]` also supports fallible conversions (`try_from`, `try_into`, or `fallible` for both) and custom conversion functions (`from = fn_path` / `to = fn_path`):
+
+```rust
+use backwards_compat::{backwards_compat, backwards_compat_via};
+
+#[backwards_compat(tag = "version", versions(1: Self))]
+pub struct PortWire {
+    pub port: u32,
+}
+
+fn decode_port(w: PortWire) -> Result<ValidPort, &'static str> {
+    let port = u16::try_from(w.port).map_err(|_| "port out of range")?;
+    if port == 0 {
+        return Err("port cannot be zero");
+    }
+    Ok(ValidPort(port))
+}
+
+fn encode_port(p: &ValidPort) -> PortWire {
+    PortWire { port: u32::from(p.0) }
+}
+
+#[backwards_compat_via(PortWire, try_from, from = decode_port, to = encode_port)]
+#[derive(Debug, PartialEq)]
+pub struct ValidPort(u16);
+
+# fn main() {
+let ok: ValidPort = serde_json::from_str(r#"{"version": 1, "port": 8080}"#).unwrap();
+assert_eq!(ok, ValidPort(8080));
+assert!(serde_json::from_str::<ValidPort>(r#"{"version": 1, "port": 0}"#).is_err());
+# }
+```
+
+See the `#[backwards_compat_via]` macro documentation for the full option reference and conversion rules.
 
 ### Fallible Migrations (`#[fallible]` + Custom Error)
 
@@ -189,8 +288,27 @@ impl From<EventV1> for Event {
 Use `=> <target_version>` or `=> Self` to jump directly across versions, and `#[with(fn_path)]` to supply a custom conversion function instead of `From` / `TryFrom`:
 
 ```rust
+use backwards_compat::backwards_compat;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct AppConfigV1 {
+    pub val: i32,
+}
+
+#[derive(Deserialize)]
+pub struct AppConfigV2 {
+    pub val: i32,
+}
+
 fn upgrade_v1(v1: AppConfigV1) -> AppConfig {
-    AppConfig { /* ... */ }
+    AppConfig { val: v1.val * 10 }
+}
+
+impl From<AppConfigV2> for AppConfig {
+    fn from(v2: AppConfigV2) -> Self {
+        Self { val: v2.val }
+    }
 }
 
 #[backwards_compat(
@@ -201,8 +319,9 @@ fn upgrade_v1(v1: AppConfigV1) -> AppConfig {
         3: Self,
     )
 )]
+#[derive(Debug, PartialEq)]
 pub struct AppConfig {
-    // ...
+    pub val: i32,
 }
 ```
 
@@ -217,6 +336,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocV1 {
     pub title: String,
+}
+
+impl From<DocV1> for Doc {
+    fn from(v1: DocV1) -> Self {
+        Self { title: v1.title, rev: 1 }
+    }
 }
 
 fn downgrade_to_v1(doc: &Doc) -> DocV1 {
@@ -251,6 +376,20 @@ assert_eq!(migrated.source_version, Some(1));
 Use string keys (`"1.0"`, `"2.0"`) or combine multiple wire tags with `|` (for example, accepting both native integer tags and legacy 1.x stringified integer tags):
 
 ```rust
+use backwards_compat::backwards_compat;
+use serde::Deserialize;
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RecordV1 {
+    pub id: u64,
+}
+
+impl From<RecordV1> for Record {
+    fn from(v1: RecordV1) -> Self {
+        Self { id: v1.id, data: String::new() }
+    }
+}
+
 #[backwards_compat(
     tag = "version",
     versions(
@@ -292,6 +431,15 @@ where
     pub val: T,
     pub active: bool,
 }
+
+impl<'a, T: Clone> From<RecordV1<'a, T>> for Record<'a, T>
+where
+    T: std::fmt::Debug,
+{
+    fn from(v1: RecordV1<'a, T>) -> Self {
+        Self { key: v1.key, val: v1.val, active: true }
+    }
+}
 ```
 
 ### Pre-Backwards-Compat (Unversioned) Schemas (`_: Type` / `_: Self`)
@@ -311,6 +459,18 @@ pub struct ConfigV0 {
 pub struct ConfigV1 {
     pub name: String,
     pub host: String,
+}
+
+impl From<ConfigV0> for ConfigV1 {
+    fn from(v0: ConfigV0) -> Self {
+        Self { name: v0.name, host: "localhost".into() }
+    }
+}
+
+impl From<ConfigV1> for Config {
+    fn from(v1: ConfigV1) -> Self {
+        Self { name: v1.name, host: v1.host, port: 8080 }
+    }
 }
 
 #[backwards_compat(
@@ -333,6 +493,8 @@ pub struct Config {
 If your struct's fields haven't changed yet and you want to start writing `"version": 1` while still accepting legacy unversioned payloads, use `_: Self`:
 
 ```rust
+use backwards_compat::backwards_compat;
+
 #[backwards_compat(tag = "version", versions(_: Self, 1: Self))]
 #[derive(Debug, PartialEq)]
 pub struct Config {
@@ -414,7 +576,7 @@ Under the hood, `#[backwards_compat]` generates:
 
 Dual-licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.

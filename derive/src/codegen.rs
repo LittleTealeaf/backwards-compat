@@ -494,7 +494,7 @@ pub fn generate_backwards_compat(
                     BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
                 };
 
-                let latest: #ty = (&__WireConvert(self)).convert_wire();
+                let latest: #ty = __WireConvert::<_, #ty>::new(self).convert_wire();
                 let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
                 ::serde::Serialize::serialize(&helper, __serializer)
             };
@@ -1062,7 +1062,9 @@ mod tests {
         let rendered = generated.to_string();
 
         assert!(rendered.contains("use :: backwards_compat :: __private :: { BorrowedWireConvert as _ , FallbackWireConvert as _ , WireConvert as __WireConvert , } ;"));
-        assert!(rendered.contains("let latest : ModelV2 = (& __WireConvert (self)) . convert_wire () ;"));
+        assert!(rendered.contains(
+            "let latest : ModelV2 = __WireConvert :: < _ , ModelV2 > :: new (self) . convert_wire () ;"
+        ));
     }
 
     #[test]

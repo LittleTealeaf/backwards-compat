@@ -3,6 +3,7 @@ use proc_macro::TokenStream;
 mod codegen;
 mod dag;
 mod parse;
+mod via;
 
 use parse::BackwardsCompatArgs;
 
@@ -312,6 +313,225 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
             #codegen_tokens
         }
         .into()
+    }
+}
+
+/// Redirects `serde::Serialize`, `serde::Deserialize`, `backwards_compat::BackwardsCompat`, and
+/// `backwards_compat::BackwardsCompatDeserialize` for a domain model through a separate versioned
+/// proxy type.
+///
+/// Use `#[backwards_compat_via(ProxyType, ...)]` when you want to keep your domain `struct` or
+/// `enum` completely decoupled from its serialized wire schema (for example, enforcing domain
+/// invariants, using non-serializable internal representations, or keeping versioned DTOs in a
+/// separate module) while still automatically inheriting all `backwards_compat` capabilities
+/// (version tags, schema migrations, `Migrated<T>` tracking, `#[cfg(...)]`-gated versions, and
+/// rolling deployments) from `ProxyType`.
+///
+/// # Macro Parameters Reference
+///
+/// - **`ProxyType`** *(required, first positional argument)*:
+///   The versioned proxy type (typically annotated with `#[backwards_compat(...)]`) that handles
+///   serialization, deserialization, and schema metadata. Cannot be bare `Self`.
+/// - **`try_from`** *(optional flag)*:
+///   Makes the deserialization conversion (`ProxyType -> Self`) fallible. Uses
+///   `TryFrom<ProxyType>` (or a `Result`-returning `from` function) and converts errors via
+///   `serde::de::Error::custom`. Cannot be combined with `fallible`.
+/// - **`try_into`** *(optional flag)*:
+///   Makes the serialization conversion (`&Self -> ProxyType` / `Self -> ProxyType`) fallible.
+///   Uses `TryInto<ProxyType>` (or a `Result`-returning `to` function) and converts errors via
+///   `serde::ser::Error::custom`. Cannot be combined with `fallible`.
+/// - **`fallible`** *(optional flag)*:
+///   Shorthand for enabling both `try_from` and `try_into`. Cannot be combined with `try_from` or
+///   `try_into`.
+/// - **`from = fn_path` / `from(fn_path)`** *(optional)*:
+///   Uses a custom conversion function instead of `From` / `TryFrom` during deserialization:
+///   - Without `try_from` / `fallible`: `fn(ProxyType) -> Self`
+///   - With `try_from` / `fallible`: `fn(ProxyType) -> Result<Self, E>` where `E: Display`
+/// - **`to = fn_path` / `to(fn_path)`** *(optional)*:
+///   Uses a custom conversion function instead of `Into` / `TryInto` during serialization:
+///   - Without `try_into` / `fallible`: `fn(&Self) -> ProxyType`
+///   - With `try_into` / `fallible`: `fn(&Self) -> Result<ProxyType, E>` where `E: Display`
+/// - **`dump`** *(optional flag)*:
+///   Prints the macro's generated token stream to `stderr` during compilation for inspection.
+///
+/// # Conversion & Autoref Rules
+///
+/// During serialization (when `to` is not specified), `#[backwards_compat_via]` uses autoref
+/// specialization so domain types do **not** need to implement `Clone` when a borrowed conversion
+/// is available:
+///
+/// - **Infallible (`try_into` not set)**: prefers `for<'a> &'a Self: Into<ProxyType>` (zero-clone),
+///   falling back to `Self: Clone + Into<ProxyType>`.
+/// - **Fallible (`try_into` or `fallible` set)**: prefers `for<'a> &'a Self: TryInto<ProxyType>`
+///   (zero-clone) with `Error: Display`, falling back to `Self: Clone + TryInto<ProxyType>` with
+///   `Error: Display`.
+///
+/// Any fallible error type must implement `core::fmt::Display`; errors are formatted and reported
+/// through `serde::de::Error::custom` or `serde::ser::Error::custom`.
+///
+/// # Generated Trait Implementations
+///
+/// Applying `#[backwards_compat_via(ProxyType, ...)]` to a `struct` or `enum` generates:
+///
+/// 1. `backwards_compat::BackwardsCompat` — delegates `Version`, `CURRENT_VERSION`,
+///    `SERIALIZE_VERSION`, `SUPPORTED_VERSIONS`, and `ACCEPTS_UNTAGGED` directly to `ProxyType`.
+/// 2. `backwards_compat::BackwardsCompatDeserialize<'de>` — deserializes `Migrated<ProxyType>`,
+///    converts the inner value into `Self`, and preserves `source_version` so `Migrated<Self>`
+///    works seamlessly.
+/// 3. `serde::Deserialize<'de>` — delegates to `BackwardsCompatDeserialize::deserialize_migrated`.
+/// 4. `serde::Serialize` — converts `&self` into `ProxyType` and serializes it.
+///
+/// Any `Serialize` or `Deserialize` entries in `#[derive(...)]` on the annotated item are
+/// automatically stripped to prevent conflicting trait implementations. `#[serde(...)]` attributes
+/// on the domain type are intentionally **not** stripped so misplaced serde attributes are caught
+/// at compile time.
+///
+/// # Examples
+///
+/// ### 1. Basic Infallible Domain Model with Zero-Clone Serialization
+///
+/// ```rust,ignore
+/// use backwards_compat::{backwards_compat, backwards_compat_via};
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// pub struct UserWireV1 {
+///     pub name: String,
+/// }
+///
+/// #[backwards_compat(tag = "version", versions(1: UserWireV1, 2: Self))]
+/// pub struct UserWire {
+///     pub name: String,
+///     pub role: String,
+/// }
+///
+/// impl From<UserWireV1> for UserWire {
+///     fn from(v1: UserWireV1) -> Self {
+///         Self { name: v1.name, role: "member".into() }
+///     }
+/// }
+///
+/// // Domain type does not need #[derive(Clone, Serialize, Deserialize)].
+/// #[backwards_compat_via(UserWire)]
+/// pub struct User {
+///     pub name: String,
+///     pub role: String,
+/// }
+///
+/// impl From<UserWire> for User {
+///     fn from(w: UserWire) -> Self {
+///         Self { name: w.name, role: w.role }
+///     }
+/// }
+///
+/// impl From<&User> for UserWire {
+///     fn from(u: &User) -> Self {
+///         Self { name: u.name.clone(), role: u.role.clone() }
+///     }
+/// }
+/// ```
+///
+/// ### 2. Fallible Validation (`try_from`, `try_into`, `fallible`)
+///
+/// ```rust,ignore
+/// use backwards_compat::{backwards_compat, backwards_compat_via};
+///
+/// #[backwards_compat(tag = "version", versions(1: Self))]
+/// pub struct PortWire {
+///     pub port: u32,
+/// }
+///
+/// #[backwards_compat_via(PortWire, fallible)]
+/// pub struct ValidPort(u16);
+///
+/// impl TryFrom<PortWire> for ValidPort {
+///     type Error = &'static str;
+///     fn try_from(w: PortWire) -> Result<Self, Self::Error> {
+///         let port = u16::try_from(w.port).map_err(|_| "port out of range")?;
+///         if port == 0 {
+///             return Err("port cannot be zero");
+///         }
+///         Ok(Self(port))
+///     }
+/// }
+///
+/// impl TryFrom<&ValidPort> for PortWire {
+///     type Error = &'static str;
+///     fn try_from(p: &ValidPort) -> Result<Self, Self::Error> {
+///         Ok(Self { port: u32::from(p.0) })
+///     }
+/// }
+/// ```
+///
+/// ### 3. Custom Conversion Functions (`from` & `to`)
+///
+/// ```rust,ignore
+/// use backwards_compat::backwards_compat_via;
+///
+/// fn decode_cfg(w: ConfigWire) -> Result<Config, String> {
+///     if w.host.is_empty() {
+///         return Err("host must not be empty".into());
+///     }
+///     Ok(Config { host: w.host })
+/// }
+///
+/// fn encode_cfg(c: &Config) -> ConfigWire {
+///     ConfigWire { host: c.host.clone() }
+/// }
+///
+/// #[backwards_compat_via(ConfigWire, try_from, from = decode_cfg, to = encode_cfg)]
+/// pub struct Config {
+///     pub host: String,
+/// }
+/// ```
+///
+/// ### 4. Generics and Lifetimes
+///
+/// ```rust,ignore
+/// use backwards_compat::{backwards_compat, backwards_compat_via};
+///
+/// #[backwards_compat(tag = "version", versions(1: Self))]
+/// pub struct EnvelopeWire<'a, T> {
+///     pub label: &'a str,
+///     pub payload: T,
+/// }
+///
+/// #[backwards_compat_via(EnvelopeWire<'a, T>)]
+/// pub struct Envelope<'a, T> {
+///     pub label: &'a str,
+///     pub payload: T,
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn backwards_compat_via(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = syn::parse_macro_input!(attr as via::ViaArgs);
+    let item = syn::parse_macro_input!(item as syn::Item);
+
+    match item {
+        syn::Item::Struct(mut item_struct) => {
+            clean_derive_attrs(&mut item_struct.attrs);
+            let codegen_tokens = via::generate_via(&args, &item_struct.ident, &item_struct.generics);
+            quote::quote! {
+                #item_struct
+                #codegen_tokens
+            }
+            .into()
+        }
+        syn::Item::Enum(mut item_enum) => {
+            clean_derive_attrs(&mut item_enum.attrs);
+            let codegen_tokens = via::generate_via(&args, &item_enum.ident, &item_enum.generics);
+            quote::quote! {
+                #item_enum
+                #codegen_tokens
+            }
+            .into()
+        }
+        other => syn::Error::new_spanned(
+            other,
+            "#[backwards_compat_via] can only be applied to structs or enums",
+        )
+        .to_compile_error()
+        .into(),
     }
 }
 
