@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0](https://github.com/LittleTealeaf/backwards-compat/compare/v2.2.0...v3.0.0) (2026-11-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* field-level versioning, streaming deserialization, and unified via macro ([#53](https://github.com/LittleTealeaf/backwards-compat/issues/53))
+
+### Features
+
+* field-level versioning, streaming deserialization, and unified via macro ([#53](https://github.com/LittleTealeaf/backwards-compat/issues/53)) ([e046c0b](https://github.com/LittleTealeaf/backwards-compat/commit/e046c0b85c149be01aa984f857b33b9c38f7e3e1))
+
 ## [2.2.0](https://github.com/LittleTealeaf/backwards-compat/compare/v2.1.0...v2.2.0) (2026-11-23)
 
 
