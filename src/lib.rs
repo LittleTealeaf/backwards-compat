@@ -3,6 +3,7 @@
 pub use backwards_compat_derive::backwards_compat;
 
 mod de;
+mod ser;
 
 /// Represents a schema version key for models that mix integer and string version tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,6 +101,7 @@ pub mod __private {
         ContentRefDeserializer, InternalKey, InternalKeyResult, OptionForwardingDeserializer,
         RemainingMapDeserializer, TagValue, drain_map, read_adjacent_content, unknown_version_error,
     };
+    pub use crate::ser::serialize_internally_tagged;
 
     pub struct WireConvert<'b, T: ?Sized, W>(pub &'b T, pub ::core::marker::PhantomData<fn() -> W>);
 
