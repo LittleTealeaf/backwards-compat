@@ -384,4 +384,99 @@ mod tests {
         let err_res: Result<Wire, _> = TryWireConvert::<_, Wire>::new(&err_src).try_convert_wire();
         assert_eq!(err_res, Err("borrowed overflow"));
     }
+
+    #[test]
+    fn test_wire_convert_borrowed_zero_clone() {
+        #[allow(
+            unused_imports,
+            reason = "both specialization traits must be in scope to verify dispatch"
+        )]
+        use __private::{BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert};
+
+        struct NonCloneSource(u32);
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct Wire(u32);
+
+        impl From<&NonCloneSource> for Wire {
+            fn from(src: &NonCloneSource) -> Self {
+                Self(src.0)
+            }
+        }
+
+        let src = NonCloneSource(42);
+        let wire: Wire = WireConvert::<_, Wire>::new(&src).convert_wire();
+        assert_eq!(wire, Wire(42));
+    }
+
+    #[test]
+    fn test_wire_convert_clone_fallback() {
+        #[allow(
+            unused_imports,
+            reason = "both specialization traits must be in scope to verify dispatch"
+        )]
+        use __private::{BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert};
+
+        #[derive(Clone)]
+        struct CloneOnlySource(u32);
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct Wire(u32);
+
+        impl From<CloneOnlySource> for Wire {
+            fn from(src: CloneOnlySource) -> Self {
+                Self(src.0)
+            }
+        }
+
+        let src = CloneOnlySource(99);
+        let wire: Wire = WireConvert::<_, Wire>::new(&src).convert_wire();
+        assert_eq!(wire, Wire(99));
+    }
+
+    #[test]
+    fn test_wire_convert_prefers_borrowed_over_clone() {
+        #[allow(
+            unused_imports,
+            reason = "both specialization traits must be in scope to verify dispatch"
+        )]
+        use __private::{BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert};
+
+        struct PanicOnCloneSource(u32);
+
+        impl Clone for PanicOnCloneSource {
+            fn clone(&self) -> Self {
+                panic!("Clone must not be called when borrowed Into is available");
+            }
+        }
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct Wire(u32);
+
+        impl From<&PanicOnCloneSource> for Wire {
+            fn from(src: &PanicOnCloneSource) -> Self {
+                Self(src.0 + 1)
+            }
+        }
+
+        impl From<PanicOnCloneSource> for Wire {
+            fn from(src: PanicOnCloneSource) -> Self {
+                Self(src.0)
+            }
+        }
+
+        let src = PanicOnCloneSource(7);
+        let wire: Wire = WireConvert::<_, Wire>::new(&src).convert_wire();
+        assert_eq!(wire, Wire(8));
+    }
+
+    #[test]
+    fn test_version_key_hash_and_eq_consistency() {
+        let mut set = std::collections::HashSet::new();
+        set.insert(VersionKey::Int(1));
+        set.insert(VersionKey::Str("1"));
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&VersionKey::Int(1)));
+        assert!(set.contains(&VersionKey::Str("1")));
+    }
 }

@@ -1095,3 +1095,92 @@ host = "db.internal"
     let rt_ron: MultiFormatDoc = ron::from_str(&ron_out).unwrap();
     assert_eq!(rt_ron, expected);
 }
+
+// =========================================================================
+// 10. Sibling #[serde(with / serialize_with / deserialize_with)] coexistence
+// =========================================================================
+
+mod csv_u32_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(vals: &[u32], serializer: S) -> Result<S::Ok, S::Error> {
+        let joined = vals.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+        serializer.serialize_str(&joined)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u32>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        if s.is_empty() {
+            return Ok(Vec::new());
+        }
+        s.split(',')
+            .map(|part| part.parse::<u32>().map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
+
+#[backwards_compat]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct BareWithSiblingSerde {
+    #[serde(with = "csv_u32_serde")]
+    tags_with: Vec<u32>,
+    #[serde(
+        serialize_with = "csv_u32_serde::serialize",
+        deserialize_with = "csv_u32_serde::deserialize"
+    )]
+    tags_split: Vec<u32>,
+    #[backwards_compat(versions(
+        #[with(widen_u16_to_u32)] 1: u16,
+        2: Self,
+    ))]
+    port: u32,
+}
+
+#[backwards_compat(tag = "schema", versions(1: Self))]
+#[derive(Debug, PartialEq, Eq)]
+struct CombinedWithSiblingSerde {
+    #[serde(
+        serialize_with = "csv_u32_serde::serialize",
+        deserialize_with = "csv_u32_serde::deserialize"
+    )]
+    tags: Vec<u32>,
+    #[backwards_compat(versions(
+        #[with(widen_u16_to_u32)] 1: u16,
+        2: Self,
+    ))]
+    port: u32,
+}
+
+#[test]
+fn test_sibling_serde_with_serialize_deserialize_with_coexistence() {
+    let bare_json = r#"{"tags_with":"1,2,3","tags_split":"4,5","port":{"version":1,"data":8080}}"#;
+    let bare: BareWithSiblingSerde = serde_json::from_str(bare_json).unwrap();
+    assert_eq!(
+        bare,
+        BareWithSiblingSerde {
+            tags_with: vec![1, 2, 3],
+            tags_split: vec![4, 5],
+            port: 8080,
+        }
+    );
+    let bare_out = serde_json::to_string(&bare).unwrap();
+    assert_eq!(
+        bare_out,
+        r#"{"tags_with":"1,2,3","tags_split":"4,5","port":{"version":2,"data":8080}}"#
+    );
+
+    let combined_json = r#"{"schema":1,"tags":"7,8","port":{"version":1,"data":443}}"#;
+    let combined: CombinedWithSiblingSerde = serde_json::from_str(combined_json).unwrap();
+    assert_eq!(
+        combined,
+        CombinedWithSiblingSerde {
+            tags: vec![7, 8],
+            port: 443,
+        }
+    );
+    let combined_out = serde_json::to_string(&combined).unwrap();
+    assert_eq!(
+        combined_out,
+        r#"{"schema":1,"tags":"7,8","port":{"version":2,"data":443}}"#
+    );
+}

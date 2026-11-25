@@ -1069,4 +1069,149 @@ mod tests {
         )])))
         .unwrap_err();
     }
+
+    #[test]
+    fn test_content_ref_deserializer_borrows_outlive_content_buffer() {
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+        struct FailFirst<'a> {
+            missing: &'a str,
+        }
+
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+        struct SucceedSecond<'a> {
+            name: &'a str,
+        }
+
+        let input = String::from("{\"name\":\"zero-copy\"}");
+        let decoded: SucceedSecond<'_>;
+        {
+            let buffered: Content<'_> = serde_json::from_str(&input).unwrap();
+            let _ = FailFirst::deserialize(ContentRefDeserializer::<ValueError>::new(&buffered)).unwrap_err();
+            decoded =
+                SucceedSecond::deserialize(ContentRefDeserializer::<ValueError>::new(&buffered)).unwrap();
+        }
+        assert_eq!(decoded, SucceedSecond { name: "zero-copy" });
+
+        let raw_bytes: Vec<u8> = vec![10, 20, 30];
+        let borrowed_slice: &[u8];
+        {
+            let buffered = Content::Bytes(&raw_bytes);
+            borrowed_slice =
+                <&[u8]>::deserialize(ContentRefDeserializer::<ValueError>::new(&buffered)).unwrap();
+        }
+        assert_eq!(borrowed_slice, &[10, 20, 30]);
+    }
+
+    #[test]
+    fn test_content_ref_deserializer_edge_cases() {
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+        struct UnitS;
+
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+        enum E {
+            Unit,
+            Newtype(u8),
+        }
+
+        struct SizeHintSeqVisitor;
+        impl<'de> Visitor<'de> for SizeHintSeqVisitor {
+            type Value = (Option<usize>, usize);
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("seq")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let hint = seq.size_hint();
+                let mut count = 0;
+                while seq.next_element::<u8>()?.is_some() {
+                    count += 1;
+                }
+                Ok((hint, count))
+            }
+        }
+
+        struct SizeHintMapVisitor;
+        impl<'de> Visitor<'de> for SizeHintMapVisitor {
+            type Value = (Option<usize>, usize);
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("map")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let hint = map.size_hint();
+                let mut count = 0;
+                while map.next_entry::<String, u8>()?.is_some() {
+                    count += 1;
+                }
+                Ok((hint, count))
+            }
+        }
+
+        let val = f32::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::I32(-42))).unwrap();
+        assert!((val - (-42.0_f32)).abs() < f32::EPSILON);
+        let _ = f64::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::U128(1))).unwrap_err();
+        let _ = f64::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::I128(-1))).unwrap_err();
+
+        let _ = <()>::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::Map(vec![(
+            Content::Str("k"),
+            Content::U8(1),
+        )])))
+        .unwrap_err();
+        let _ = UnitS::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::Map(vec![(
+            Content::Str("k"),
+            Content::U8(1),
+        )])))
+        .unwrap_err();
+        let _ = UnitS::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::Seq(vec![
+            Content::U8(1),
+        ])))
+        .unwrap_err();
+
+        assert_eq!(
+            E::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::String(
+                "Unit".to_owned()
+            )))
+            .unwrap(),
+            E::Unit
+        );
+        assert_eq!(
+            E::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::Map(vec![(
+                Content::Str("Unit"),
+                Content::Unit,
+            )])))
+            .unwrap(),
+            E::Unit
+        );
+        assert_eq!(
+            E::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::Map(vec![(
+                Content::Str("Unit"),
+                Content::Map(vec![]),
+            )])))
+            .unwrap(),
+            E::Unit
+        );
+        assert_eq!(
+            E::deserialize(ContentRefDeserializer::<ValueError>::new(&Content::Map(vec![(
+                Content::String("Newtype".to_owned()),
+                Content::U8(7),
+            )])))
+            .unwrap(),
+            E::Newtype(7)
+        );
+
+        let seq_content = Content::Seq(vec![Content::U8(1), Content::U8(2), Content::U8(3)]);
+        let (seq_hint, seq_count) = ContentRefDeserializer::<ValueError>::new(&seq_content)
+            .deserialize_seq(SizeHintSeqVisitor)
+            .unwrap();
+        assert_eq!(seq_hint, Some(3));
+        assert_eq!(seq_count, 3);
+
+        let map_content = Content::Map(vec![
+            (Content::Str("a"), Content::U8(1)),
+            (Content::Str("b"), Content::U8(2)),
+        ]);
+        let (map_hint, map_count) = ContentRefDeserializer::<ValueError>::new(&map_content)
+            .deserialize_map(SizeHintMapVisitor)
+            .unwrap();
+        assert_eq!(map_hint, Some(2));
+        assert_eq!(map_count, 2);
+    }
 }

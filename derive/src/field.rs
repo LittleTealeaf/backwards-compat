@@ -990,8 +990,7 @@ mod tests {
         let wc_str = fg
             .where_clause
             .as_ref()
-            .map(|w| quote!(#w).to_string())
-            .unwrap_or_default();
+            .map_or_default(|w| quote!(#w).to_string());
         assert!(wc_str.contains("T : Default"));
         assert!(wc_str.contains("'a : 'static"));
         assert!(!wc_str.contains("U :"));
