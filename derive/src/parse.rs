@@ -155,7 +155,6 @@ pub struct VersionEntry {
 pub struct BackwardsCompatArgs {
     pub tag_field: String,
     pub content_field: Option<String>,
-    pub error_ty: Option<syn::Type>,
     pub dump: bool,
     pub versions: Vec<VersionEntry>,
 }
@@ -164,7 +163,6 @@ impl Parse for BackwardsCompatArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut tag_field = "version".to_owned();
         let mut content_field = None;
-        let mut error_ty = None;
         let mut dump = false;
         let mut versions = Vec::new();
 
@@ -204,16 +202,15 @@ impl Parse for BackwardsCompatArgs {
                     "top-level `version` was removed in 2.0; declare it inside `versions(...)` using `#[current]` or `N: Self`",
                 ));
             } else if ident_str == "error" {
-                if input.peek(Token![=]) {
-                    input.parse::<Token![=]>()?;
-                    error_ty = Some(input.parse()?);
-                } else if input.peek(syn::token::Paren) {
-                    let inner;
-                    syn::parenthesized!(inner in input);
-                    error_ty = Some(inner.parse()?);
-                } else {
-                    return Err(syn::Error::new(ident.span(), "expected `=` or `()` for error"));
-                }
+                return Err(syn::Error::new(
+                    ident.span(),
+                    "`error = ...` was removed; migrations are now always inlined and fallible errors only need to implement `core::fmt::Display`",
+                ));
+            } else if ident_str == "via" {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    "expected `via = <Type>` or `via(<Type>)`",
+                ));
             } else if ident_str == "dump" {
                 dump = true;
             } else if ident_str == "versions" {
@@ -419,7 +416,6 @@ impl Parse for BackwardsCompatArgs {
         Ok(Self {
             tag_field,
             content_field,
-            error_ty,
             dump,
             versions,
         })
@@ -538,7 +534,6 @@ impl BackwardsCompatArgs {
             serialize_version,
             serialize_version_span,
             serialize_with_fn,
-            error_ty: self.error_ty,
             dump: self.dump,
             versions,
         })
@@ -559,7 +554,6 @@ pub struct BackwardsCompatInput {
     pub serialize_version: VersionTag,
     pub serialize_version_span: proc_macro2::Span,
     pub serialize_with_fn: Option<syn::ExprPath>,
-    pub error_ty: Option<Type>,
     pub dump: bool,
     pub versions: Vec<VersionEntry>,
 }
@@ -630,20 +624,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_args_error_ty() {
+    fn test_parse_args_error_ty_removed() {
         let input1 = quote::quote! {
             error = MyCustomError,
             versions = [ 1: ModelV1 ]
         };
-        let args1: BackwardsCompatArgs = syn::parse2(input1).unwrap();
-        assert!(args1.error_ty.is_some());
+        let err1 = syn::parse2::<BackwardsCompatArgs>(input1).unwrap_err();
+        assert!(err1.to_string().contains("`error = ...` was removed"));
 
         let input2 = quote::quote! {
             error(MyCustomError),
             versions = [ 1: ModelV1 ]
         };
-        let args2: BackwardsCompatArgs = syn::parse2(input2).unwrap();
-        assert!(args2.error_ty.is_some());
+        let err2 = syn::parse2::<BackwardsCompatArgs>(input2).unwrap_err();
+        assert!(err2.to_string().contains("`error = ...` was removed"));
     }
 
     #[test]
@@ -759,7 +753,7 @@ mod tests {
             error 123
         };
         let err_error = syn::parse2::<BackwardsCompatArgs>(input_error).unwrap_err();
-        assert_eq!(err_error.to_string(), "expected `=` or `()` for error");
+        assert!(err_error.to_string().contains("`error = ...` was removed"));
 
         let input_content = quote::quote! {
             content 123

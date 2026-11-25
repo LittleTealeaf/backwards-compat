@@ -176,7 +176,6 @@ fn validate_legacy_host(v: RawLegacyHost) -> Result<ValidatedHost, EmptyHostErro
 }
 
 #[backwards_compat(
-    error = EmptyHostError,
     versions(
         #[fallible]
         #[with(validate_legacy_host)]

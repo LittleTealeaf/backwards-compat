@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 
-pub use backwards_compat_derive::{backwards_compat, backwards_compat_via};
+pub use backwards_compat_derive::backwards_compat;
 
-mod content;
+mod de;
 
 /// Represents a schema version key for models that mix integer and string version tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,9 +95,10 @@ impl<'de, T: BackwardsCompatDeserialize<'de>> serde::Deserialize<'de> for Migrat
 
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::content::{
-        Content, ContentDeserializer, ExtractedPayload, TagValue, VariantContentDeserializer,
-        unknown_version_error,
+    pub use crate::de::{
+        AdjacentKey, AdjacentKeyResult, ChainedMapAccess, Content, ContentDeserializer,
+        ContentRefDeserializer, InternalKey, InternalKeyResult, OptionForwardingDeserializer,
+        RemainingMapDeserializer, TagValue, drain_map, read_adjacent_content, unknown_version_error,
     };
 
     pub struct WireConvert<'b, T: ?Sized, W>(pub &'b T, pub ::core::marker::PhantomData<fn() -> W>);

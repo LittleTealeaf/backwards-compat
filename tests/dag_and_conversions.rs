@@ -101,18 +101,10 @@ fn test_dag_jumps_and_self_shorthand() {
             tier: 1,
         }
     );
-    // Transitive From<DagV2> for DagTarget generated
-    assert_eq!(
-        DagTarget::from(DagV2 {
-            score: 20,
-            label: "mid".to_owned(),
-        }),
-        from_v2
-    );
 }
 
 // =========================================================================
-// 2. Fallible chains (default boxed error & custom error = ...)
+// 2. Fallible chains (custom and standard error types)
 // =========================================================================
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -134,7 +126,6 @@ pub struct PortV2 {
 }
 
 #[backwards_compat(
-    error = ParseConfigError,
     versions(
         #[fallible]
         1: PortV1 => 2,
@@ -214,29 +205,16 @@ fn test_fallible_chains_custom_and_default_error() {
     let ok: PortConfig = serde_json::from_str(r#"{"version":1,"port_str":"8080"}"#).unwrap();
     assert_eq!(ok, PortConfig { port: 8080 });
 
-    // Transitive TryFrom<PortV1> returns ParseConfigError
-    let err1 = PortConfig::try_from(PortV1 {
-        port_str: "abc".to_owned(),
-    })
-    .unwrap_err();
-    assert_eq!(err1, ParseConfigError::InvalidPort("abc".to_owned()));
-
-    let err2 = PortConfig::try_from(PortV1 {
-        port_str: "0".to_owned(),
-    })
-    .unwrap_err();
-    assert_eq!(err2, ParseConfigError::ZeroPort);
+    let de_err_parse = serde_json::from_str::<PortConfig>(r#"{"version":1,"port_str":"abc"}"#).unwrap_err();
+    assert!(de_err_parse.to_string().contains("invalid port: abc"));
 
     let de_err = serde_json::from_str::<PortConfig>(r#"{"version":1,"port_str":"0"}"#).unwrap_err();
     assert!(de_err.to_string().contains("port must be non-zero"));
 
-    // Default boxed error
+    // Standard error type in fallible chain
     let b_ok: BoxedTarget = serde_json::from_str(r#"{"version":1,"num":"42"}"#).unwrap();
     assert_eq!(b_ok, BoxedTarget { num: 42 });
-    let _ = BoxedTarget::try_from(BoxedV1 {
-        num: "nope".to_owned(),
-    })
-    .unwrap_err();
+    let _ = serde_json::from_str::<BoxedTarget>(r#"{"version":1,"num":"nope"}"#).unwrap_err();
 }
 
 // =========================================================================
@@ -259,7 +237,6 @@ mod converters {
 // Uses foreign `String` and `u32` directly as wire types without violating the orphan rule!
 #[backwards_compat(
     content = "data",
-    error = ParseConfigError,
     versions(
         #[fallible]
         #[with(converters::str_to_u32)]
@@ -280,15 +257,8 @@ fn test_with_fn_orphan_rule_bypass_one_step_and_multi_step() {
     let from_v1: ForeignTarget = serde_json::from_str(r#"{"version":1,"data":"123"}"#).unwrap();
     assert_eq!(from_v1, ForeignTarget { id: 123 });
 
-    // Transitive TryFrom<String> for ForeignTarget works!
-    assert_eq!(
-        ForeignTarget::try_from("456".to_owned()).unwrap(),
-        ForeignTarget { id: 456 }
-    );
-    assert_eq!(
-        ForeignTarget::try_from("bad".to_owned()).unwrap_err(),
-        ParseConfigError::InvalidPort("bad".to_owned())
-    );
+    let err_v1 = serde_json::from_str::<ForeignTarget>(r#"{"version":1,"data":"bad"}"#).unwrap_err();
+    assert!(err_v1.to_string().contains("invalid port: bad"));
 
     // 1-step via u32 -> (u32_to_target) -> ForeignTarget directly in match arm
     let from_v2: ForeignTarget = serde_json::from_str(r#"{"version":2,"data":789}"#).unwrap();
@@ -388,7 +358,6 @@ fn test_duplicate_types_sequential_and_alternating() {
     assert_eq!(s1, SequentialDupTarget { x: 6 });
     assert_eq!(s2, SequentialDupTarget { x: 6 });
     assert_eq!(s3, SequentialDupTarget { x: 6 });
-    assert_eq!(SequentialDupTarget::from(DupV1 { x: 5 }), s1);
 
     let a1: AlternatingDupTarget = serde_json::from_str(r#"{"version":1,"x":5}"#).unwrap();
     let a2: AlternatingDupTarget = serde_json::from_str(r#"{"version":2,"x":5}"#).unwrap();
@@ -396,5 +365,202 @@ fn test_duplicate_types_sequential_and_alternating() {
     assert_eq!(a1, AlternatingDupTarget { x: 5 });
     assert_eq!(a2, AlternatingDupTarget { x: 10 });
     assert_eq!(a3, AlternatingDupTarget { x: 10 });
-    assert_eq!(AlternatingDupTarget::from(AltB { x: 5 }), a2);
+}
+
+// =========================================================================
+// 5. Display-only, non-Error, non-Send/Sync heterogeneous errors across steps
+// =========================================================================
+
+pub struct DisplayOnlyErrA {
+    msg: String,
+    _not_send_sync: core::marker::PhantomData<*const ()>,
+}
+
+impl core::fmt::Display for DisplayOnlyErrA {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "step-a display error: {}", self.msg)
+    }
+}
+
+pub struct DisplayOnlyErrB {
+    code: u32,
+    _not_send_sync: core::marker::PhantomData<*const ()>,
+}
+
+impl core::fmt::Display for DisplayOnlyErrB {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "step-b display error: code={}", self.code)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HeteroV1 {
+    pub raw: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HeteroV2 {
+    pub val: u32,
+}
+
+#[backwards_compat(
+    versions(
+        #[fallible]
+        1: HeteroV1 => 2,
+        #[fallible]
+        2: HeteroV2 => 3,
+        3: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct HeteroTarget {
+    pub val: u32,
+}
+
+impl TryFrom<HeteroV1> for HeteroV2 {
+    type Error = DisplayOnlyErrA;
+
+    fn try_from(v: HeteroV1) -> Result<Self, Self::Error> {
+        let val = v.raw.parse::<u32>().map_err(|_| DisplayOnlyErrA {
+            msg: v.raw,
+            _not_send_sync: core::marker::PhantomData,
+        })?;
+        Ok(Self { val })
+    }
+}
+
+impl TryFrom<HeteroV2> for HeteroTarget {
+    type Error = DisplayOnlyErrB;
+
+    fn try_from(v: HeteroV2) -> Result<Self, Self::Error> {
+        if v.val > 100 {
+            return Err(DisplayOnlyErrB {
+                code: v.val,
+                _not_send_sync: core::marker::PhantomData,
+            });
+        }
+        Ok(Self { val: v.val })
+    }
+}
+
+#[test]
+fn test_multistep_fallible_heterogeneous_display_only_errors() {
+    // Happy path through both fallible steps
+    let ok: HeteroTarget = serde_json::from_str(r#"{"version":1,"raw":"42"}"#).unwrap();
+    assert_eq!(ok, HeteroTarget { val: 42 });
+
+    // Failure in step 1 (DisplayOnlyErrA)
+    let err_a = serde_json::from_str::<HeteroTarget>(r#"{"version":1,"raw":"not-a-num"}"#).unwrap_err();
+    assert!(err_a.to_string().contains("step-a display error: not-a-num"));
+
+    // Passes step 1, fails in step 2 (DisplayOnlyErrB)
+    let err_b_from_v1 = serde_json::from_str::<HeteroTarget>(r#"{"version":1,"raw":"250"}"#).unwrap_err();
+    assert!(
+        err_b_from_v1
+            .to_string()
+            .contains("step-b display error: code=250")
+    );
+
+    // Direct v2 failure in step 2 (DisplayOnlyErrB)
+    let err_b_from_v2 = serde_json::from_str::<HeteroTarget>(r#"{"version":2,"val":999}"#).unwrap_err();
+    assert!(
+        err_b_from_v2
+            .to_string()
+            .contains("step-b display error: code=999")
+    );
+}
+
+// =========================================================================
+// 6. Same wire type across two tags with distinct inlined migration paths
+// =========================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct SharedWireV1 {
+    pub value: i32,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct SharedWireV2 {
+    pub value: i32,
+}
+
+impl From<SharedWireV1> for SharedWireV2 {
+    fn from(v: SharedWireV1) -> Self {
+        Self { value: v.value + 1 }
+    }
+}
+
+impl From<SharedWireV2> for DivergentWireTarget {
+    fn from(v: SharedWireV2) -> Self {
+        Self {
+            value: v.value,
+            route: "via_v2".to_owned(),
+        }
+    }
+}
+
+fn special_v1_to_target(v: SharedWireV1) -> DivergentWireTarget {
+    DivergentWireTarget {
+        value: v.value * 10,
+        route: "special".to_owned(),
+    }
+}
+
+#[backwards_compat(
+    versions(
+        1: SharedWireV1 => 2,
+        2: SharedWireV2 => 4,
+        #[with(special_v1_to_target)]
+        3: SharedWireV1 => Self,
+        4: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct DivergentWireTarget {
+    pub value: i32,
+    pub route: String,
+}
+
+#[test]
+fn test_shared_wire_type_divergent_inlined_paths() {
+    // Version 1 follows 1 (SharedWireV1) -> 2 (SharedWireV2) -> 4 (Self)
+    let from_v1: DivergentWireTarget = serde_json::from_str(r#"{"version":1,"value":7}"#).unwrap();
+    assert_eq!(
+        from_v1,
+        DivergentWireTarget {
+            value: 8,
+            route: "via_v2".to_owned(),
+        }
+    );
+
+    // Version 2 follows 2 (SharedWireV2) -> 4 (Self)
+    let from_v2: DivergentWireTarget = serde_json::from_str(r#"{"version":2,"value":7}"#).unwrap();
+    assert_eq!(
+        from_v2,
+        DivergentWireTarget {
+            value: 7,
+            route: "via_v2".to_owned(),
+        }
+    );
+
+    // Version 3 shares wire type SharedWireV1 but runs its own #[with(special_v1_to_target)] => Self arm
+    let from_v3: DivergentWireTarget = serde_json::from_str(r#"{"version":3,"value":7}"#).unwrap();
+    assert_eq!(
+        from_v3,
+        DivergentWireTarget {
+            value: 70,
+            route: "special".to_owned(),
+        }
+    );
+
+    // Version 4 deserializes Self directly
+    let from_v4: DivergentWireTarget =
+        serde_json::from_str(r#"{"version":4,"value":7,"route":"direct"}"#).unwrap();
+    assert_eq!(
+        from_v4,
+        DivergentWireTarget {
+            value: 7,
+            route: "direct".to_owned(),
+        }
+    );
 }

@@ -17,6 +17,7 @@ fn de_u32_vec_from_csv<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
 pub struct PlainTupleV1(pub Vec<u16>);
 
 #[backwards_compat(content = "data", versions(_: Self, 1: PlainTupleV1, 2: Self))]

@@ -61,6 +61,7 @@ where
 }
 
 impl ResolvedPath {
+    #[allow(dead_code, reason = "used by DAG unit tests")]
     pub fn is_fallible(&self) -> bool {
         self.steps.iter().any(|s| s.fallible)
     }

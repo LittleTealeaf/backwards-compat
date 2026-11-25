@@ -1,4 +1,4 @@
-use backwards_compat::{BackwardsCompat, Migrated, VersionKey, backwards_compat, backwards_compat_via};
+use backwards_compat::{BackwardsCompat, Migrated, VersionKey, backwards_compat};
 use serde::{Deserialize, Serialize};
 
 // =========================================================================
@@ -26,7 +26,7 @@ impl From<AppConfigV1> for AppConfigProxy {
     }
 }
 
-#[backwards_compat_via(AppConfigProxy)]
+#[backwards_compat(via = AppConfigProxy)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct AppConfig {
     pub name: String,
@@ -64,7 +64,7 @@ impl From<UserIdV1> for UserIdProxy {
     }
 }
 
-#[backwards_compat_via(UserIdProxy)]
+#[backwards_compat(via(UserIdProxy))]
 #[derive(Debug, PartialEq, Eq)]
 pub struct UserId(pub u64);
 
@@ -84,7 +84,7 @@ impl From<&UserId> for UserIdProxy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkerProxy;
 
-#[backwards_compat_via(MarkerProxy)]
+#[backwards_compat(via = MarkerProxy)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct Marker;
 
@@ -119,7 +119,7 @@ impl From<EventV1> for EventProxy {
     }
 }
 
-#[backwards_compat_via(EventProxy)]
+#[backwards_compat(via(EventProxy))]
 #[derive(Debug, PartialEq, Eq)]
 pub enum DomainEvent {
     Ping,
@@ -254,7 +254,7 @@ pub struct RollingProxy {
     pub rev: u32,
 }
 
-#[backwards_compat_via(RollingProxy)]
+#[backwards_compat(via = RollingProxy)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct RollingDoc {
     pub title: String,
@@ -296,7 +296,7 @@ impl From<StrV1> for StrProxy {
     }
 }
 
-#[backwards_compat_via(StrProxy)]
+#[backwards_compat(via(StrProxy))]
 #[derive(Debug, PartialEq, Eq)]
 pub struct StrDomain {
     pub label: String,
@@ -333,7 +333,7 @@ impl From<MixedV1> for MixedProxy {
     }
 }
 
-#[backwards_compat_via(MixedProxy)]
+#[backwards_compat(via = MixedProxy)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct MixedDomain {
     pub n: i32,
@@ -451,7 +451,7 @@ pub struct SimpleProxy {
     pub value: u32,
 }
 
-#[backwards_compat_via(SimpleProxy)]
+#[backwards_compat(via = SimpleProxy)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct NonCloneDomain {
     pub value: u32,
@@ -469,7 +469,7 @@ impl From<&NonCloneDomain> for SimpleProxy {
     }
 }
 
-#[backwards_compat_via(SimpleProxy)]
+#[backwards_compat(via(SimpleProxy))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloneFallbackDomain {
     pub value: u32,
@@ -531,7 +531,7 @@ impl From<PortProxyV1> for PortProxy {
 #[error("invalid port: {0}")]
 pub struct PortError(pub u32);
 
-#[backwards_compat_via(PortProxy, try_from)]
+#[backwards_compat(via = PortProxy, try_from)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct ValidatedPort {
     pub port: u16,
@@ -557,7 +557,7 @@ impl From<&ValidatedPort> for PortProxy {
     }
 }
 
-#[backwards_compat_via(PortProxy, try_into)]
+#[backwards_compat(via = PortProxy, try_into)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct TryIntoBorrowed {
     pub port: u32,
@@ -580,7 +580,7 @@ impl TryFrom<&TryIntoBorrowed> for PortProxy {
     }
 }
 
-#[backwards_compat_via(PortProxy, try_into)]
+#[backwards_compat(try_into, via(PortProxy))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TryIntoCloneFallback {
     pub port: u32,
@@ -603,7 +603,7 @@ impl TryFrom<TryIntoCloneFallback> for PortProxy {
     }
 }
 
-#[backwards_compat_via(PortProxy, try_into)]
+#[backwards_compat(via = PortProxy, try_into)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct TryIntoPreferBorrowed {
     pub port: u32,
@@ -643,7 +643,7 @@ impl TryFrom<TryIntoPreferBorrowed> for PortProxy {
     }
 }
 
-#[backwards_compat_via(PortProxy, fallible)]
+#[backwards_compat(fallible, via = PortProxy)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct FalliblePort {
     pub port: u32,
@@ -808,25 +808,25 @@ mod conv {
     }
 }
 
-#[backwards_compat_via(SimpleProxy, from = conv::from_infallible, to(conv::to_infallible))]
+#[backwards_compat(via = SimpleProxy, from = conv::from_infallible, to(conv::to_infallible))]
 #[derive(Debug, PartialEq, Eq)]
 pub struct CustomInfallible {
     pub value: u32,
 }
 
-#[backwards_compat_via(SimpleProxy, try_from, from(conv::try_from_custom), to = conv::to_try_from_custom)]
+#[backwards_compat(try_from, from(conv::try_from_custom), via = SimpleProxy, to = conv::to_try_from_custom)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct CustomTryFrom {
     pub value: u32,
 }
 
-#[backwards_compat_via(SimpleProxy, try_into, from = conv::from_try_into_custom, to(conv::try_to_custom))]
+#[backwards_compat(via(SimpleProxy), try_into, from = conv::from_try_into_custom, to(conv::try_to_custom))]
 #[derive(Debug, PartialEq, Eq)]
 pub struct CustomTryInto {
     pub value: u32,
 }
 
-#[backwards_compat_via(SimpleProxy, fallible, from(conv::try_from_fallible), to = conv::try_to_fallible)]
+#[backwards_compat(via = SimpleProxy, fallible, from(conv::try_from_fallible), to = conv::try_to_fallible)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct CustomFallible {
     pub value: u32,
@@ -924,7 +924,7 @@ where
     }
 }
 
-#[backwards_compat_via(GenericProxy<'a, T>)]
+#[backwards_compat(via = GenericProxy<'a, T>)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct GenericDomain<'a, T>
 where
@@ -984,7 +984,7 @@ fn test_generics_lifetimes_and_where_clauses() {
 // 10. Stripping conflicting #[derive(..., Serialize, Deserialize)]
 // =========================================================================
 
-#[backwards_compat_via(AppConfigProxy)]
+#[backwards_compat(via = AppConfigProxy)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StrippedStruct {
     pub name: String,
@@ -1009,7 +1009,7 @@ impl From<&StrippedStruct> for AppConfigProxy {
     }
 }
 
-#[backwards_compat_via(EventProxy)]
+#[backwards_compat(via(EventProxy))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StrippedEnum {
     Ping,

@@ -2,6 +2,7 @@ use proc_macro::TokenStream;
 
 mod codegen;
 mod dag;
+mod field;
 mod parse;
 mod via;
 
@@ -47,26 +48,42 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 
 /// Declarative, compile-time verified schema versioning and backwards compatibility for Serde and domain models.
 ///
-/// `#[backwards_compat]` can be applied to either a `struct` or an `enum`. It automatically generates
-/// `serde::Serialize`, `serde::Deserialize`, `backwards_compat::BackwardsCompat`,
-/// `backwards_compat::BackwardsCompatDeserialize`, zero-allocation wire representations, and
-/// transitive `From<V>` / `TryFrom<V>` conversions from historical versions.
+/// `#[backwards_compat]` can be applied to a `struct` or `enum` (for type-level versioning, proxy
+/// redirection via `via = ProxyType`, or bare `#[backwards_compat]` to enable field-level versioning
+/// on an unversioned container), as well as to individual struct or enum fields. It automatically
+/// generates `serde::Serialize`, `serde::Deserialize`, `backwards_compat::BackwardsCompat`,
+/// `backwards_compat::BackwardsCompatDeserialize`, streaming-first deserializers, zero-allocation
+/// wire representations, and always-inlined migration chains from historical versions.
 ///
 /// # Macro Parameters Reference
 ///
 /// - **`tag = "..."` / `tag("...")`** *(default: `"version"`)*:
 ///   The serialized field name used to store the version identifier (native integer or string).
-/// - **`content = "..."` / `content("...")`** *(optional)*:
+/// - **`content = "..."` / `content("...")`** *(default: none at type level; `"data"` on fields)*:
 ///   Configures adjacent tagging (`{"tag": ..., "content": ...}`).
 ///   Essential for tuple structs, scalar types, newtypes, and enums that cannot be flattened into a map.
-/// - **`error = ErrorType` / `error(ErrorType)`** *(optional)*:
-///   Custom error type returned by generated `TryFrom` implementations for fallible migrations.
-///   Defaults to `Box<dyn std::error::Error + Send + Sync + 'static>`.
+///   Field-level `#[backwards_compat(...)]` automatically defaults to `content = "data"`.
 /// - **`dump`** *(optional)*:
 ///   Prints the macro's generated token stream to `stderr` during compilation for inspection.
 /// - **`versions(...)` / `versions = [...]` / `versions = { ... }`**:
 ///   Declares the list of schema versions and transition paths. The active current version is the
 ///   entry marked `#[current]`, or defaults to the last non-untagged primary entry (or `1` if empty).
+/// - **`via = ProxyType` / `via(ProxyType)`** *(proxy redirection mode; mutually exclusive with `tag`, `content`, `versions`, and field-level `#[backwards_compat]`)*:
+///   Delegates `Serialize`, `Deserialize`, `BackwardsCompat`, and `BackwardsCompatDeserialize`
+///   through a separate versioned proxy type. Supports `try_from`, `try_into`, `fallible`,
+///   `from = fn_path` / `from(fn_path)`, `to = fn_path` / `to(fn_path)`, and `dump`.
+///
+/// # Field-Level Versioning
+///
+/// Place `#[backwards_compat(...)]` on individual fields of a `struct` or `enum` variant:
+/// - **Standalone (unversioned container)**: Place bare `#[backwards_compat]` on the container
+///   alongside `#[derive(Serialize, Deserialize)]`.
+/// - **Combined (versioned container)**: Combine an outer `#[backwards_compat(versions(...))]`
+///   container with field-level `#[backwards_compat(...)]` on its fields (preserving zero-clone
+///   serialization via `serialize_ref`).
+/// - Each annotated field gets a private same-scope helper with `content = "data"` by default,
+///   supporting primitives, foreign types (`#[with(...)]`), `Option<T>`, `Vec<T>`, generics,
+///   lifetimes, const generics, and multiple fields of the same type with independent chains.
 ///
 /// # Version Entry Directives
 ///
@@ -84,26 +101,32 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 /// - **`#[serialize]` / `#[serialize(with = fn_path)]`**: Overrides which version is emitted during
 ///   serialization (useful for rolling deployments). Defaults to the current version.
 /// - **`#[fallible]`**: Marks a transition as fallible, using `TryFrom` (or a `Result`-returning
-///   `#[with]` function).
+///   `#[with]` function). Error types only need to implement `core::fmt::Display`.
 /// - **`#[with(fn_path)]`**: Uses a custom conversion function `fn(FromTy) -> ToTy` (or
 ///   `fn(FromTy) -> Result<ToTy, E>` with `#[fallible]`) instead of `From` / `TryFrom`.
 /// - **`#[cfg(...)]`**: Conditionally compiles a historical or unversioned (`_`) version entry,
-///   including its deserialization arm and generated `From`/`TryFrom` conversion. Multiple
+///   including its deserialization arm and inlined migration chain. Multiple
 ///   `#[cfg(...)]` attributes on an entry or along a path are combined with `all(...)`. Neither the
 ///   active `#[current]` version nor the `#[serialize]` version may be gated, and unconditional
 ///   entries cannot migrate through a gated entry.
 ///
 /// # Key Capabilities
 ///
-/// 1. **Struct & Enum Domain Models**: Works on named structs, tuple structs, unit structs, and enums.
-/// 2. **Zero-Copy / Zero-Allocation Serialization**: Domain models do not need `#[derive(Clone)]`.
+/// 1. **Streaming-First Deserialization**: Zero-buffer fast path when the version tag appears first,
+///    prefix-only buffering when out-of-order, direct version dispatch, single-pass untagged
+///    fallback, and fail-fast errors on unknown/future/disabled versions.
+/// 2. **Struct, Enum, & Field-Level Versioning**: Works on named structs, tuple structs, unit structs,
+///    enums, and individual struct/enum fields.
+/// 3. **Zero-Copy / Zero-Allocation Serialization**: Domain models do not need `#[derive(Clone)]`.
 ///    Serialization borrows fields directly using generated shadow borrowed structs/enums and native
 ///    integer or string version tags.
-/// 3. **Generics & Lifetimes Support**: Fully supports generic types, lifetime parameters, and `where` clauses.
-/// 4. **Metadata & Opt-In Migration Tracking**: Implements `BackwardsCompat` (`CURRENT_VERSION`,
+/// 4. **Generics, Lifetimes, & Const Generics**: Fully supports generic types, lifetime parameters,
+///    const generics, and `where` clauses.
+/// 5. **Metadata & Opt-In Migration Tracking**: Implements `BackwardsCompat` (`CURRENT_VERSION`,
 ///    `SERIALIZE_VERSION`, `SUPPORTED_VERSIONS`, `ACCEPTS_UNTAGGED`) and `Migrated<T>`.
-/// 5. **Transitive In-Code Conversions**: Automatically implements `From<V>` / `TryFrom<V>` for all
-///    multi-step historical versions `V`.
+/// 6. **Always-Inlined Migrations**: Multi-step migration chains are inlined directly into each
+///    version's deserialization arm without requiring extra trait bounds or unified error types;
+///    fallible steps only require `core::fmt::Display`.
 ///
 /// # Examples
 ///
@@ -131,12 +154,34 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 /// }
 /// ```
 ///
-/// ### 2. Fallible Migrations with Custom Error & `#[with]`
+/// ### 2. Field-Level Versioning
+///
+/// ```rust,ignore
+/// use backwards_compat::backwards_compat;
+/// use serde::{Deserialize, Serialize};
+///
+/// fn parse_port(s: String) -> Result<u16, core::num::ParseIntError> {
+///     s.parse()
+/// }
+///
+/// #[backwards_compat]
+/// #[derive(Serialize, Deserialize)]
+/// pub struct AppSettings {
+///     pub name: String,
+///     // Adjacent tagging defaults to tag = "version", content = "data":
+///     #[backwards_compat(versions(
+///         #[fallible] #[with(parse_port)] 1: String,
+///         2: Self,
+///     ))]
+///     pub port: u16,
+/// }
+/// ```
+///
+/// ### 3. Fallible Migrations with `#[with]`
 ///
 /// ```rust,ignore
 /// #[backwards_compat(
 ///     tag = "ver",
-///     error = MyError,
 ///     versions(
 ///         #[fallible] #[with(parse_v1)] 1: ServerV1,
 ///         2: Self,
@@ -147,7 +192,7 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 /// }
 /// ```
 ///
-/// ### 3. Adjacent Tagging for Tuple Structs, Scalars, and Enums
+/// ### 4. Adjacent Tagging for Tuple Structs, Scalars, and Enums
 ///
 /// ```rust,ignore
 /// #[backwards_compat(
@@ -161,7 +206,7 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 /// }
 /// ```
 ///
-/// ### 4. Rolling Deployments (`#[serialize]`) & Inline Tag Aliases (`|`)
+/// ### 5. Rolling Deployments (`#[serialize]`) & Inline Tag Aliases (`|`)
 ///
 /// ```rust,ignore
 /// #[backwards_compat(
@@ -177,7 +222,7 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 /// }
 /// ```
 ///
-/// ### 5. Feature-Gated Historical Versions (`#[cfg(...)]`)
+/// ### 6. Feature-Gated Historical Versions (`#[cfg(...)]`)
 ///
 /// ```rust,ignore
 /// #[cfg(feature = "legacy-v1")]
@@ -203,10 +248,44 @@ pub fn backwards_compat(attr: TokenStream, item: TokenStream) -> TokenStream {
     backwards_compat_impl(attr.into(), item.into()).into()
 }
 
+fn contains_via_option(attr: &proc_macro2::TokenStream) -> bool {
+    let mut iter = attr.clone().into_iter().peekable();
+    while let Some(tt) = iter.next() {
+        if let proc_macro2::TokenTree::Ident(ident) = tt
+            && ident == "via"
+        {
+            match iter.peek() {
+                Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '=' => return true,
+                Some(proc_macro2::TokenTree::Group(g))
+                    if g.delimiter() == proc_macro2::Delimiter::Parenthesis =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 fn backwards_compat_impl(
     attr: proc_macro2::TokenStream,
     item: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    struct PreparedItem {
+        cleaned_item_tokens: proc_macro2::TokenStream,
+        target_ident: syn::Ident,
+        vis: syn::Visibility,
+        generics: syn::Generics,
+        field_helper_tokens: Vec<proc_macro2::TokenStream>,
+        built_shadow_fn: Box<dyn FnOnce() -> BuiltShadowWire>,
+    }
+
+    if contains_via_option(&attr) {
+        return backwards_compat_via_impl(attr, item);
+    }
+
+    let attr_is_empty = attr.is_empty();
     let args = match syn::parse2::<BackwardsCompatArgs>(attr) {
         Ok(a) => a,
         Err(err) => return err.to_compile_error(),
@@ -216,35 +295,87 @@ fn backwards_compat_impl(
         Err(err) => return err.to_compile_error(),
     };
 
-    let (cleaned_item_tokens, target_ident, vis, generics, built_shadow_fn): (
-        proc_macro2::TokenStream,
-        syn::Ident,
-        syn::Visibility,
-        syn::Generics,
-        Box<dyn FnOnce() -> BuiltShadowWire>,
-    ) = match item {
-        syn::Item::Struct(item_struct) => {
+    let prepared = match item {
+        syn::Item::Struct(mut item_struct) => {
+            let field_specs = match field::extract_struct_field_compat(&item_struct) {
+                Ok(specs) => specs,
+                Err(err) => return err.to_compile_error(),
+            };
+            let mut helpers = Vec::with_capacity(field_specs.len());
+            for spec in &field_specs {
+                match field::generate_field_helper(spec) {
+                    Ok(ts) => helpers.push(ts),
+                    Err(err) => return err.to_compile_error(),
+                }
+            }
+
+            if attr_is_empty && !field_specs.is_empty() {
+                for spec in &field_specs {
+                    if let Some(f) = item_struct.fields.iter_mut().nth(spec.field_idx) {
+                        f.attrs.retain(|a| !a.path().is_ident("backwards_compat"));
+                        let helper_str = spec.helper_ident.to_string();
+                        f.attrs.push(syn::parse_quote!(#[serde(with = #helper_str)]));
+                    }
+                }
+                return quote::quote! {
+                    #item_struct
+                    #(#helpers)*
+                };
+            }
+
             let mut cleaned_item_struct = item_struct.clone();
             cleaned_item_struct
                 .attrs
                 .retain(|attr| !attr.path().is_ident("serde"));
             clean_derive_attrs(&mut cleaned_item_struct.attrs);
             for field in &mut cleaned_item_struct.fields {
-                field.attrs.retain(|attr| !attr.path().is_ident("serde"));
+                field.attrs.retain(|attr| {
+                    !attr.path().is_ident("serde") && !attr.path().is_ident("backwards_compat")
+                });
             }
 
             let target_ident = item_struct.ident.clone();
             let vis = item_struct.vis.clone();
             let generics = item_struct.generics.clone();
-            (
-                quote::quote!(#cleaned_item_struct),
+            PreparedItem {
+                cleaned_item_tokens: quote::quote!(#cleaned_item_struct),
                 target_ident,
                 vis,
                 generics,
-                Box::new(move || build_struct_shadow_wire(&item_struct)),
-            )
+                field_helper_tokens: helpers,
+                built_shadow_fn: Box::new(move || build_struct_shadow_wire(&item_struct, &field_specs)),
+            }
         }
-        syn::Item::Enum(item_enum) => {
+        syn::Item::Enum(mut item_enum) => {
+            let field_specs = match field::extract_enum_field_compat(&item_enum) {
+                Ok(specs) => specs,
+                Err(err) => return err.to_compile_error(),
+            };
+            let mut helpers = Vec::with_capacity(field_specs.len());
+            for spec in &field_specs {
+                match field::generate_field_helper(spec) {
+                    Ok(ts) => helpers.push(ts),
+                    Err(err) => return err.to_compile_error(),
+                }
+            }
+
+            if attr_is_empty && !field_specs.is_empty() {
+                for spec in &field_specs {
+                    if let Some(v_idx) = spec.variant_idx
+                        && let Some(variant) = item_enum.variants.iter_mut().nth(v_idx)
+                        && let Some(f) = variant.fields.iter_mut().nth(spec.field_idx)
+                    {
+                        f.attrs.retain(|a| !a.path().is_ident("backwards_compat"));
+                        let helper_str = spec.helper_ident.to_string();
+                        f.attrs.push(syn::parse_quote!(#[serde(with = #helper_str)]));
+                    }
+                }
+                return quote::quote! {
+                    #item_enum
+                    #(#helpers)*
+                };
+            }
+
             let mut cleaned_item_enum = item_enum.clone();
             cleaned_item_enum
                 .attrs
@@ -253,20 +384,23 @@ fn backwards_compat_impl(
             for variant in &mut cleaned_item_enum.variants {
                 variant.attrs.retain(|attr| !attr.path().is_ident("serde"));
                 for field in &mut variant.fields {
-                    field.attrs.retain(|attr| !attr.path().is_ident("serde"));
+                    field.attrs.retain(|attr| {
+                        !attr.path().is_ident("serde") && !attr.path().is_ident("backwards_compat")
+                    });
                 }
             }
 
             let target_ident = item_enum.ident.clone();
             let vis = item_enum.vis.clone();
             let generics = item_enum.generics.clone();
-            (
-                quote::quote!(#cleaned_item_enum),
+            PreparedItem {
+                cleaned_item_tokens: quote::quote!(#cleaned_item_enum),
                 target_ident,
                 vis,
                 generics,
-                Box::new(move || build_enum_shadow_wire(&item_enum)),
-            )
+                field_helper_tokens: helpers,
+                built_shadow_fn: Box::new(move || build_enum_shadow_wire(&item_enum, &field_specs)),
+            }
         }
         other => {
             return syn::Error::new_spanned(
@@ -276,6 +410,15 @@ fn backwards_compat_impl(
             .to_compile_error();
         }
     };
+
+    let PreparedItem {
+        cleaned_item_tokens,
+        target_ident,
+        vis,
+        generics,
+        field_helper_tokens,
+        built_shadow_fn,
+    } = prepared;
 
     let (_, ty_generics, _) = generics.split_for_impl();
     let target_ty: syn::Type = syn::parse_quote!(#target_ident #ty_generics);
@@ -304,217 +447,49 @@ fn backwards_compat_impl(
             is_unit_struct: built.is_unit_struct,
         };
 
-        let codegen_tokens =
-            match codegen::generate_backwards_compat(&input, Some(&shadow_info), Some(built.shadow_tokens)) {
-                Ok(t) => t,
-                Err(err) => return err.to_compile_error(),
-            };
+        let codegen_tokens = match codegen::generate_backwards_compat(
+            &input,
+            codegen::SelfWireMode::Shadow(&shadow_info),
+            Some(built.shadow_tokens),
+        ) {
+            Ok(t) => t,
+            Err(err) => return err.to_compile_error(),
+        };
 
         quote::quote! {
             #cleaned_item_tokens
             #codegen_tokens
+            #(#field_helper_tokens)*
         }
     } else {
-        let codegen_tokens = match codegen::generate_backwards_compat(&input, None, None) {
-            Ok(t) => t,
-            Err(err) => return err.to_compile_error(),
-        };
+        let codegen_tokens =
+            match codegen::generate_backwards_compat(&input, codegen::SelfWireMode::Disallowed, None) {
+                Ok(t) => t,
+                Err(err) => return err.to_compile_error(),
+            };
         quote::quote! {
             #cleaned_item_tokens
             #codegen_tokens
+            #(#field_helper_tokens)*
         }
     }
 }
 
-/// Redirects `serde::Serialize`, `serde::Deserialize`, `backwards_compat::BackwardsCompat`, and
-/// `backwards_compat::BackwardsCompatDeserialize` for a domain model through a separate versioned
-/// proxy type.
-///
-/// Use `#[backwards_compat_via(ProxyType, ...)]` when you want to keep your domain `struct` or
-/// `enum` completely decoupled from its serialized wire schema (for example, enforcing domain
-/// invariants, using non-serializable internal representations, or keeping versioned DTOs in a
-/// separate module) while still automatically inheriting all `backwards_compat` capabilities
-/// (version tags, schema migrations, `Migrated<T>` tracking, `#[cfg(...)]`-gated versions, and
-/// rolling deployments) from `ProxyType`.
-///
-/// # Macro Parameters Reference
-///
-/// - **`ProxyType`** *(required, first positional argument)*:
-///   The versioned proxy type (typically annotated with `#[backwards_compat(...)]`) that handles
-///   serialization, deserialization, and schema metadata. Cannot be bare `Self`.
-/// - **`try_from`** *(optional flag)*:
-///   Makes the deserialization conversion (`ProxyType -> Self`) fallible. Uses
-///   `TryFrom<ProxyType>` (or a `Result`-returning `from` function) and converts errors via
-///   `serde::de::Error::custom`. Cannot be combined with `fallible`.
-/// - **`try_into`** *(optional flag)*:
-///   Makes the serialization conversion (`&Self -> ProxyType` / `Self -> ProxyType`) fallible.
-///   Uses `TryInto<ProxyType>` (or a `Result`-returning `to` function) and converts errors via
-///   `serde::ser::Error::custom`. Cannot be combined with `fallible`.
-/// - **`fallible`** *(optional flag)*:
-///   Shorthand for enabling both `try_from` and `try_into`. Cannot be combined with `try_from` or
-///   `try_into`.
-/// - **`from = fn_path` / `from(fn_path)`** *(optional)*:
-///   Uses a custom conversion function instead of `From` / `TryFrom` during deserialization:
-///   - Without `try_from` / `fallible`: `fn(ProxyType) -> Self`
-///   - With `try_from` / `fallible`: `fn(ProxyType) -> Result<Self, E>` where `E: Display`
-/// - **`to = fn_path` / `to(fn_path)`** *(optional)*:
-///   Uses a custom conversion function instead of `Into` / `TryInto` during serialization:
-///   - Without `try_into` / `fallible`: `fn(&Self) -> ProxyType`
-///   - With `try_into` / `fallible`: `fn(&Self) -> Result<ProxyType, E>` where `E: Display`
-/// - **`dump`** *(optional flag)*:
-///   Prints the macro's generated token stream to `stderr` during compilation for inspection.
-///
-/// # Conversion & Autoref Rules
-///
-/// During serialization (when `to` is not specified), `#[backwards_compat_via]` uses autoref
-/// specialization so domain types do **not** need to implement `Clone` when a borrowed conversion
-/// is available:
-///
-/// - **Infallible (`try_into` not set)**: prefers `for<'a> &'a Self: Into<ProxyType>` (zero-clone),
-///   falling back to `Self: Clone + Into<ProxyType>`.
-/// - **Fallible (`try_into` or `fallible` set)**: prefers `for<'a> &'a Self: TryInto<ProxyType>`
-///   (zero-clone) with `Error: Display`, falling back to `Self: Clone + TryInto<ProxyType>` with
-///   `Error: Display`.
-///
-/// Any fallible error type must implement `core::fmt::Display`; errors are formatted and reported
-/// through `serde::de::Error::custom` or `serde::ser::Error::custom`.
-///
-/// # Generated Trait Implementations
-///
-/// Applying `#[backwards_compat_via(ProxyType, ...)]` to a `struct` or `enum` generates:
-///
-/// 1. `backwards_compat::BackwardsCompat` — delegates `Version`, `CURRENT_VERSION`,
-///    `SERIALIZE_VERSION`, `SUPPORTED_VERSIONS`, and `ACCEPTS_UNTAGGED` directly to `ProxyType`.
-/// 2. `backwards_compat::BackwardsCompatDeserialize<'de>` — deserializes `Migrated<ProxyType>`,
-///    converts the inner value into `Self`, and preserves `source_version` so `Migrated<Self>`
-///    works seamlessly.
-/// 3. `serde::Deserialize<'de>` — delegates to `BackwardsCompatDeserialize::deserialize_migrated`.
-/// 4. `serde::Serialize` — converts `&self` into `ProxyType` and serializes it.
-///
-/// Any `Serialize` or `Deserialize` entries in `#[derive(...)]` on the annotated item are
-/// automatically stripped to prevent conflicting trait implementations. `#[serde(...)]` attributes
-/// on the domain type are intentionally **not** stripped so misplaced serde attributes are caught
-/// at compile time.
-///
-/// # Examples
-///
-/// ### 1. Basic Infallible Domain Model with Zero-Clone Serialization
-///
-/// ```rust,ignore
-/// use backwards_compat::{backwards_compat, backwards_compat_via};
-/// use serde::Deserialize;
-///
-/// #[derive(Deserialize)]
-/// pub struct UserWireV1 {
-///     pub name: String,
-/// }
-///
-/// #[backwards_compat(tag = "version", versions(1: UserWireV1, 2: Self))]
-/// pub struct UserWire {
-///     pub name: String,
-///     pub role: String,
-/// }
-///
-/// impl From<UserWireV1> for UserWire {
-///     fn from(v1: UserWireV1) -> Self {
-///         Self { name: v1.name, role: "member".into() }
-///     }
-/// }
-///
-/// // Domain type does not need #[derive(Clone, Serialize, Deserialize)].
-/// #[backwards_compat_via(UserWire)]
-/// pub struct User {
-///     pub name: String,
-///     pub role: String,
-/// }
-///
-/// impl From<UserWire> for User {
-///     fn from(w: UserWire) -> Self {
-///         Self { name: w.name, role: w.role }
-///     }
-/// }
-///
-/// impl From<&User> for UserWire {
-///     fn from(u: &User) -> Self {
-///         Self { name: u.name.clone(), role: u.role.clone() }
-///     }
-/// }
-/// ```
-///
-/// ### 2. Fallible Validation (`try_from`, `try_into`, `fallible`)
-///
-/// ```rust,ignore
-/// use backwards_compat::{backwards_compat, backwards_compat_via};
-///
-/// #[backwards_compat(tag = "version", versions(1: Self))]
-/// pub struct PortWire {
-///     pub port: u32,
-/// }
-///
-/// #[backwards_compat_via(PortWire, fallible)]
-/// pub struct ValidPort(u16);
-///
-/// impl TryFrom<PortWire> for ValidPort {
-///     type Error = &'static str;
-///     fn try_from(w: PortWire) -> Result<Self, Self::Error> {
-///         let port = u16::try_from(w.port).map_err(|_| "port out of range")?;
-///         if port == 0 {
-///             return Err("port cannot be zero");
-///         }
-///         Ok(Self(port))
-///     }
-/// }
-///
-/// impl TryFrom<&ValidPort> for PortWire {
-///     type Error = &'static str;
-///     fn try_from(p: &ValidPort) -> Result<Self, Self::Error> {
-///         Ok(Self { port: u32::from(p.0) })
-///     }
-/// }
-/// ```
-///
-/// ### 3. Custom Conversion Functions (`from` & `to`)
-///
-/// ```rust,ignore
-/// use backwards_compat::backwards_compat_via;
-///
-/// fn decode_cfg(w: ConfigWire) -> Result<Config, String> {
-///     if w.host.is_empty() {
-///         return Err("host must not be empty".into());
-///     }
-///     Ok(Config { host: w.host })
-/// }
-///
-/// fn encode_cfg(c: &Config) -> ConfigWire {
-///     ConfigWire { host: c.host.clone() }
-/// }
-///
-/// #[backwards_compat_via(ConfigWire, try_from, from = decode_cfg, to = encode_cfg)]
-/// pub struct Config {
-///     pub host: String,
-/// }
-/// ```
-///
-/// ### 4. Generics and Lifetimes
-///
-/// ```rust,ignore
-/// use backwards_compat::{backwards_compat, backwards_compat_via};
-///
-/// #[backwards_compat(tag = "version", versions(1: Self))]
-/// pub struct EnvelopeWire<'a, T> {
-///     pub label: &'a str,
-///     pub payload: T,
-/// }
-///
-/// #[backwards_compat_via(EnvelopeWire<'a, T>)]
-/// pub struct Envelope<'a, T> {
-///     pub label: &'a str,
-///     pub payload: T,
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn backwards_compat_via(attr: TokenStream, item: TokenStream) -> TokenStream {
-    backwards_compat_via_impl(attr.into(), item.into()).into()
+fn reject_field_compat_attrs<'a>(
+    fields: impl IntoIterator<Item = &'a syn::Field>,
+) -> Option<proc_macro2::TokenStream> {
+    for f in fields {
+        if let Some(bc_attr) = f.attrs.iter().find(|a| a.path().is_ident("backwards_compat")) {
+            return Some(
+                syn::Error::new_spanned(
+                    bc_attr,
+                    "field-level `#[backwards_compat(...)]` cannot be used on a type with `#[backwards_compat(via = ...)]`",
+                )
+                .to_compile_error(),
+            );
+        }
+    }
+    None
 }
 
 fn backwards_compat_via_impl(
@@ -532,6 +507,9 @@ fn backwards_compat_via_impl(
 
     match item {
         syn::Item::Struct(mut item_struct) => {
+            if let Some(err_tokens) = reject_field_compat_attrs(&item_struct.fields) {
+                return err_tokens;
+            }
             clean_derive_attrs(&mut item_struct.attrs);
             let codegen_tokens = via::generate_via(&args, &item_struct.ident, &item_struct.generics);
             quote::quote! {
@@ -540,6 +518,11 @@ fn backwards_compat_via_impl(
             }
         }
         syn::Item::Enum(mut item_enum) => {
+            for variant in &item_enum.variants {
+                if let Some(err_tokens) = reject_field_compat_attrs(&variant.fields) {
+                    return err_tokens;
+                }
+            }
             clean_derive_attrs(&mut item_enum.attrs);
             let codegen_tokens = via::generate_via(&args, &item_enum.ident, &item_enum.generics);
             quote::quote! {
@@ -549,7 +532,7 @@ fn backwards_compat_via_impl(
         }
         other => syn::Error::new_spanned(
             other,
-            "#[backwards_compat_via] can only be applied to structs or enums",
+            "#[backwards_compat] can only be applied to structs or enums",
         )
         .to_compile_error(),
     }
@@ -643,11 +626,19 @@ fn should_mark_transparent(item_struct: &syn::ItemStruct) -> bool {
     true
 }
 
-fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
+fn build_struct_shadow_wire(
+    item_struct: &syn::ItemStruct,
+    field_specs: &[field::FieldCompatSpec],
+) -> BuiltShadowWire {
     let call_site_span = proc_macro2::Span::call_site();
     let target_ident = &item_struct.ident;
     let shadow_ident = quote::format_ident!("__{}ShadowWire", target_ident, span = call_site_span);
     let borrowed_ident = quote::format_ident!("__{}BorrowedWire", target_ident, span = call_site_span);
+    let find_spec = |idx: usize| {
+        field_specs
+            .iter()
+            .find(|s| s.variant_idx.is_none() && s.field_idx == idx)
+    };
 
     let generics = &item_struct.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -667,8 +658,14 @@ fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
     };
 
     let mut shadow_fields = item_struct.fields.clone();
-    for field in &mut shadow_fields {
+    for (idx, field) in shadow_fields.iter_mut().enumerate() {
         field.attrs.retain(is_forwarded_attr);
+        if let Some(spec) = find_spec(idx) {
+            let de_with = format!("{}::deserialize", spec.helper_ident);
+            field
+                .attrs
+                .push(syn::parse_quote!(#[serde(deserialize_with = #de_with)]));
+        }
         if let Some(ref mut ident) = field.ident {
             ident.set_span(call_site_span);
         }
@@ -693,9 +690,13 @@ fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
             syn::Fields::Named(named) => {
                 let mut borrowed_named = Vec::new();
                 let mut field_idents = Vec::new();
-                for f in &named.named {
-                    let field_attrs: Vec<_> =
+                for (i, f) in named.named.iter().enumerate() {
+                    let mut field_attrs: Vec<_> =
                         f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
+                    if let Some(spec) = find_spec(i) {
+                        let ser_with = format!("{}::serialize_ref", spec.helper_ident);
+                        field_attrs.push(syn::parse_quote!(#[serde(serialize_with = #ser_with)]));
+                    }
                     let field_ident = f.ident.as_ref().unwrap();
                     let mut borrowed_field_ident = field_ident.clone();
                     borrowed_field_ident.set_span(call_site_span);
@@ -724,8 +725,12 @@ fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
                 let mut borrowed_unnamed = Vec::new();
                 let mut indices = Vec::new();
                 for (i, f) in unnamed.unnamed.iter().enumerate() {
-                    let field_attrs: Vec<_> =
+                    let mut field_attrs: Vec<_> =
                         f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
+                    if let Some(spec) = find_spec(i) {
+                        let ser_with = format!("{}::serialize_ref", spec.helper_ident);
+                        field_attrs.push(syn::parse_quote!(#[serde(serialize_with = #ser_with)]));
+                    }
                     let field_ty = &f.ty;
                     borrowed_unnamed.push(quote::quote! {
                         #(#field_attrs)*
@@ -826,11 +831,19 @@ fn build_struct_shadow_wire(item_struct: &syn::ItemStruct) -> BuiltShadowWire {
     }
 }
 
-fn build_enum_shadow_wire(item_enum: &syn::ItemEnum) -> BuiltShadowWire {
+fn build_enum_shadow_wire(
+    item_enum: &syn::ItemEnum,
+    field_specs: &[field::FieldCompatSpec],
+) -> BuiltShadowWire {
     let call_site_span = proc_macro2::Span::call_site();
     let target_ident = &item_enum.ident;
     let shadow_ident = quote::format_ident!("__{}ShadowWire", target_ident, span = call_site_span);
     let borrowed_ident = quote::format_ident!("__{}BorrowedWire", target_ident, span = call_site_span);
+    let find_spec = |v_idx: usize, f_idx: usize| {
+        field_specs
+            .iter()
+            .find(|s| s.variant_idx == Some(v_idx) && s.field_idx == f_idx)
+    };
 
     let generics = &item_enum.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -843,10 +856,16 @@ fn build_enum_shadow_wire(item_enum: &syn::ItemEnum) -> BuiltShadowWire {
         .collect();
 
     let mut owned_variants = item_enum.variants.clone();
-    for variant in &mut owned_variants {
+    for (v_idx, variant) in owned_variants.iter_mut().enumerate() {
         variant.attrs.retain(is_forwarded_attr);
-        for field in &mut variant.fields {
+        for (f_idx, field) in variant.fields.iter_mut().enumerate() {
             field.attrs.retain(is_forwarded_attr);
+            if let Some(spec) = find_spec(v_idx, f_idx) {
+                let de_with = format!("{}::deserialize", spec.helper_ident);
+                field
+                    .attrs
+                    .push(syn::parse_quote!(#[serde(deserialize_with = #de_with)]));
+            }
             if let Some(ref mut ident) = field.ident {
                 ident.set_span(call_site_span);
             }
@@ -873,7 +892,7 @@ fn build_enum_shadow_wire(item_enum: &syn::ItemEnum) -> BuiltShadowWire {
     let mut to_shadow_arms = Vec::new();
     let mut from_shadow_arms = Vec::new();
 
-    for variant in &item_enum.variants {
+    for (v_idx, variant) in item_enum.variants.iter().enumerate() {
         let v_ident = &variant.ident;
         let v_forwarded_attrs: Vec<_> = variant
             .attrs
@@ -911,7 +930,12 @@ fn build_enum_shadow_wire(item_enum: &syn::ItemEnum) -> BuiltShadowWire {
                 let mut borrowed_fields = Vec::new();
                 let mut bindings = Vec::new();
                 for (i, f) in unnamed.unnamed.iter().enumerate() {
-                    let f_attrs: Vec<_> = f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
+                    let mut f_attrs: Vec<_> =
+                        f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
+                    if let Some(spec) = find_spec(v_idx, i) {
+                        let ser_with = format!("{}::serialize_ref", spec.helper_ident);
+                        f_attrs.push(syn::parse_quote!(#[serde(serialize_with = #ser_with)]));
+                    }
                     let f_ty = &f.ty;
                     borrowed_fields.push(quote::quote! {
                         #(#f_attrs)*
@@ -939,8 +963,13 @@ fn build_enum_shadow_wire(item_enum: &syn::ItemEnum) -> BuiltShadowWire {
             syn::Fields::Named(named) => {
                 let mut borrowed_fields = Vec::new();
                 let mut field_idents = Vec::new();
-                for f in &named.named {
-                    let f_attrs: Vec<_> = f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
+                for (i, f) in named.named.iter().enumerate() {
+                    let mut f_attrs: Vec<_> =
+                        f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
+                    if let Some(spec) = find_spec(v_idx, i) {
+                        let ser_with = format!("{}::serialize_ref", spec.helper_ident);
+                        f_attrs.push(syn::parse_quote!(#[serde(serialize_with = #ser_with)]));
+                    }
                     let f_ident = f.ident.as_ref().unwrap();
                     let mut borrowed_f_ident = f_ident.clone();
                     borrowed_f_ident.set_span(call_site_span);
@@ -1127,7 +1156,7 @@ mod tests {
             }
         };
 
-        let built = build_enum_shadow_wire(&item_enum);
+        let built = build_enum_shadow_wire(&item_enum, &[]);
         assert!(!built.is_unit_struct);
 
         let shadow_str = built.shadow_tokens.to_string();
@@ -1167,7 +1196,7 @@ mod tests {
             }
         };
 
-        let built = build_enum_shadow_wire(&item_enum);
+        let built = build_enum_shadow_wire(&item_enum, &[]);
         assert!(!built.is_unit_struct);
 
         let shadow_str = built.shadow_tokens.to_string();
@@ -1187,7 +1216,7 @@ mod tests {
             pub enum Never {}
         };
 
-        let built = build_enum_shadow_wire(&item_enum);
+        let built = build_enum_shadow_wire(&item_enum, &[]);
         assert!(!built.is_unit_struct);
 
         let shadow_str = built.shadow_tokens.to_string();
@@ -1308,8 +1337,8 @@ mod tests {
     #[test]
     fn test_backwards_compat_via_impl_paths() {
         // Valid struct with conflicting derives stripped
-        let struct_ts = backwards_compat_via_impl(
-            quote::quote!(Proxy, try_from),
+        let struct_ts = backwards_compat_impl(
+            quote::quote!(via = Proxy, try_from),
             quote::quote! {
                 #[derive(Debug, Clone, Serialize, Deserialize)]
                 pub struct Domain { pub a: u32 }
@@ -1321,9 +1350,9 @@ mod tests {
         assert!(!struct_str.contains("derive (Debug , Clone , Serialize"));
         syn::parse2::<syn::File>(struct_ts).unwrap();
 
-        // Valid enum
-        let enum_ts = backwards_compat_via_impl(
-            quote::quote!(ProxyEnum, fallible),
+        // Valid enum with `via(...)` syntax and arbitrary option order
+        let enum_ts = backwards_compat_impl(
+            quote::quote!(fallible, via(ProxyEnum)),
             quote::quote! {
                 #[derive(Debug, serde::Serialize, serde::Deserialize)]
                 pub enum DomainEnum { A, B(u32) }
@@ -1335,8 +1364,8 @@ mod tests {
         syn::parse2::<syn::File>(enum_ts).unwrap();
 
         // Non-struct/non-enum item
-        let fn_err = backwards_compat_via_impl(
-            quote::quote!(Proxy),
+        let fn_err = backwards_compat_impl(
+            quote::quote!(via = Proxy),
             quote::quote!(
                 fn foo() {}
             ),
@@ -1345,27 +1374,235 @@ mod tests {
         assert!(fn_err.contains("compile_error !"));
         assert!(fn_err.contains("can only be applied to structs or enums"));
 
-        // Invalid attr syntax (`Self` and empty)
-        let self_err = backwards_compat_via_impl(
-            quote::quote!(Self),
+        // Invalid attr syntax (`via = Self`, bare `via`, mixing with `tag`)
+        let self_err = backwards_compat_impl(
+            quote::quote!(via = Self),
             quote::quote!(
                 struct Domain;
             ),
         )
         .to_string();
         assert!(self_err.contains("compile_error !"));
+        assert!(self_err.contains("cannot be `Self`"));
 
-        let empty_err = backwards_compat_via_impl(
-            quote::quote!(),
+        let bare_via_err = backwards_compat_impl(
+            quote::quote!(via),
             quote::quote!(
                 struct Domain;
             ),
         )
         .to_string();
-        assert!(empty_err.contains("compile_error !"));
+        assert!(bare_via_err.contains("compile_error !"));
+        assert!(bare_via_err.contains("expected `via = <Type>` or `via(<Type>)`"));
+
+        let mixed_err = backwards_compat_impl(
+            quote::quote!(tag = "v", via = Proxy),
+            quote::quote!(
+                struct Domain;
+            ),
+        )
+        .to_string();
+        assert!(mixed_err.contains("compile_error !"));
+        assert!(mixed_err.contains("`tag` cannot be combined with `via`"));
+
+        // Field-level #[backwards_compat(...)] is rejected on struct and enum with `via`
+        let struct_field_err = backwards_compat_impl(
+            quote::quote!(via = Proxy),
+            quote::quote! {
+                pub struct Domain {
+                    #[backwards_compat(versions(1: u32, 2: Self))]
+                    pub a: u64,
+                }
+            },
+        )
+        .to_string();
+        assert!(struct_field_err.contains("compile_error !"));
+        assert!(struct_field_err.contains("field-level `#[backwards_compat(...)]` cannot be used"));
+
+        let enum_field_err = backwards_compat_impl(
+            quote::quote!(via = Proxy),
+            quote::quote! {
+                pub enum DomainEnum {
+                    A(#[backwards_compat(versions(1: u32, 2: Self))] u64),
+                }
+            },
+        )
+        .to_string();
+        assert!(enum_field_err.contains("compile_error !"));
+        assert!(enum_field_err.contains("field-level `#[backwards_compat(...)]` cannot be used"));
+
+        // Nested `#[with(via)]` inside `versions(...)` must NOT trigger `via` mode
+        let nested_with_via = backwards_compat_impl(
+            quote::quote!(tag = "v", versions(#[with(via)] 1: V1, 2: Self)),
+            quote::quote! {
+                pub struct Domain { pub a: u32 }
+            },
+        );
+        let nested_str = nested_with_via.to_string();
+        assert!(!nested_str.contains("compile_error !"));
+        assert!(nested_str.contains("impl :: backwards_compat :: BackwardsCompat for Domain"));
+        syn::parse2::<syn::File>(nested_with_via).unwrap();
 
         // Invalid item syntax
-        let bad_item = backwards_compat_via_impl(quote::quote!(Proxy), quote::quote!(struct !!!)).to_string();
+        let bad_item =
+            backwards_compat_impl(quote::quote!(via = Proxy), quote::quote!(struct !!!)).to_string();
         assert!(bad_item.contains("compile_error !"));
+    }
+
+    #[test]
+    fn test_field_level_mode1_bare_with_versioned_fields_struct_and_enum() {
+        let struct_ts = backwards_compat_impl(
+            quote::quote!(),
+            quote::quote! {
+                #[derive(Debug, Serialize, Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                pub struct Config {
+                    #[serde(rename = "p")]
+                    #[backwards_compat(versions(1: u32, 2: Self))]
+                    pub port: u16,
+                    pub host: String,
+                }
+            },
+        );
+        let s = struct_ts.to_string();
+        assert!(!s.contains("compile_error !"));
+        assert!(!s.contains("impl :: backwards_compat :: BackwardsCompat for Config"));
+        assert!(s.contains("derive (Debug , Serialize , Deserialize)"));
+        assert!(s.contains("rename_all = \"camelCase\""));
+        assert!(s.contains("rename = \"p\""));
+        assert!(s.contains("with = \"__BcField_Config_port\""));
+        assert!(!s.contains("backwards_compat (versions"));
+        assert!(s.contains("struct __BcField_Config_port ;"));
+        syn::parse2::<syn::File>(struct_ts).unwrap();
+
+        let enum_ts = backwards_compat_impl(
+            quote::quote!(),
+            quote::quote! {
+                #[derive(Serialize, Deserialize)]
+                pub enum Msg {
+                    Ping,
+                    Data(#[backwards_compat(versions(1: u32, 2: Self))] u64),
+                    Named {
+                        #[backwards_compat(versions(1: Self))]
+                        r#type: String,
+                    },
+                }
+            },
+        );
+        let e = enum_ts.to_string();
+        assert!(!e.contains("compile_error !"));
+        assert!(!e.contains("impl :: backwards_compat :: BackwardsCompat for Msg"));
+        assert!(e.contains("with = \"__BcField_Msg_Data_0\""));
+        assert!(e.contains("with = \"__BcField_Msg_Named_type\""));
+        assert!(e.contains("struct __BcField_Msg_Data_0 ;"));
+        assert!(e.contains("struct __BcField_Msg_Named_type ;"));
+        syn::parse2::<syn::File>(enum_ts).unwrap();
+    }
+
+    #[test]
+    fn test_field_level_mode2_bare_without_versioned_fields() {
+        let ts = backwards_compat_impl(
+            quote::quote!(),
+            quote::quote! {
+                #[derive(Debug, Serialize, Deserialize)]
+                pub struct Plain {
+                    pub a: u32,
+                }
+            },
+        );
+        let s = ts.to_string();
+        assert!(!s.contains("compile_error !"));
+        assert!(s.contains("impl :: backwards_compat :: BackwardsCompat for Plain"));
+        assert!(!s.contains("__BcField_"));
+        syn::parse2::<syn::File>(ts).unwrap();
+    }
+
+    #[test]
+    fn test_field_level_mode3_combined_outer_and_field_versioning() {
+        let struct_ts = backwards_compat_impl(
+            quote::quote!(tag = "v", versions(1: Self)),
+            quote::quote! {
+                #[derive(Debug, Serialize, Deserialize)]
+                pub struct Combined {
+                    #[backwards_compat(versions(1: u32, 2: Self))]
+                    pub port: u16,
+                    pub host: String,
+                }
+            },
+        );
+        let s = struct_ts.to_string();
+        assert!(!s.contains("compile_error !"));
+        assert!(s.contains("impl :: backwards_compat :: BackwardsCompat for Combined"));
+        assert!(s.contains("deserialize_with = \"__BcField_Combined_port::deserialize\""));
+        assert!(s.contains("serialize_with = \"__BcField_Combined_port::serialize_ref\""));
+        assert!(s.contains("struct __BcField_Combined_port ;"));
+        assert!(!s.contains("backwards_compat (versions"));
+        syn::parse2::<syn::File>(struct_ts).unwrap();
+
+        let enum_ts = backwards_compat_impl(
+            quote::quote!(tag = "v", content = "d", versions(1: Self)),
+            quote::quote! {
+                pub enum CombinedEnum {
+                    A(#[backwards_compat(versions(1: u32, 2: Self))] u64),
+                    B {
+                        #[backwards_compat(versions(1: Self))]
+                        x: String,
+                    },
+                }
+            },
+        );
+        let e = enum_ts.to_string();
+        assert!(!e.contains("compile_error !"));
+        assert!(e.contains("impl :: backwards_compat :: BackwardsCompat for CombinedEnum"));
+        assert!(e.contains("deserialize_with = \"__BcField_CombinedEnum_A_0::deserialize\""));
+        assert!(e.contains("serialize_with = \"__BcField_CombinedEnum_A_0::serialize_ref\""));
+        assert!(e.contains("deserialize_with = \"__BcField_CombinedEnum_B_x::deserialize\""));
+        assert!(e.contains("serialize_with = \"__BcField_CombinedEnum_B_x::serialize_ref\""));
+        syn::parse2::<syn::File>(enum_ts).unwrap();
+    }
+
+    #[test]
+    fn test_field_level_error_propagation() {
+        let dup = backwards_compat_impl(
+            quote::quote!(),
+            quote::quote! {
+                pub struct S {
+                    #[backwards_compat]
+                    #[backwards_compat]
+                    pub a: u32,
+                }
+            },
+        )
+        .to_string();
+        assert!(dup.contains("compile_error !"));
+        assert!(dup.contains("duplicate"));
+
+        let conflict = backwards_compat_impl(
+            quote::quote!(),
+            quote::quote! {
+                pub struct S {
+                    #[serde(with = "other")]
+                    #[backwards_compat]
+                    pub a: u32,
+                }
+            },
+        )
+        .to_string();
+        assert!(conflict.contains("compile_error !"));
+        assert!(conflict.contains("conflicts with"));
+
+        let unref_gen = backwards_compat_impl(
+            quote::quote!(),
+            quote::quote! {
+                pub struct S<T, U> {
+                    #[backwards_compat(versions(1: Old<U>, 2: Self))]
+                    pub a: T,
+                    pub b: U,
+                }
+            },
+        )
+        .to_string();
+        assert!(unref_gen.contains("compile_error !"));
+        assert!(unref_gen.contains("outer generic type parameter `U`"));
     }
 }
