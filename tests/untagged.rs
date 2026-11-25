@@ -66,6 +66,20 @@ fn test_single_untagged_type_and_self() {
     );
     let json = serde_json::to_string(&self_untagged).unwrap();
     assert!(json.contains(r#""version":1"#));
+
+    // RON: unversioned `(...)`, named `Struct(...)`, versioned `(...)`, and struct-formatted output
+    let ron_legacy: SingleUntaggedModel = ron::from_str(r#"(old_name:"alice")"#).unwrap();
+    assert_eq!(ron_legacy, from_legacy);
+    let ron_named: SingleUntaggedModel = ron::from_str(r#"LegacyV0(old_name:"alice")"#).unwrap();
+    assert_eq!(ron_named, from_legacy);
+    let ron_v1: SingleUntaggedModel = ron::from_str(r#"(version:1,name:"bob")"#).unwrap();
+    assert_eq!(ron_v1, from_v1);
+    let ron_out = ron::to_string(&from_v1).unwrap();
+    assert!(
+        ron_out.starts_with('(') && ron_out.ends_with(')'),
+        "got: {ron_out}"
+    );
+    assert_eq!(ron::from_str::<SingleUntaggedModel>(&ron_out).unwrap(), from_v1);
 }
 
 // =========================================================================

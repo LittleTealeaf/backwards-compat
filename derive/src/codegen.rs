@@ -213,6 +213,8 @@ pub fn generate_serialize_core(
         });
     }
 
+    let is_adjacent = input.content_field.is_some();
+
     let (body, latest_wire_ty_in_helper) = if let Some(ref ser_fn) = dag_plan.serialize_with_fn {
         let ser_ty = if dag_plan.serialize_target_is_wire {
             match wire_mode {
@@ -232,10 +234,23 @@ pub fn generate_serialize_core(
             let ty = &dag_plan.serialize_wire_ty;
             quote!(#ty)
         };
-        let s = quote! {
-            let latest: #ser_ty = (#ser_fn)(#value_expr);
-            let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
-            ::serde::Serialize::serialize(&helper, __serializer)
+        let s = if is_adjacent {
+            quote! {
+                let latest: #ser_ty = (#ser_fn)(#value_expr);
+                let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
+                ::serde::Serialize::serialize(&helper, __serializer)
+            }
+        } else {
+            quote! {
+                let latest: #ser_ty = (#ser_fn)(#value_expr);
+                ::backwards_compat::__private::serialize_internally_tagged(
+                    __serializer,
+                    "__SerializeHelper",
+                    #tag_field,
+                    &#ser_tag_expr,
+                    &latest,
+                )
+            }
         };
         (s, ser_ty)
     } else if dag_plan.serialize_target_is_wire {
@@ -243,17 +258,42 @@ pub fn generate_serialize_core(
             SelfWireMode::Shadow(info) => {
                 let construct_borrowed = &info.construct_borrowed;
                 let ty_in_helper = &info.borrowed_ty_in_helper;
-                let s = quote! {
-                    let latest = #construct_borrowed;
-                    let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
-                    ::serde::Serialize::serialize(&helper, __serializer)
+                let s = if is_adjacent {
+                    quote! {
+                        let latest = #construct_borrowed;
+                        let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
+                        ::serde::Serialize::serialize(&helper, __serializer)
+                    }
+                } else {
+                    quote! {
+                        let latest = #construct_borrowed;
+                        ::backwards_compat::__private::serialize_internally_tagged(
+                            __serializer,
+                            "__SerializeHelper",
+                            #tag_field,
+                            &#ser_tag_expr,
+                            &latest,
+                        )
+                    }
                 };
                 (s, quote!(#ty_in_helper))
             }
             SelfWireMode::Direct => {
-                let s = quote! {
-                    let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: #value_expr };
-                    ::serde::Serialize::serialize(&helper, __serializer)
+                let s = if is_adjacent {
+                    quote! {
+                        let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: #value_expr };
+                        ::serde::Serialize::serialize(&helper, __serializer)
+                    }
+                } else {
+                    quote! {
+                        ::backwards_compat::__private::serialize_internally_tagged(
+                            __serializer,
+                            "__SerializeHelper",
+                            #tag_field,
+                            &#ser_tag_expr,
+                            #value_expr,
+                        )
+                    }
                 };
                 (s, quote!(#target_ty))
             }
@@ -266,53 +306,81 @@ pub fn generate_serialize_core(
         }
     } else {
         let ty = &dag_plan.serialize_wire_ty;
-        let s = quote! {
-            use ::backwards_compat::__private::{
-                BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
-            };
+        let s = if is_adjacent {
+            quote! {
+                use ::backwards_compat::__private::{
+                    BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
+                };
 
-            let latest: #ty = __WireConvert::<_, #ty>::new(#value_expr).convert_wire();
-            let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
-            ::serde::Serialize::serialize(&helper, __serializer)
+                let latest: #ty = __WireConvert::<_, #ty>::new(#value_expr).convert_wire();
+                let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
+                ::serde::Serialize::serialize(&helper, __serializer)
+            }
+        } else {
+            quote! {
+                use ::backwards_compat::__private::{
+                    BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
+                };
+
+                let latest: #ty = __WireConvert::<_, #ty>::new(#value_expr).convert_wire();
+                ::backwards_compat::__private::serialize_internally_tagged(
+                    __serializer,
+                    "__SerializeHelper",
+                    #tag_field,
+                    &#ser_tag_expr,
+                    &latest,
+                )
+            }
         };
         (s, quote!(#ty))
     };
 
-    let mut ser_helper_generics = input.generics.clone();
-    let ser_helper_lifetime: syn::GenericParam = syn::parse_quote!('__a);
-    ser_helper_generics.params.insert(0, ser_helper_lifetime);
-    let (_, ser_helper_ty_generics, _) = ser_helper_generics.split_for_impl();
+    if let Some(content) = input.content_field.as_ref() {
+        let mut ser_helper_generics = input.generics.clone();
+        let ser_helper_lifetime: syn::GenericParam = syn::parse_quote!('__a);
+        ser_helper_generics.params.insert(0, ser_helper_lifetime);
+        let (_, ser_helper_ty_generics, _) = ser_helper_generics.split_for_impl();
 
-    let content_field_attr = input.content_field.as_ref().map_or_else(
-        || quote!(#[serde(flatten)]),
-        |content| quote!(#[serde(rename = #content)]),
-    );
+        let helper_def = quote! {
+            #[doc(hidden)]
+            #[allow(non_camel_case_types, dead_code, reason = "internal serialization helper")]
+            #[derive(::serde::Serialize)]
+            struct __SerializeHelper #ser_helper_generics #where_clause {
+                #[serde(rename = #tag_field)]
+                __tag: #ser_tag_ty,
+                #[serde(rename = #content)]
+                __content: &'__a #latest_wire_ty_in_helper,
+            }
+        };
 
-    let helper_def = quote! {
-        #[doc(hidden)]
-        #[allow(non_camel_case_types, dead_code, reason = "internal serialization helper")]
-        #[derive(::serde::Serialize)]
-        struct __SerializeHelper #ser_helper_generics #where_clause {
-            #[serde(rename = #tag_field)]
-            __tag: #ser_tag_ty,
-            #content_field_attr
-            __content: &'__a #latest_wire_ty_in_helper,
-        }
-    };
+        let mut ser_wc = where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
+            where_token: syn::token::Where::default(),
+            predicates: syn::punctuated::Punctuated::new(),
+        });
+        ser_wc.predicates.push(syn::parse_quote!(
+            for<'__a> __SerializeHelper #ser_helper_ty_generics: ::serde::Serialize
+        ));
 
-    let mut ser_wc = where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
-        where_token: syn::token::Where::default(),
-        predicates: syn::punctuated::Punctuated::new(),
-    });
-    ser_wc.predicates.push(syn::parse_quote!(
-        for<'__a> __SerializeHelper #ser_helper_ty_generics: ::serde::Serialize
-    ));
+        Ok(SerializeCore {
+            helper_def,
+            body,
+            where_clause: Some(ser_wc),
+        })
+    } else {
+        let mut ser_wc = where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
+            where_token: syn::token::Where::default(),
+            predicates: syn::punctuated::Punctuated::new(),
+        });
+        ser_wc.predicates.push(syn::parse_quote!(
+            for<'__a> #latest_wire_ty_in_helper: ::serde::Serialize
+        ));
 
-    Ok(SerializeCore {
-        helper_def,
-        body,
-        where_clause: Some(ser_wc),
-    })
+        Ok(SerializeCore {
+            helper_def: TokenStream::new(),
+            body,
+            where_clause: Some(ser_wc),
+        })
+    }
 }
 
 struct TaggedArm<'a> {
@@ -1507,7 +1575,7 @@ fn emit_visitor_body(
             where
                 __D2: ::serde::Deserializer<'__de>,
             {
-                __deserializer.deserialize_map(self)
+                __deserializer.deserialize_any(self)
             }
         }
     };
@@ -1525,7 +1593,7 @@ fn emit_visitor_body(
     } else if let Some(content_field) = content_field_opt {
         quote!(__deserializer.deserialize_struct("", &[#tag_field, #content_field], __visitor))
     } else {
-        quote!(__deserializer.deserialize_map(__visitor))
+        quote!(__deserializer.deserialize_any(__visitor))
     };
 
     quote! {
@@ -2007,7 +2075,7 @@ mod tests {
         assert!(!rendered.contains("VariantContentDeserializer"));
 
         // Uses streaming Visitor + InternalKey + RemainingMapDeserializer + ChainedMapAccess
-        assert!(rendered.contains("__deserializer . deserialize_map (__visitor)"));
+        assert!(rendered.contains("__deserializer . deserialize_any (__visitor)"));
         assert!(rendered.contains("InternalKey :: new (\"version\")"));
         assert!(rendered.contains("RemainingMapDeserializer :: new (__map)"));
         assert!(rendered.contains("ChainedMapAccess :: new (__prefix , __map)"));
@@ -2039,10 +2107,8 @@ mod tests {
         let rendered = generated.to_string();
 
         assert!(!rendered.contains("# [derive (:: serde :: Deserialize)]"));
-        assert!(rendered.contains("# [derive (:: serde :: Serialize)]"));
-        assert!(rendered.contains(
-            "struct __SerializeHelper < '__a > { # [serde (rename = \"version\")] __tag : u64 , # [serde (flatten)] __content : & '__a ModelV3 , }"
-        ));
+        assert!(!rendered.contains("# [derive (:: serde :: Serialize)]"));
+        assert!(rendered.contains("serialize_internally_tagged"));
     }
 
     #[test]
@@ -2072,9 +2138,8 @@ mod tests {
                 .contains("< TargetModelWire as :: serde :: Deserialize < '__de >> :: deserialize (__d) ?")
         );
         assert!(rendered.contains("let __val : TargetModel = :: core :: convert :: Into :: into (__val) ;"));
-        assert!(rendered.contains(
-            "struct __SerializeHelper < '__a > { # [serde (rename = \"version\")] __tag : u64 , # [serde (flatten)] __content : & '__a TargetModelBorrowedWire < '__a > , }"
-        ));
+        assert!(rendered.contains("serialize_internally_tagged"));
+        assert!(rendered.contains("for < '__a > TargetModelBorrowedWire < '__a > : :: serde :: Serialize"));
         syn::parse2::<syn::File>(generated).unwrap();
     }
 
@@ -2092,8 +2157,8 @@ mod tests {
         let h = &ser.helper_def;
         let b = &ser.body;
         let ser_str = quote!(#h fn f() { #b }).to_string();
-        assert!(ser_str.contains("__content : & '__a TargetModel"));
-        assert!(ser_str.contains("__content : __value"));
+        assert!(ser_str.contains("serialize_internally_tagged"));
+        assert!(ser_str.contains("__value"));
 
         let de = generate_deserialize_core(&input, &dag_plan, SelfWireMode::Direct, false).unwrap();
         let de_str = de.base_body.to_string();
@@ -2141,7 +2206,7 @@ mod tests {
 
         assert!(!rendered.contains("__VersionHelper"));
         assert!(rendered.contains(
-            "struct __SerializeHelper < '__a , T : Clone + 'static > where T : std :: fmt :: Debug"
+            "impl < T : Clone + 'static > :: serde :: Serialize for GenericModel < T > where T : std :: fmt :: Debug , for < '__a > GenericModelV2 < T > : :: serde :: Serialize"
         ));
         assert!(rendered.contains(
             "impl < T : Clone + 'static > :: serde :: Serialize for GenericModel < T > where T : std :: fmt :: Debug"
@@ -2460,8 +2525,8 @@ mod tests {
         let ser_old_rendered = ser_old_gen.to_string();
         assert!(ser_old_rendered.contains("const CURRENT_VERSION : Self :: Version = 2u64 ;"));
         assert!(ser_old_rendered.contains("const SERIALIZE_VERSION : Self :: Version = 1u64 ;"));
-        assert!(ser_old_rendered.contains("# [serde (flatten)] __content : & '__a ModelV1"));
-        assert!(ser_old_rendered.contains("__tag : 1u64"));
+        assert!(ser_old_rendered.contains("serialize_internally_tagged"));
+        assert!(ser_old_rendered.contains("& 1u64"));
         syn::parse2::<syn::File>(ser_old_gen).unwrap();
 
         // #[serialize(with = to_v1)] on older version

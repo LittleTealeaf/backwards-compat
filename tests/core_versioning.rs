@@ -86,10 +86,21 @@ fn test_sequential_chain_and_formats() {
     let roundtrip_toml: UserProfile = toml::from_str(&toml_str).unwrap();
     assert_eq!(roundtrip_toml, from_v2);
 
-    // RON roundtrip
+    // RON roundtrip: default struct syntax `(...)` and legacy `{...}` / `(...)` inputs
     let ron_str = ron::to_string(&from_v2).unwrap();
+    assert!(
+        ron_str.starts_with('(') && ron_str.ends_with(')'),
+        "got: {ron_str}"
+    );
     let roundtrip_ron: UserProfile = ron::from_str(&ron_str).unwrap();
     assert_eq!(roundtrip_ron, from_v2);
+
+    let from_ron_v1_paren: UserProfile = ron::from_str(r#"(version:1,name:"Alice")"#).unwrap();
+    assert_eq!(from_ron_v1_paren, from_v1);
+    let from_ron_v1_named: UserProfile = ron::from_str(r#"UserProfile(version:1,name:"Alice")"#).unwrap();
+    assert_eq!(from_ron_v1_named, from_v1);
+    let from_ron_v1_map: UserProfile = ron::from_str(r#"{"version":1,"name":"Alice"}"#).unwrap();
+    assert_eq!(from_ron_v1_map, from_v1);
 }
 
 // =========================================================================
@@ -198,6 +209,10 @@ fn test_shadow_wire_tuple_unit_non_clone_and_serde_attrs() {
         serde_json::from_str::<EmptyUnit>(r#"{"version":1}"#).unwrap(),
         EmptyUnit
     );
+    let u_ron = ron::to_string(&EmptyUnit).unwrap();
+    assert_eq!(u_ron, "(version:2)");
+    assert_eq!(ron::from_str::<EmptyUnit>(&u_ron).unwrap(), EmptyUnit);
+    assert_eq!(ron::from_str::<EmptyUnit>("(version:1)").unwrap(), EmptyUnit);
 
     // Non-Clone zero-copy shadow wire
     let nc = NonCloneShadow {
@@ -310,6 +325,14 @@ fn test_explicit_separate_wire_borrowed_and_owned() {
     assert!(b_json.contains(r#""version":2"#));
     assert!(b_json.contains(r#""len":5"#));
     assert_eq!(serde_json::from_str::<BorrowedWireTarget>(&b_json).unwrap(), b);
+
+    let b_ron = ron::to_string(&b).unwrap();
+    assert!(b_ron.starts_with('(') && b_ron.ends_with(')'), "got: {b_ron}");
+    assert_eq!(ron::from_str::<BorrowedWireTarget>(&b_ron).unwrap(), b);
+    assert_eq!(
+        ron::from_str::<BorrowedWireTarget>(r#"(version:1,raw:"hello")"#).unwrap(),
+        b
+    );
 
     let o: OwnedWireTarget = serde_json::from_str(r#"{"version":1,"raw":"world"}"#).unwrap();
     assert_eq!(
