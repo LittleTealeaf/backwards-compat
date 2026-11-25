@@ -35,7 +35,7 @@ In applications with evolving data formats (such as configuration files, databas
 - **Custom Converters (`#[with(fn_path)]`)**: Supply a custom conversion function per step instead of implementing `From` / `TryFrom`.
 - **Generics & Lifetimes**: Full support for structs and enums with type parameters, lifetimes, const generics, and `where` clauses.
 - **Adjacent Tagging**: Use `content = "..."` for tuple structs, scalar types, newtypes, and enums (field-level `#[backwards_compat(...)]` defaults to `content = "data"`).
-- **Linear & DAG Migrations**: Support sequential version upgrades (`1 -> 2 -> ... -> N`) or DAG jumps (`1 => 3`, `1 => Self`).
+- **Linear & DAG Migrations**: Support sequential version upgrades (`1 -> 2 -> ... -> N`) or DAG jumps (`1 => 3`, `1 => ModelV3`, `1 => Self`).
 - **Always-Inlined Infallible & Fallible Migrations**: Seamless support for `From`, `#[fallible]` `TryFrom`, and `#[with(...)]` migrations inlined directly per version arm; fallible error types only need to implement `core::fmt::Display` (heterogeneous error types across steps require no unified error enum).
 - **Multiple Unversioned (`_`) Schemas**: Accept one or more pre-backwards-compat unversioned schemas tried in declaration order (`#[serde(untagged)]`).
 - **Feature-Gated Versions (`#[cfg(...)]`)**: Conditionally compile historical or unversioned (`_`) schema entries behind Cargo features or `#[cfg(...)]` predicates.
@@ -380,9 +380,9 @@ impl From<EventV1> for Event {
 }
 ```
 
-### Custom Converters (`#[with(fn_path)]`) & DAG Transitions (`=> tag` / `=> Self`)
+### Custom Converters (`#[with(fn_path)]`) & DAG Transitions (`=> tag` / `=> Type` / `=> Self`)
 
-Use `=> <target_version>` or `=> Self` to jump directly across versions, and `#[with(fn_path)]` to supply a custom conversion function instead of `From` / `TryFrom`:
+Use `=> <target_version>`, `=> <TargetType>`, or `=> Self` to jump directly across versions, and `#[with(fn_path)]` to supply a custom conversion function instead of `From` / `TryFrom`. A type target resolves to the matching declared version's type (or the domain struct itself). Duplicate entries sharing a type (such as an unversioned `_` entry alongside a versioned entry) automatically inherit that type's explicit `=>` transition regardless of declaration order:
 
 ```rust
 use backwards_compat::backwards_compat;
@@ -398,28 +398,52 @@ pub struct AppConfigV2 {
     pub val: i32,
 }
 
-fn upgrade_v1(v1: AppConfigV1) -> AppConfig {
-    AppConfig { val: v1.val * 10 }
+#[derive(Deserialize)]
+pub struct AppConfigV3 {
+    pub val: i32,
+}
+
+fn upgrade_v1(v1: AppConfigV1) -> AppConfigV3 {
+    AppConfigV3 { val: v1.val * 10 }
 }
 
 impl From<AppConfigV2> for AppConfig {
     fn from(v2: AppConfigV2) -> Self {
-        Self { val: v2.val }
+        Self { val: v2.val + 1 }
+    }
+}
+
+impl From<AppConfigV3> for AppConfig {
+    fn from(v3: AppConfigV3) -> Self {
+        Self { val: v3.val }
     }
 }
 
 #[backwards_compat(
     tag = "version",
     versions(
-        #[with(upgrade_v1)] 1: AppConfigV1 => Self,
+        _: AppConfigV1,                        // inherits `=> AppConfigV3` and `#[with(upgrade_v1)]` from `1`
+        #[with(upgrade_v1)] 1: AppConfigV1 => AppConfigV3,
         2: AppConfigV2 => Self,
-        3: Self,
+        3: AppConfigV3 => AppConfig,           // equivalent to `=> Self`
+        4: Self,
     )
 )]
 #[derive(Debug, PartialEq)]
 pub struct AppConfig {
     pub val: i32,
 }
+
+# fn main() {
+let from_untagged: AppConfig = serde_json::from_str(r#"{"val": 3}"#).unwrap();
+assert_eq!(from_untagged, AppConfig { val: 30 });
+
+let from_v1: AppConfig = serde_json::from_str(r#"{"version": 1, "val": 3}"#).unwrap();
+assert_eq!(from_v1, AppConfig { val: 30 });
+
+let from_v2: AppConfig = serde_json::from_str(r#"{"version": 2, "val": 3}"#).unwrap();
+assert_eq!(from_v2, AppConfig { val: 4 });
+# }
 ```
 
 ### Metadata (`BackwardsCompat`), Migration Tracking (`Migrated<T>`), & Rolling Deployments (`#[serialize]`)
@@ -656,7 +680,7 @@ pub struct Config {
 | `content` | string | *none* (type-level) / `"data"` (field-level) | Content field name for adjacent tagging (e.g. `content = "data"`). Field-level `#[backwards_compat(...)]` defaults to `"data"`. |
 | `via` | type path | *none* | Unified proxy redirection mode (`via = ProxyType` or `via(ProxyType)`), mutually exclusive with `tag`, `content`, and `versions`. Supports `try_from`, `try_into`, `fallible`, `from = fn_path`, `to = fn_path`, and `dump`. |
 | `dump` | flag | *disabled* | Prints the generated Rust token stream to `stderr` during compilation. |
-| `versions` | list / map | *empty* | Version entries supporting `#[current]`, `#[serialize]`, `#[serialize(with = fn)]`, `#[fallible]`, `#[with(fn)]`, `#[cfg(...)]`, `\|` aliases, `_`, and `=> target` / `=> Self`. |
+| `versions` | list / map | *empty* | Version entries supporting `#[current]`, `#[serialize]`, `#[serialize(with = fn)]`, `#[fallible]`, `#[with(fn)]`, `#[cfg(...)]`, `\|` aliases, `_`, and `=> target` / `=> TargetType` / `=> Self`. |
 
 ---
 

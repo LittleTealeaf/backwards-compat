@@ -1,7 +1,8 @@
+use quote::ToTokens as _;
 use std::collections::HashSet;
 use syn::{Error, Result, Type};
 
-use crate::parse::{BackwardsCompatInput, ExplicitNext, VersionTag};
+use crate::parse::{BackwardsCompatInput, ExplicitNext, VersionEntry, VersionTag};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code, reason = "debug and DAG introspection fields")]
@@ -83,6 +84,142 @@ enum NextTarget {
     VersionIndex(usize),
 }
 
+/// Resolves an explicit `=> <Type>` transition target to either `TerminalTarget` or a concrete
+/// version entry index.
+///
+/// Resolution order:
+/// 1. Matches `input.target_ty` (`Self`) -> `NextTarget::TerminalTarget`.
+/// 2. Matches the source entry's own type -> self-loop error.
+/// 3. Matches the first concrete (non-untagged) entry per pipe-alias group with `cand.ty == *next_ty`:
+///    - Rejects types that only appear on unversioned `_` entries or match no declared version.
+///    - For unconditional sources, prefers unconditional candidates when present.
+///    - Disambiguates multiple matches only when all candidates share the same `#[cfg(...)]`
+///      signature and at most one defines an explicit `=>` transition (without conflicting with a
+///      separate `current_version` candidate); otherwise returns an ambiguity error.
+fn resolve_type_target(
+    input: &BackwardsCompatInput,
+    v: &VersionEntry,
+    next_ty: &Type,
+    next_span: proc_macro2::Span,
+) -> Result<NextTarget> {
+    if next_ty == &input.target_ty {
+        return Ok(NextTarget::TerminalTarget);
+    }
+    if next_ty == &v.ty {
+        return Err(Error::new(
+            next_span,
+            format!("self-loop transition in version `{}`", v.tag),
+        ));
+    }
+
+    let mut all_tagged_primary: Vec<(usize, &VersionEntry)> = Vec::new();
+    let mut group_has_concrete = false;
+    for (idx, cand) in input.versions.iter().enumerate() {
+        if !cand.is_alias {
+            group_has_concrete = false;
+        }
+        if !group_has_concrete && !cand.tag.is_untagged() {
+            group_has_concrete = true;
+            if cand.ty == *next_ty {
+                all_tagged_primary.push((idx, cand));
+            }
+        }
+    }
+
+    if all_tagged_primary.is_empty() {
+        if input
+            .versions
+            .iter()
+            .any(|cand| cand.tag.is_untagged() && cand.ty == *next_ty)
+        {
+            return Err(Error::new(
+                next_span,
+                format!(
+                    "target type `{}` only appears on unversioned `_` entries and cannot be targeted by `=>`",
+                    next_ty.to_token_stream()
+                ),
+            ));
+        }
+        return Err(Error::new(
+            next_span,
+            format!(
+                "target type `{}` does not match any declared version or `Self`",
+                next_ty.to_token_stream()
+            ),
+        ));
+    }
+
+    let candidates: Vec<(usize, &VersionEntry)> = if v.cfgs.is_empty() {
+        let unconditional: Vec<(usize, &VersionEntry)> = all_tagged_primary
+            .iter()
+            .copied()
+            .filter(|(_, cand)| cand.cfgs.is_empty())
+            .collect();
+        if unconditional.is_empty() {
+            all_tagged_primary
+        } else {
+            unconditional
+        }
+    } else {
+        all_tagged_primary
+    };
+
+    if let [(idx, _)] = candidates.as_slice() {
+        return Ok(NextTarget::VersionIndex(*idx));
+    }
+
+    let format_ambiguity_err = |cands: &[(usize, &VersionEntry)]| {
+        let tags = cands
+            .iter()
+            .map(|(_, cand)| format!("`{}`", cand.tag))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Error::new(
+            next_span,
+            format!(
+                "target type `{}` is ambiguous (matched by versions {tags}); specify a version tag with `=>` instead",
+                next_ty.to_token_stream()
+            ),
+        )
+    };
+
+    let cfg_sig =
+        |cand: &VersionEntry| combine_cfg_all(cand.cfgs.iter().map(|c| &c.tokens)).map(|t| t.to_string());
+    if let Some((_, first_cand)) = candidates.first() {
+        let first_cfg = cfg_sig(first_cand);
+        if candidates
+            .iter()
+            .skip(1)
+            .any(|(_, cand)| cfg_sig(cand) != first_cfg)
+        {
+            return Err(format_ambiguity_err(&candidates));
+        }
+    }
+
+    let explicit_candidates: Vec<(usize, &VersionEntry)> = candidates
+        .iter()
+        .copied()
+        .filter(|(_, cand)| cand.explicit_next.is_some())
+        .collect();
+
+    match explicit_candidates.as_slice() {
+        [] => candidates
+            .last()
+            .map(|&(last_idx, _)| NextTarget::VersionIndex(last_idx))
+            .ok_or_else(|| format_ambiguity_err(&candidates)),
+        [(explicit_idx, _)] => {
+            if candidates
+                .iter()
+                .any(|(idx, cand)| *idx != *explicit_idx && cand.tag.matches(&input.current_version))
+            {
+                return Err(format_ambiguity_err(&candidates));
+            }
+            Ok(NextTarget::VersionIndex(*explicit_idx))
+        }
+        _ => Err(format_ambiguity_err(&candidates)),
+    }
+}
+
 pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
     let n = input.versions.len();
     if n == 0 {
@@ -108,6 +245,9 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
             match explicit_next {
                 ExplicitNext::SelfTarget(_) => {
                     next_targets.push(NextTarget::TerminalTarget);
+                }
+                ExplicitNext::Type(next_ty, next_span) => {
+                    next_targets.push(resolve_type_target(input, v, next_ty, *next_span)?);
                 }
                 ExplicitNext::Tag(next_tag, next_span) => {
                     let next_span = *next_span;
@@ -160,18 +300,39 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         }
     }
 
+    let mut transition_sources: Vec<usize> = (0..n).collect();
     for (i, v) in input.versions.iter().enumerate() {
         if v.explicit_next.is_none() && !v.tag.matches(&input.current_version) {
-            let last_same_idx = input
-                .versions
-                .iter()
-                .rposition(|cand| cand.ty == v.ty && (!v.cfgs.is_empty() || cand.cfgs.is_empty()))
-                .unwrap_or(i);
-            if last_same_idx > i
-                && let Some(target) = next_targets.get(last_same_idx).copied()
+            let explicit_same_idx = input.versions.iter().rposition(|cand| {
+                cand.ty == v.ty
+                    && cand.explicit_next.is_some()
+                    && (!v.cfgs.is_empty() || cand.cfgs.is_empty())
+            });
+            if let Some(src_idx) = explicit_same_idx
+                && let Some(target) = next_targets.get(src_idx).copied()
+                && target != NextTarget::VersionIndex(i)
                 && let Some(slot) = next_targets.get_mut(i)
             {
                 *slot = target;
+                if let Some(src_slot) = transition_sources.get_mut(i) {
+                    *src_slot = src_idx;
+                }
+            } else {
+                let last_same_idx = input
+                    .versions
+                    .iter()
+                    .rposition(|cand| cand.ty == v.ty && (!v.cfgs.is_empty() || cand.cfgs.is_empty()))
+                    .unwrap_or(i);
+                if last_same_idx > i
+                    && let Some(target) = next_targets.get(last_same_idx).copied()
+                    && target != NextTarget::VersionIndex(i)
+                    && let Some(slot) = next_targets.get_mut(i)
+                {
+                    *slot = target;
+                    if let Some(src_slot) = transition_sources.get_mut(i) {
+                        *src_slot = last_same_idx;
+                    }
+                }
             }
         }
     }
@@ -213,21 +374,7 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
             match target {
                 NextTarget::TerminalTarget => {
                     if curr_ty != input.target_ty {
-                        let transition_node = if input
-                            .versions
-                            .get(curr_node)
-                            .is_some_and(|node| node.explicit_next.is_some())
-                        {
-                            curr_node
-                        } else {
-                            input
-                                .versions
-                                .iter()
-                                .rposition(|cand| {
-                                    cand.ty == curr_ty && (!v.cfgs.is_empty() || cand.cfgs.is_empty())
-                                })
-                                .unwrap_or(curr_node)
-                        };
+                        let transition_node = transition_sources.get(curr_node).copied().unwrap_or(curr_node);
                         let fallible = input
                             .versions
                             .get(transition_node)
@@ -261,21 +408,7 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
                     path_cfgs.extend(next_version.cfgs.iter().map(|c| &c.tokens));
                     let next_ty = next_version.ty.clone();
                     if next_ty != curr_ty {
-                        let transition_node = if input
-                            .versions
-                            .get(curr_node)
-                            .is_some_and(|node| node.explicit_next.is_some())
-                        {
-                            curr_node
-                        } else {
-                            input
-                                .versions
-                                .iter()
-                                .rposition(|cand| {
-                                    cand.ty == curr_ty && (!v.cfgs.is_empty() || cand.cfgs.is_empty())
-                                })
-                                .unwrap_or(curr_node)
-                        };
+                        let transition_node = transition_sources.get(curr_node).copied().unwrap_or(curr_node);
                         let fallible = input
                             .versions
                             .get(transition_node)
@@ -1131,5 +1264,619 @@ mod tests {
         assert_eq!(plan.paths[0].steps[0].to_ty, parse_quote!(Target));
         assert_eq!(plan.paths[1].steps.len(), 1);
         assert_eq!(plan.paths[1].steps[0].to_ty, parse_quote!(Target));
+    }
+
+    fn resolve_tokens(tokens: proc_macro2::TokenStream, target_ty: Type) -> Result<DagPlan> {
+        let args: BackwardsCompatArgs = syn::parse2(tokens)?;
+        let input = args.into_input(target_ty, parse_quote!(pub), syn::Generics::default())?;
+        resolve_dag(&input)
+    }
+
+    fn step_pairs(path: &ResolvedPath) -> Vec<(String, String)> {
+        path.steps
+            .iter()
+            .map(|s| {
+                (
+                    s.from_ty.to_token_stream().to_string(),
+                    s.to_ty.to_token_stream().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_dag_explicit_type_chained_mixed_and_jump() {
+        let plan = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => 2,
+                    2: V2 => V3,
+                    3: V3 => V4,
+                    4: V4 => Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        assert_eq!(
+            step_pairs(&plan.paths[0]),
+            vec![
+                ("V1".into(), "V2".into()),
+                ("V2".into(), "V3".into()),
+                ("V3".into(), "V4".into()),
+                ("V4".into(), "Target".into()),
+            ]
+        );
+        assert_eq!(
+            step_pairs(&plan.paths[1]),
+            vec![
+                ("V2".into(), "V3".into()),
+                ("V3".into(), "V4".into()),
+                ("V4".into(), "Target".into()),
+            ]
+        );
+        assert_eq!(
+            step_pairs(&plan.paths[2]),
+            vec![("V3".into(), "V4".into()), ("V4".into(), "Target".into())]
+        );
+        assert_eq!(step_pairs(&plan.paths[3]), vec![("V4".into(), "Target".into())]);
+
+        // Jump over V2 directly to V3
+        let jump_plan = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V3,
+                    2: V2,
+                    3: V3,
+                    4: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        assert_eq!(
+            step_pairs(&jump_plan.paths[0]),
+            vec![("V1".into(), "V3".into()), ("V3".into(), "Target".into())]
+        );
+        assert_eq!(
+            step_pairs(&jump_plan.paths[1]),
+            vec![("V2".into(), "V3".into()), ("V3".into(), "Target".into())]
+        );
+        assert_eq!(
+            step_pairs(&jump_plan.paths[2]),
+            vec![("V3".into(), "Target".into())]
+        );
+        assert!(jump_plan.paths[3].steps.is_empty());
+    }
+
+    #[test]
+    fn test_dag_explicit_type_target_bypasses_current_wire() {
+        let plan = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => Target,
+                    #[current] 2: V2,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        assert!(!plan.target_is_wire);
+        assert_eq!(step_pairs(&plan.paths[0]), vec![("V1".into(), "Target".into())]);
+        assert_eq!(step_pairs(&plan.paths[1]), vec![("V2".into(), "Target".into())]);
+
+        // Generic domain type target
+        let generic_plan = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1<'a, T> => Target<'a, T>,
+                    #[current] 2: V2<'a, T>,
+                ]
+            },
+            parse_quote!(Target<'a, T>),
+        )
+        .unwrap();
+
+        assert!(!generic_plan.target_is_wire);
+        assert_eq!(
+            step_pairs(&generic_plan.paths[0]),
+            vec![(
+                quote::quote!(V1<'a, T>).to_string(),
+                quote::quote!(Target<'a, T>).to_string(),
+            )]
+        );
+        assert_eq!(
+            step_pairs(&generic_plan.paths[1]),
+            vec![(
+                quote::quote!(V2<'a, T>).to_string(),
+                quote::quote!(Target<'a, T>).to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn test_dag_bidirectional_duplicate_type_inheritance() {
+        // Forward order: untagged before explicit
+        let forward = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    _: ConfigV1,
+                    _: ConfigV2,
+                    1: ConfigV1 => Self,
+                    2: ConfigV2 => Self,
+                    3: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        assert_eq!(
+            step_pairs(&forward.paths[0]),
+            vec![("ConfigV1".into(), "Target".into())]
+        );
+        assert_eq!(
+            step_pairs(&forward.paths[1]),
+            vec![("ConfigV2".into(), "Target".into())]
+        );
+        assert_eq!(
+            step_pairs(&forward.paths[2]),
+            vec![("ConfigV1".into(), "Target".into())]
+        );
+        assert_eq!(
+            step_pairs(&forward.paths[3]),
+            vec![("ConfigV2".into(), "Target".into())]
+        );
+        assert!(forward.paths[4].steps.is_empty());
+
+        // Reverse order: explicit before untagged
+        let reverse = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: ConfigV1 => Self,
+                    2: ConfigV2 => Self,
+                    _: ConfigV1,
+                    _: ConfigV2,
+                    3: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        assert_eq!(
+            step_pairs(&reverse.paths[0]),
+            vec![("ConfigV1".into(), "Target".into())]
+        );
+        assert_eq!(
+            step_pairs(&reverse.paths[1]),
+            vec![("ConfigV2".into(), "Target".into())]
+        );
+        assert_eq!(
+            step_pairs(&reverse.paths[2]),
+            vec![("ConfigV1".into(), "Target".into())]
+        );
+        assert_eq!(
+            step_pairs(&reverse.paths[3]),
+            vec![("ConfigV2".into(), "Target".into())]
+        );
+        assert!(reverse.paths[4].steps.is_empty());
+
+        // Mixed with => Type, #[fallible], and #[with(...)]
+        let mixed = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    #[fallible]
+                    #[with(my_fn)]
+                    1: V1 => V3,
+                    2: V1,
+                    3: V2,
+                    4: V3,
+                    5: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        for idx in [0, 1] {
+            assert_eq!(
+                step_pairs(&mixed.paths[idx]),
+                vec![("V1".into(), "V3".into()), ("V3".into(), "Target".into())]
+            );
+            assert!(mixed.paths[idx].steps[0].fallible);
+            assert_eq!(
+                mixed.paths[idx].steps[0]
+                    .with_fn
+                    .as_ref()
+                    .unwrap()
+                    .to_token_stream()
+                    .to_string(),
+                "my_fn"
+            );
+            assert!(!mixed.paths[idx].steps[1].fallible);
+            assert!(mixed.paths[idx].steps[1].with_fn.is_none());
+        }
+    }
+
+    #[test]
+    fn test_dag_explicit_type_multiple_rows_without_conflict() {
+        // Multiple implicit rows of same type
+        let plan1 = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    2: V2,
+                    3: V2,
+                    4: V3,
+                    5: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+        assert_eq!(
+            step_pairs(&plan1.paths[0]),
+            vec![
+                ("V1".into(), "V2".into()),
+                ("V2".into(), "V3".into()),
+                ("V3".into(), "Target".into()),
+            ]
+        );
+
+        // One explicit row + one implicit row of same type
+        let plan2 = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    2: V2 => V4,
+                    3: V2,
+                    4: V4,
+                    5: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+        assert_eq!(
+            step_pairs(&plan2.paths[0]),
+            vec![
+                ("V1".into(), "V2".into()),
+                ("V2".into(), "V4".into()),
+                ("V4".into(), "Target".into()),
+            ]
+        );
+        assert_eq!(
+            step_pairs(&plan2.paths[1]),
+            vec![("V2".into(), "V4".into()), ("V4".into(), "Target".into())]
+        );
+        assert_eq!(
+            step_pairs(&plan2.paths[2]),
+            vec![("V2".into(), "V4".into()), ("V4".into(), "Target".into())]
+        );
+
+        // Pipe alias row
+        let plan3 = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    2 | "2": V2,
+                    3: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+        assert_eq!(
+            step_pairs(&plan3.paths[0]),
+            vec![("V1".into(), "V2".into()), ("V2".into(), "Target".into())]
+        );
+
+        // Untagged row shares type with tagged row
+        let plan4 = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    _: V2,
+                    _: V0 => V2,
+                    1: V2,
+                    2: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+        assert_eq!(
+            step_pairs(&plan4.paths[1]),
+            vec![("V0".into(), "V2".into()), ("V2".into(), "Target".into())]
+        );
+    }
+
+    #[test]
+    fn test_dag_explicit_type_cfg_interactions() {
+        // Gated -> gated combines with all(...)
+        let gated_to_gated = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    #[cfg(feature = "a")]
+                    1: V1 => V2,
+                    #[cfg(feature = "b")]
+                    2: V2,
+                    3: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+        assert_eq!(
+            step_pairs(&gated_to_gated.paths[0]),
+            vec![("V1".into(), "V2".into()), ("V2".into(), "Target".into())]
+        );
+        assert_eq!(
+            gated_to_gated.paths[0].cfg.as_ref().unwrap().to_string(),
+            quote::quote!(all(feature = "a", feature = "b")).to_string()
+        );
+
+        // Unconditional -> gated errors
+        let uncond_to_gated = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    #[cfg(feature = "b")]
+                    2: V2,
+                    3: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap_err();
+        assert!(
+            uncond_to_gated.to_string().contains(
+                "unconditional version `1` cannot migrate through conditionally compiled version `2`"
+            )
+        );
+
+        // Unconditional -> type with both gated and unconditional resolves to unconditional
+        let uncond_narrowed = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    #[cfg(feature = "b")]
+                    2: V2,
+                    3: V2,
+                    4: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+        assert!(uncond_narrowed.paths[0].cfg.is_none());
+        assert_eq!(
+            step_pairs(&uncond_narrowed.paths[0]),
+            vec![("V1".into(), "V2".into()), ("V2".into(), "Target".into())]
+        );
+
+        // Gated -> type with two differently-gated entries errors as ambiguous
+        let gated_ambig = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    #[cfg(feature = "a")]
+                    1: V1 => V2,
+                    #[cfg(feature = "b")]
+                    2: V2,
+                    #[cfg(feature = "c")]
+                    3: V2,
+                    4: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap_err();
+        assert!(gated_ambig.to_string().contains("target type `V2` is ambiguous"));
+    }
+
+    #[test]
+    fn test_dag_explicit_type_error_cases() {
+        // Missing type
+        let err_missing = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => NonExistent,
+                    2: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap_err();
+        assert!(
+            err_missing
+                .to_string()
+                .contains("target type `NonExistent` does not match any declared version or `Self`")
+        );
+
+        // Self-loop
+        let err_self_loop = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V1,
+                    2: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap_err();
+        assert!(
+            err_self_loop
+                .to_string()
+                .contains("self-loop transition in version `1`")
+        );
+
+        // Cycle
+        let err_cycle = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    2: V2 => V1,
+                    3: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap_err();
+        assert!(err_cycle.to_string().contains("cycle detected"));
+
+        // Conflicting multiple explicit transitions
+        let err_conflict = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    2: V2 => V4,
+                    3: V2 => V5,
+                    4: V4,
+                    5: V5,
+                    6: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap_err();
+        assert!(err_conflict.to_string().contains("target type `V2` is ambiguous"));
+
+        // Single explicit alongside #[current] of same type
+        let err_current_conflict = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    2: V2 => Self,
+                    #[current] 3: V2,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap_err();
+        assert!(
+            err_current_conflict
+                .to_string()
+                .contains("target type `V2` is ambiguous")
+        );
+
+        // Type only on untagged _
+        let err_untagged_only = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    _: V0,
+                    1: V1 => V0,
+                    2: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap_err();
+        assert!(err_untagged_only.to_string().contains(
+            "target type `V0` only appears on unversioned `_` entries and cannot be targeted by `=>`"
+        ));
+    }
+
+    #[test]
+    fn test_dag_non_inheriting_duplicate_type_metadata_isolation() {
+        // #[current] entry of same type must not inherit #[with] or #[fallible] from an explicit entry
+        let plan1 = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    #[fallible]
+                    #[with(v1_to_v2)]
+                    1: V1 => 3,
+                    #[current]
+                    2: V1,
+                    3: V2,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        assert_eq!(plan1.paths[0].steps[0].from_ty, parse_quote!(V1));
+        assert_eq!(plan1.paths[0].steps[0].to_ty, parse_quote!(V2));
+        assert!(plan1.paths[0].steps[0].fallible);
+        assert_eq!(
+            plan1.paths[0].steps[0]
+                .with_fn
+                .as_ref()
+                .unwrap()
+                .to_token_stream()
+                .to_string(),
+            "v1_to_v2"
+        );
+
+        assert_eq!(step_pairs(&plan1.paths[1]), vec![("V1".into(), "Target".into())]);
+        assert!(!plan1.paths[1].steps[0].fallible);
+        assert!(plan1.paths[1].steps[0].with_fn.is_none());
+
+        // Entry 2 guarded against self-loop retains its own #[fallible] on V1 -> V3
+        let plan2 = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => 2,
+                    #[fallible]
+                    2: V1,
+                    3: V3,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        assert_eq!(
+            step_pairs(&plan2.paths[1]),
+            vec![("V1".into(), "V3".into()), ("V3".into(), "Target".into())]
+        );
+        assert!(plan2.paths[1].steps[0].fallible);
+        assert!(!plan2.paths[1].steps[1].fallible);
+    }
+
+    #[test]
+    fn test_dag_explicit_type_untagged_leading_pipe_alias_group() {
+        // `_ | 2: V2` should be targetable via `=> V2`
+        let plan1 = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    _ | 2: V2,
+                    3: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        assert_eq!(
+            step_pairs(&plan1.paths[0]),
+            vec![("V1".into(), "V2".into()), ("V2".into(), "Target".into())]
+        );
+
+        // `_ | 2 | "2": V2 => V3` should resolve cleanly to `2: V2` without ambiguity
+        let plan2 = resolve_tokens(
+            quote::quote! {
+                versions = [
+                    1: V1 => V2,
+                    _ | 2 | "2": V2 => V3,
+                    3: V3,
+                    4: Self,
+                ]
+            },
+            parse_quote!(Target),
+        )
+        .unwrap();
+
+        assert_eq!(
+            step_pairs(&plan2.paths[0]),
+            vec![
+                ("V1".into(), "V2".into()),
+                ("V2".into(), "V3".into()),
+                ("V3".into(), "Target".into()),
+            ]
+        );
     }
 }

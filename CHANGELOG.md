@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0](https://github.com/LittleTealeaf/backwards-compat/compare/v2.1.0...v2.2.0) (2026-11-23)
+
+
+### Features
+
+* support type targets in =&gt; transitions and bidirectional duplicate-type inheritance ([#52](https://github.com/LittleTealeaf/backwards-compat/issues/52)) ([34f9cd8](https://github.com/LittleTealeaf/backwards-compat/commit/34f9cd866dbb86b2302925c2b24f25162b7247d3))
+
+
+### Bug Fixes
+
+* respan generated shadow and trait items to call_site ([#50](https://github.com/LittleTealeaf/backwards-compat/issues/50)) ([cb930e4](https://github.com/LittleTealeaf/backwards-compat/commit/cb930e405124cda09b9465c1b7ec6d335fc86d67))
+
 ## [2.1.0](https://github.com/LittleTealeaf/backwards-compat/compare/v2.0.1...v2.1.0) (2026-11-23)
 
 

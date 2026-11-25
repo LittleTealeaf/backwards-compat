@@ -126,6 +126,7 @@ pub struct CfgPredicate {
 pub enum ExplicitNext {
     Tag(VersionTag, proc_macro2::Span),
     SelfTarget(proc_macro2::Span),
+    Type(Box<Type>, proc_macro2::Span),
 }
 
 /// Represents a single version entry inside the compat macro body.
@@ -365,13 +366,20 @@ impl Parse for BackwardsCompatArgs {
 
                     let explicit_next = if content.peek(Token![=>]) {
                         content.parse::<Token![=>]>()?;
-                        if content.peek(Token![Self]) {
+                        if content.peek(Token![Self]) && !content.peek2(Token![::]) {
                             let kw: Token![Self] = content.parse()?;
                             Some(ExplicitNext::SelfTarget(kw.span))
-                        } else {
+                        } else if content.peek(Token![_])
+                            || content.peek(syn::LitInt)
+                            || content.peek(syn::LitStr)
+                        {
                             let (next_tag, next_span) =
                                 VersionTag::parse_concrete(&content, "target of `=>`")?;
                             Some(ExplicitNext::Tag(next_tag, next_span))
+                        } else {
+                            let next_ty: Type = content.parse()?;
+                            let next_span = next_ty.span();
+                            Some(ExplicitNext::Type(Box::new(next_ty), next_span))
                         }
                     } else {
                         None
@@ -1700,5 +1708,117 @@ mod tests {
         })
         .unwrap_err();
         assert!(bad_lit.to_string().contains("expected integer or string literal"));
+    }
+
+    #[test]
+    fn test_parse_explicit_next_type_targets() {
+        let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            versions(
+                1: V1 => V2,
+                2: V2 => path::to::V3,
+                3: V3 => V4<'a, T>,
+                4: V4 => TargetModel,
+                5 | "v5": V5 => TargetModel,
+            )
+        })
+        .unwrap();
+
+        assert_eq!(args.versions.len(), 6);
+
+        let expected = [
+            quote::quote!(V2).to_string(),
+            quote::quote!(path::to::V3).to_string(),
+            quote::quote!(V4<'a, T>).to_string(),
+            quote::quote!(TargetModel).to_string(),
+            quote::quote!(TargetModel).to_string(),
+            quote::quote!(TargetModel).to_string(),
+        ];
+
+        for (entry, expected_ty) in args.versions.iter().zip(expected) {
+            match &entry.explicit_next {
+                Some(ExplicitNext::Type(ty, _)) => {
+                    assert_eq!(ty.to_token_stream().to_string(), expected_ty);
+                }
+                other => panic!("expected ExplicitNext::Type({expected_ty}), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_explicit_next_self_associated_type() {
+        let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            versions(
+                1: V1 => Self::Item,
+                2: V2 => Self,
+            )
+        })
+        .unwrap();
+
+        assert_eq!(args.versions.len(), 2);
+
+        match &args.versions[0].explicit_next {
+            Some(ExplicitNext::Type(ty, _)) => {
+                assert_eq!(
+                    ty.to_token_stream().to_string(),
+                    quote::quote!(Self::Item).to_string()
+                );
+            }
+            other => panic!("expected ExplicitNext::Type(Self::Item), got {other:?}"),
+        }
+
+        assert!(matches!(
+            args.versions[1].explicit_next,
+            Some(ExplicitNext::SelfTarget(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_explicit_next_existing_forms() {
+        let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            versions(
+                1: V1 => 2,
+                "v1": V1Str => "v2",
+                3: V3 => Self,
+                4: V4,
+            )
+        })
+        .unwrap();
+
+        assert_eq!(args.versions.len(), 4);
+        assert!(matches!(
+            args.versions[0].explicit_next,
+            Some(ExplicitNext::Tag(VersionTag::Int(2), _))
+        ));
+        assert!(matches!(
+            args.versions[1].explicit_next,
+            Some(ExplicitNext::Tag(VersionTag::String(ref s), _)) if s == "v2"
+        ));
+        assert!(matches!(
+            args.versions[2].explicit_next,
+            Some(ExplicitNext::SelfTarget(_))
+        ));
+        assert!(args.versions[3].explicit_next.is_none());
+    }
+
+    #[test]
+    fn test_parse_explicit_next_errors() {
+        let err_untagged = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions(1: V1 => _)
+        })
+        .unwrap_err();
+        assert_eq!(
+            err_untagged.to_string(),
+            "unversioned `_` cannot be used as target of `=>`"
+        );
+
+        let _ = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions(1: V1 => ,)
+        })
+        .unwrap_err();
+
+        let _ = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions(1: V1 =>)
+        })
+        .unwrap_err();
     }
 }

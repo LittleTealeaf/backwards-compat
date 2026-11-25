@@ -564,3 +564,459 @@ fn test_shared_wire_type_divergent_inlined_paths() {
         }
     );
 }
+
+// =========================================================================
+// 5. Explicit `=> <Type>` chains, jumps, and domain target (`=> TargetStruct`)
+// =========================================================================
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct TypeChainV0 {
+    pub raw: i32,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct TypeChainV1 {
+    pub step: i32,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct TypeChainV2 {
+    pub step: i32,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct TypeChainV3 {
+    pub step: i32,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeChainV4 {
+    pub step: i32,
+    pub path: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct TypeChainDirect {
+    pub direct: i32,
+}
+
+#[backwards_compat(
+    versions(
+        0: TypeChainV0 => TypeChainV3,
+        1: TypeChainV1 => 2,
+        2: TypeChainV2 => TypeChainV3,
+        3: TypeChainV3 => TypeChainV4,
+        #[current]
+        4: TypeChainV4,
+        5: TypeChainDirect => TypeChainTarget,
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeChainTarget {
+    pub step: i32,
+    pub path: String,
+}
+
+impl From<TypeChainV0> for TypeChainV3 {
+    fn from(v: TypeChainV0) -> Self {
+        Self { step: v.raw + 30 }
+    }
+}
+
+impl From<TypeChainV1> for TypeChainV2 {
+    fn from(v: TypeChainV1) -> Self {
+        Self { step: v.step + 1 }
+    }
+}
+
+impl From<TypeChainV2> for TypeChainV3 {
+    fn from(v: TypeChainV2) -> Self {
+        Self { step: v.step + 10 }
+    }
+}
+
+impl From<TypeChainV3> for TypeChainV4 {
+    fn from(v: TypeChainV3) -> Self {
+        Self {
+            step: v.step + 100,
+            path: "v4".to_owned(),
+        }
+    }
+}
+
+impl From<TypeChainV4> for TypeChainTarget {
+    fn from(v: TypeChainV4) -> Self {
+        Self {
+            step: v.step,
+            path: v.path,
+        }
+    }
+}
+
+impl From<TypeChainTarget> for TypeChainV4 {
+    fn from(t: TypeChainTarget) -> Self {
+        Self {
+            step: t.step,
+            path: t.path,
+        }
+    }
+}
+
+impl From<TypeChainDirect> for TypeChainTarget {
+    fn from(v: TypeChainDirect) -> Self {
+        Self {
+            step: v.direct,
+            path: "direct".to_owned(),
+        }
+    }
+}
+
+#[test]
+fn test_explicit_type_targets_chains_jumps_and_domain_target() {
+    // Jump: V0 => V3 => V4 => Target (+30 +100)
+    let from_v0: TypeChainTarget = serde_json::from_str(r#"{"version":0,"raw":5}"#).unwrap();
+    assert_eq!(
+        from_v0,
+        TypeChainTarget {
+            step: 135,
+            path: "v4".to_owned(),
+        }
+    );
+
+    // Mixed chain: V1 => 2 (V2) => V3 => V4 => Target (+1 +10 +100)
+    let from_v1: TypeChainTarget = serde_json::from_str(r#"{"version":1,"step":2}"#).unwrap();
+    assert_eq!(
+        from_v1,
+        TypeChainTarget {
+            step: 113,
+            path: "v4".to_owned(),
+        }
+    );
+    let from_v2: TypeChainTarget = serde_json::from_str(r#"{"version":2,"step":3}"#).unwrap();
+    assert_eq!(from_v2, from_v1);
+
+    // Direct domain target bypassing current wire TypeChainV4
+    let from_direct: TypeChainTarget = serde_json::from_str(r#"{"version":5,"direct":77}"#).unwrap();
+    assert_eq!(
+        from_direct,
+        TypeChainTarget {
+            step: 77,
+            path: "direct".to_owned(),
+        }
+    );
+    assert_eq!(TypeChainTarget::from(TypeChainDirect { direct: 77 }), from_direct);
+
+    // Serialization uses #[current] version 4
+    let serialized = serde_json::to_string(&from_v0).unwrap();
+    assert_eq!(serialized, r#"{"version":4,"step":135,"path":"v4"}"#);
+}
+
+// =========================================================================
+// 6. Bidirectional duplicate-type `=>` inheritance (forward & reverse)
+// =========================================================================
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct InheritV1 {
+    pub v1_num: i32,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct InheritV2 {
+    pub v2_name: String,
+}
+
+#[backwards_compat(
+    versions(
+        _: InheritV1,
+        _: InheritV2,
+        1: InheritV1 => Self,
+        2: InheritV2 => Self,
+        3: Self,
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardInheritTarget {
+    pub summary: String,
+}
+
+impl From<InheritV1> for ForwardInheritTarget {
+    fn from(v: InheritV1) -> Self {
+        Self {
+            summary: format!("v1:{}", v.v1_num),
+        }
+    }
+}
+
+impl From<InheritV2> for ForwardInheritTarget {
+    fn from(v: InheritV2) -> Self {
+        Self {
+            summary: format!("v2:{}", v.v2_name),
+        }
+    }
+}
+
+#[backwards_compat(
+    versions(
+        1: InheritV1 => Self,
+        2: InheritV2 => Self,
+        _: InheritV1,
+        _: InheritV2,
+        3: Self,
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReverseInheritTarget {
+    pub summary: String,
+}
+
+impl From<InheritV1> for ReverseInheritTarget {
+    fn from(v: InheritV1) -> Self {
+        Self {
+            summary: format!("v1:{}", v.v1_num),
+        }
+    }
+}
+
+impl From<InheritV2> for ReverseInheritTarget {
+    fn from(v: InheritV2) -> Self {
+        Self {
+            summary: format!("v2:{}", v.v2_name),
+        }
+    }
+}
+
+#[test]
+fn test_duplicate_type_inheritance_forward_and_reverse() {
+    // Forward order
+    let fwd_untagged_v1: ForwardInheritTarget = serde_json::from_str(r#"{"v1_num":10}"#).unwrap();
+    let fwd_untagged_v2: ForwardInheritTarget = serde_json::from_str(r#"{"v2_name":"alpha"}"#).unwrap();
+    let fwd_tagged_v1: ForwardInheritTarget = serde_json::from_str(r#"{"version":1,"v1_num":10}"#).unwrap();
+    let fwd_tagged_v2: ForwardInheritTarget =
+        serde_json::from_str(r#"{"version":2,"v2_name":"alpha"}"#).unwrap();
+    let fwd_current: ForwardInheritTarget =
+        serde_json::from_str(r#"{"version":3,"summary":"current"}"#).unwrap();
+
+    assert_eq!(
+        fwd_untagged_v1,
+        ForwardInheritTarget {
+            summary: "v1:10".to_owned()
+        }
+    );
+    assert_eq!(fwd_tagged_v1, fwd_untagged_v1);
+    assert_eq!(
+        fwd_untagged_v2,
+        ForwardInheritTarget {
+            summary: "v2:alpha".to_owned()
+        }
+    );
+    assert_eq!(fwd_tagged_v2, fwd_untagged_v2);
+    assert_eq!(
+        fwd_current,
+        ForwardInheritTarget {
+            summary: "current".to_owned()
+        }
+    );
+    assert_eq!(
+        serde_json::to_string(&fwd_current).unwrap(),
+        r#"{"version":3,"summary":"current"}"#
+    );
+
+    // Reverse order
+    let rev_untagged_v1: ReverseInheritTarget = serde_json::from_str(r#"{"v1_num":20}"#).unwrap();
+    let rev_untagged_v2: ReverseInheritTarget = serde_json::from_str(r#"{"v2_name":"beta"}"#).unwrap();
+    let rev_tagged_v1: ReverseInheritTarget = serde_json::from_str(r#"{"version":1,"v1_num":20}"#).unwrap();
+    let rev_tagged_v2: ReverseInheritTarget =
+        serde_json::from_str(r#"{"version":2,"v2_name":"beta"}"#).unwrap();
+    let rev_current: ReverseInheritTarget =
+        serde_json::from_str(r#"{"version":3,"summary":"current"}"#).unwrap();
+
+    assert_eq!(
+        rev_untagged_v1,
+        ReverseInheritTarget {
+            summary: "v1:20".to_owned()
+        }
+    );
+    assert_eq!(rev_tagged_v1, rev_untagged_v1);
+    assert_eq!(
+        rev_untagged_v2,
+        ReverseInheritTarget {
+            summary: "v2:beta".to_owned()
+        }
+    );
+    assert_eq!(rev_tagged_v2, rev_untagged_v2);
+    assert_eq!(
+        rev_current,
+        ReverseInheritTarget {
+            summary: "current".to_owned()
+        }
+    );
+    assert_eq!(
+        serde_json::to_string(&rev_current).unwrap(),
+        r#"{"version":3,"summary":"current"}"#
+    );
+}
+
+// =========================================================================
+// 7. Targeting a type shared across multiple rows and inline pipe aliases
+// =========================================================================
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct SharedV1 {
+    pub val: i32,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct SharedV2 {
+    pub val: i32,
+}
+
+impl From<SharedV1> for SharedV2 {
+    fn from(v: SharedV1) -> Self {
+        Self { val: v.val * 2 }
+    }
+}
+
+#[backwards_compat(
+    versions(
+        1: SharedV1 => SharedV2,
+        2: SharedV2,
+        3: SharedV2,
+        4: Self,
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiRowTypeTarget {
+    pub val: i32,
+}
+
+impl From<SharedV2> for MultiRowTypeTarget {
+    fn from(v: SharedV2) -> Self {
+        Self { val: v.val + 1 }
+    }
+}
+
+#[backwards_compat(
+    versions(
+        1: SharedV1 => SharedV2,
+        _ | 2 | "2": SharedV2,
+        3: Self,
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeAliasTypeTarget {
+    pub val: i32,
+}
+
+impl From<SharedV2> for PipeAliasTypeTarget {
+    fn from(v: SharedV2) -> Self {
+        Self { val: v.val + 10 }
+    }
+}
+
+#[test]
+fn test_explicit_type_target_shared_rows_and_pipe_aliases() {
+    let m1: MultiRowTypeTarget = serde_json::from_str(r#"{"version":1,"val":4}"#).unwrap();
+    let m2: MultiRowTypeTarget = serde_json::from_str(r#"{"version":2,"val":8}"#).unwrap();
+    let m3: MultiRowTypeTarget = serde_json::from_str(r#"{"version":3,"val":8}"#).unwrap();
+    assert_eq!(m1, MultiRowTypeTarget { val: 9 });
+    assert_eq!(m2, MultiRowTypeTarget { val: 9 });
+    assert_eq!(m3, MultiRowTypeTarget { val: 9 });
+    assert_eq!(serde_json::to_string(&m1).unwrap(), r#"{"version":4,"val":9}"#);
+
+    let p1: PipeAliasTypeTarget = serde_json::from_str(r#"{"version":1,"val":4}"#).unwrap();
+    let p_untagged: PipeAliasTypeTarget = serde_json::from_str(r#"{"val":8}"#).unwrap();
+    let p_int: PipeAliasTypeTarget = serde_json::from_str(r#"{"version":2,"val":8}"#).unwrap();
+    let p_str: PipeAliasTypeTarget = serde_json::from_str(r#"{"version":"2","val":8}"#).unwrap();
+    assert_eq!(p1, PipeAliasTypeTarget { val: 18 });
+    assert_eq!(p_untagged, p1);
+    assert_eq!(p_int, p1);
+    assert_eq!(p_str, p1);
+    assert_eq!(serde_json::to_string(&p1).unwrap(), r#"{"version":3,"val":18}"#);
+}
+
+// =========================================================================
+// 8. `=> <Type>` with `#[fallible]`, `#[with(...)]`, and generics/lifetimes
+// =========================================================================
+
+mod generic_converters {
+    use super::{GenV1, GenV2, ParseConfigError};
+
+    pub fn upgrade_v1<T>(v: GenV1<'_, T>) -> Result<GenV2<'_, T>, ParseConfigError> {
+        let port = v
+            .port_str
+            .parse::<u16>()
+            .map_err(|_| ParseConfigError::InvalidPort(v.port_str.to_owned()))?;
+        Ok(GenV2 {
+            port,
+            tag: v.tag,
+            payload: v.payload,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct GenV1<'a, T> {
+    pub port_str: &'a str,
+    pub tag: &'a str,
+    pub payload: T,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct GenV2<'a, T> {
+    pub port: u16,
+    pub tag: &'a str,
+    pub payload: T,
+}
+
+#[backwards_compat(
+    versions(
+        #[fallible]
+        #[with(generic_converters::upgrade_v1)]
+        1: GenV1<'a, T> => GenV2<'a, T>,
+        2: GenV2<'a, T> => GenTarget<'a, T>,
+        3: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct GenTarget<'a, T> {
+    pub port: u16,
+    pub tag: &'a str,
+    pub payload: T,
+}
+
+impl<'a, T> From<GenV2<'a, T>> for GenTarget<'a, T> {
+    fn from(v: GenV2<'a, T>) -> Self {
+        Self {
+            port: v.port,
+            tag: v.tag,
+            payload: v.payload,
+        }
+    }
+}
+
+#[test]
+fn test_explicit_type_with_fallible_with_fn_and_generics() {
+    let json_v1 = r#"{"version":1,"port_str":"9000","tag":"edge","payload":42}"#;
+    let parsed: GenTarget<'_, i32> = serde_json::from_str(json_v1).unwrap();
+    assert_eq!(
+        parsed,
+        GenTarget {
+            port: 9000,
+            tag: "edge",
+            payload: 42,
+        }
+    );
+
+    let de_err = serde_json::from_str::<GenTarget<'_, i32>>(
+        r#"{"version":1,"port_str":"bad","tag":"edge","payload":1}"#,
+    )
+    .unwrap_err();
+    assert!(de_err.to_string().contains("invalid port: bad"));
+
+    // Serialization uses version 3
+    let serialized = serde_json::to_string(&parsed).unwrap();
+    assert_eq!(
+        serialized,
+        r#"{"version":3,"port":9000,"tag":"edge","payload":42}"#
+    );
+}
