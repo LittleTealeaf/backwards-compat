@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.1](https://github.com/LittleTealeaf/backwards-compat/compare/v3.0.0...v3.0.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* Fix supporting RON struct syntax ([#55](https://github.com/LittleTealeaf/backwards-compat/issues/55)) ([dc9739e](https://github.com/LittleTealeaf/backwards-compat/commit/dc9739ee1c90374489f690af3661a1ba44021cc1))
+
 ## [3.0.0](https://github.com/LittleTealeaf/backwards-compat/compare/v2.2.0...v3.0.0) (2026-11-25)
 
 
