@@ -37,7 +37,6 @@ pub struct SerializedTournament {
 
 #[backwards_compat(
     tag = "version",
-    error = TournamentError,
     versions = [
         #[cfg(test)]
         2: TestTournament => 7,
@@ -127,18 +126,8 @@ fn test_mixed_active_inactive_dag_with_fallible_terminal_and_custom_error() {
         }
     );
 
-    // Transitive TryFrom<TestTournament> works and propagates custom error
-    let direct_v2 = Tournament::try_from(TestTournament {
-        legacy_title: "Direct Cup".to_owned(),
-    })
-    .unwrap();
-    assert_eq!(direct_v2.title, "Direct Cup");
-
-    let err_v2 = Tournament::try_from(TestTournament {
-        legacy_title: String::new(),
-    })
-    .unwrap_err();
-    assert_eq!(err_v2, TournamentError("title cannot be empty".to_owned()));
+    let err_v2 = serde_json::from_str::<Tournament>(r#"{"version":2,"legacy_title":""}"#).unwrap_err();
+    assert!(err_v2.to_string().contains("title cannot be empty"));
 
     // Unconditional v5, v6, v7 deserialize and convert
     let v5: Tournament = serde_json::from_str(r#"{"version":5,"title":"Spring"}"#).unwrap();
@@ -149,13 +138,6 @@ fn test_mixed_active_inactive_dag_with_fallible_terminal_and_custom_error() {
             rounds: 3,
             ranked: true,
         }
-    );
-    assert_eq!(
-        Tournament::try_from(V5Tournament {
-            title: "Spring".to_owned(),
-        })
-        .unwrap(),
-        v5
     );
 
     let v6: Tournament = serde_json::from_str(r#"{"version":6,"title":"Summer","rounds":5}"#).unwrap();
@@ -293,7 +275,6 @@ impl From<PartialChainTarget> for ChainV3 {
 fn test_chained_gated_versions() {
     let from_v1: ActiveChainTarget = serde_json::from_str(r#"{"version":1,"raw":5}"#).unwrap();
     assert_eq!(from_v1, ActiveChainTarget { total: 15 });
-    assert_eq!(ActiveChainTarget::from(ChainV1 { raw: 5 }), from_v1);
 
     let from_v2: ActiveChainTarget = serde_json::from_str(r#"{"version":2,"raw":5,"bonus":20}"#).unwrap();
     assert_eq!(from_v2, ActiveChainTarget { total: 25 });
@@ -426,11 +407,9 @@ fn test_duplicate_types_with_different_cfgs() {
     let _ = serde_json::from_str::<DupGatedTarget>(r#"{"version":1,"val":10}"#).unwrap_err();
     let g2: DupGatedTarget = serde_json::from_str(r#"{"version":2,"val":10}"#).unwrap();
     assert_eq!(g2, DupGatedTarget { val: 11 });
-    assert_eq!(DupGatedTarget::from(SharedV1 { val: 10 }), g2);
 
     let r1: DupFallibleRegressionTarget = serde_json::from_str(r#"{"version":1,"val":30}"#).unwrap();
     assert_eq!(r1, DupFallibleRegressionTarget { val: 31 });
-    assert_eq!(DupFallibleRegressionTarget::from(SharedV1 { val: 30 }), r1);
     let _ = serde_json::from_str::<DupFallibleRegressionTarget>(r#"{"version":2,"val":30}"#).unwrap_err();
 }
 

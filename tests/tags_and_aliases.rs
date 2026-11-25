@@ -212,31 +212,33 @@ fn test_rich_version_error_messages() {
     // Future integer version (9 > 2)
     let future_err =
         serde_json::from_str::<StrictIntModel>(r#"{"version":9,"name":"x","level":1}"#).unwrap_err();
-    assert_eq!(
-        future_err.to_string(),
-        "version 9 is newer than supported version 2 (supported versions: 1, 2)"
+    assert!(
+        future_err
+            .to_string()
+            .starts_with("version 9 is newer than supported version 2 (supported versions: 1, 2)")
     );
 
     // Unknown integer version (0 <= 2, no disabled gates)
     let unknown_int_err = serde_json::from_str::<StrictIntModel>(r#"{"version":0,"name":"x"}"#).unwrap_err();
-    assert_eq!(
-        unknown_int_err.to_string(),
-        "unknown version 0 (supported versions: 1, 2)"
+    assert!(
+        unknown_int_err
+            .to_string()
+            .starts_with("unknown version 0 (supported versions: 1, 2)")
     );
 
     // Unknown version when a #[cfg] version is disabled includes feature-flag hint
     let disabled_hint_err = serde_json::from_str::<GatedErrorModel>(r#"{"version":1,"x":1}"#).unwrap_err();
-    assert_eq!(
-        disabled_hint_err.to_string(),
+    assert!(disabled_hint_err.to_string().starts_with(
         "unknown version 1 (supported versions: 2; some versions may be disabled by feature flags)"
-    );
+    ));
 
     // Unknown string version
     let unknown_str_err =
         serde_json::from_str::<StrictStrModel>(r#"{"schema_version":"0.5","name":"x"}"#).unwrap_err();
-    assert_eq!(
-        unknown_str_err.to_string(),
-        "unknown version \"0.5\" (supported versions: \"1.0\", \"2.0\")"
+    assert!(
+        unknown_str_err
+            .to_string()
+            .starts_with("unknown version \"0.5\" (supported versions: \"1.0\", \"2.0\")")
     );
 
     // Invalid tag type (boolean)

@@ -4,11 +4,11 @@ use syn::{
     spanned::Spanned as _,
 };
 
-/// Parsed arguments to the `#[backwards_compat_via(ProxyType, ...)]` attribute macro.
+/// Parsed arguments to the `#[backwards_compat(via = ProxyType, ...)]` attribute macro.
 #[derive(Debug, Clone)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "independent parsed attribute flags on #[backwards_compat_via(...)]"
+    reason = "independent parsed attribute flags on #[backwards_compat(via = ...)]"
 )]
 pub struct ViaArgs {
     pub proxy_ty: Type,
@@ -27,6 +27,38 @@ fn reject_flag_value(input: ParseStream<'_>, flag_name: &str) -> syn::Result<()>
         ));
     }
     Ok(())
+}
+
+fn parse_via_type_option(input: ParseStream<'_>, ident_span: proc_macro2::Span) -> syn::Result<Type> {
+    let proxy_ty: Type = if input.peek(Token![=]) {
+        let _eq: Token![=] = input.parse()?;
+        input.parse()?
+    } else if input.peek(syn::token::Paren) {
+        let content;
+        syn::parenthesized!(content in input);
+        let ty: Type = content.parse()?;
+        if !content.is_empty() {
+            return Err(syn::Error::new(
+                content.span(),
+                "unexpected trailing tokens in `via(...)`",
+            ));
+        }
+        ty
+    } else {
+        return Err(syn::Error::new(
+            ident_span,
+            "expected `via = <Type>` or `via(<Type>)`",
+        ));
+    };
+
+    if matches!(&proxy_ty, Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("Self")) {
+        return Err(syn::Error::new(
+            proxy_ty.span(),
+            "proxy type in #[backwards_compat(via = ...)] cannot be `Self` (would cause infinite recursion)",
+        ));
+    }
+
+    Ok(proxy_ty)
 }
 
 fn parse_fn_path_option(
@@ -58,25 +90,7 @@ fn parse_fn_path_option(
 
 impl Parse for ViaArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        if input.is_empty() {
-            return Err(syn::Error::new(
-                input.span(),
-                "expected a proxy type as the first argument to #[backwards_compat_via(...)]",
-            ));
-        }
-
-        let proxy_ty: Type = input.parse()?;
-        if matches!(&proxy_ty, Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("Self")) {
-            return Err(syn::Error::new(
-                proxy_ty.span(),
-                "proxy type in #[backwards_compat_via(...)] cannot be `Self` (would cause infinite recursion)",
-            ));
-        }
-
-        if !input.is_empty() {
-            let _comma: Token![,] = input.parse()?;
-        }
-
+        let mut proxy_ty: Option<Type> = None;
         let mut try_from = false;
         let mut try_into = false;
         let mut seen_try_from = false;
@@ -89,6 +103,15 @@ impl Parse for ViaArgs {
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
             match ident.to_string().as_str() {
+                "via" => {
+                    if proxy_ty.is_some() {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "duplicate `via` option in #[backwards_compat(...)]",
+                        ));
+                    }
+                    proxy_ty = Some(parse_via_type_option(input, ident.span())?);
+                }
                 "try_from" => {
                     reject_flag_value(input, "try_from")?;
                     if seen_fallible {
@@ -100,7 +123,7 @@ impl Parse for ViaArgs {
                     if seen_try_from {
                         return Err(syn::Error::new(
                             ident.span(),
-                            "duplicate `try_from` option in #[backwards_compat_via(...)]",
+                            "duplicate `try_from` option in #[backwards_compat(...)]",
                         ));
                     }
                     seen_try_from = true;
@@ -117,7 +140,7 @@ impl Parse for ViaArgs {
                     if seen_try_into {
                         return Err(syn::Error::new(
                             ident.span(),
-                            "duplicate `try_into` option in #[backwards_compat_via(...)]",
+                            "duplicate `try_into` option in #[backwards_compat(...)]",
                         ));
                     }
                     seen_try_into = true;
@@ -128,7 +151,7 @@ impl Parse for ViaArgs {
                     if seen_fallible {
                         return Err(syn::Error::new(
                             ident.span(),
-                            "duplicate `fallible` option in #[backwards_compat_via(...)]",
+                            "duplicate `fallible` option in #[backwards_compat(...)]",
                         ));
                     }
                     if seen_try_from || seen_try_into {
@@ -145,7 +168,7 @@ impl Parse for ViaArgs {
                     if from_fn.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
-                            "duplicate `from` option in #[backwards_compat_via(...)]",
+                            "duplicate `from` option in #[backwards_compat(...)]",
                         ));
                     }
                     from_fn = Some(parse_fn_path_option(input, "from", ident.span())?);
@@ -154,7 +177,7 @@ impl Parse for ViaArgs {
                     if to_fn.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
-                            "duplicate `to` option in #[backwards_compat_via(...)]",
+                            "duplicate `to` option in #[backwards_compat(...)]",
                         ));
                     }
                     to_fn = Some(parse_fn_path_option(input, "to", ident.span())?);
@@ -164,16 +187,22 @@ impl Parse for ViaArgs {
                     if dump {
                         return Err(syn::Error::new(
                             ident.span(),
-                            "duplicate `dump` option in #[backwards_compat_via(...)]",
+                            "duplicate `dump` option in #[backwards_compat(...)]",
                         ));
                     }
                     dump = true;
+                }
+                "tag" | "content" | "versions" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("`{ident}` cannot be combined with `via` in #[backwards_compat(...)]"),
+                    ));
                 }
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
-                            "unknown option `{other}` in #[backwards_compat_via(...)]; expected one of: `try_from`, `try_into`, `fallible`, `from`, `to`, `dump`"
+                            "unknown option `{other}` in #[backwards_compat(via = ...)]; expected one of: `via`, `try_from`, `try_into`, `fallible`, `from`, `to`, `dump`"
                         ),
                     ));
                 }
@@ -183,6 +212,13 @@ impl Parse for ViaArgs {
                 let _comma: Token![,] = input.parse()?;
             }
         }
+
+        let Some(proxy_ty) = proxy_ty else {
+            return Err(syn::Error::new(
+                input.span(),
+                "expected `via = <Type>` or `via(<Type>)` in #[backwards_compat(...)]",
+            ));
+        };
 
         Ok(Self {
             proxy_ty,
@@ -349,7 +385,7 @@ pub fn generate_via(
 
     if args.dump {
         eprintln!(
-            "=== backwards_compat_via output for {} ===\n{}\n==========================================",
+            "=== backwards_compat(via = ...) output for {} ===\n{}\n==========================================",
             quote::quote!(#target_ty),
             code
         );
@@ -375,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_parse_simple_and_generic_proxy_types() {
-        let simple = parse_via("Proxy").unwrap();
+        let simple = parse_via("via = Proxy").unwrap();
         assert_eq!(simple.proxy_ty.to_token_stream().to_string(), "Proxy");
         assert!(!simple.try_from);
         assert!(!simple.try_into);
@@ -383,42 +419,53 @@ mod tests {
         assert!(simple.to_fn.is_none());
         assert!(!simple.dump);
 
-        let trailing = parse_via("Proxy,").unwrap();
+        let paren = parse_via("via(Proxy)").unwrap();
+        assert_eq!(paren.proxy_ty.to_token_stream().to_string(), "Proxy");
+        assert!(!paren.try_from);
+        assert!(!paren.try_into);
+
+        let trailing = parse_via("via = Proxy,").unwrap();
         assert_eq!(trailing.proxy_ty.to_token_stream().to_string(), "Proxy");
         assert!(!trailing.try_from);
         assert!(!trailing.try_into);
 
-        let generic = parse_via("crate::wire::Proxy<'a, T>").unwrap();
+        let generic = parse_via("via = crate::wire::Proxy<'a, T>").unwrap();
         assert_eq!(
             generic.proxy_ty.to_token_stream().to_string(),
+            "crate :: wire :: Proxy < 'a , T >"
+        );
+
+        let generic_paren = parse_via("via(crate::wire::Proxy<'a, T>)").unwrap();
+        assert_eq!(
+            generic_paren.proxy_ty.to_token_stream().to_string(),
             "crate :: wire :: Proxy < 'a , T >"
         );
     }
 
     #[test]
     fn test_parse_fallibility_and_dump_flags() {
-        let tf = parse_via("Proxy, try_from").unwrap();
+        let tf = parse_via("via = Proxy, try_from").unwrap();
         assert!(tf.try_from);
         assert!(!tf.try_into);
         assert!(!tf.dump);
 
-        let ti = parse_via("Proxy, try_into,").unwrap();
+        let ti = parse_via("via(Proxy), try_into,").unwrap();
         assert!(!ti.try_from);
         assert!(ti.try_into);
 
-        let both = parse_via("Proxy, try_from, try_into").unwrap();
+        let both = parse_via("via = Proxy, try_from, try_into").unwrap();
         assert!(both.try_from);
         assert!(both.try_into);
 
-        let both_rev = parse_via("Proxy, try_into, try_from").unwrap();
+        let both_rev = parse_via("try_into, via = Proxy, try_from").unwrap();
         assert!(both_rev.try_from);
         assert!(both_rev.try_into);
 
-        let fallible = parse_via("Proxy, fallible").unwrap();
+        let fallible = parse_via("fallible, via(Proxy)").unwrap();
         assert!(fallible.try_from);
         assert!(fallible.try_into);
 
-        let dump = parse_via("Proxy, dump").unwrap();
+        let dump = parse_via("dump, via = Proxy").unwrap();
         assert!(dump.dump);
         assert!(!dump.try_from);
         assert!(!dump.try_into);
@@ -426,7 +473,8 @@ mod tests {
 
     #[test]
     fn test_parse_from_to_fn_paths_and_arbitrary_order() {
-        let eq_style = parse_via("Proxy, from = crate::conv::decode, to = crate::conv::encode").unwrap();
+        let eq_style =
+            parse_via("via = Proxy, from = crate::conv::decode, to = crate::conv::encode").unwrap();
         assert_eq!(
             eq_style.from_fn.unwrap().to_token_stream().to_string(),
             "crate :: conv :: decode"
@@ -436,7 +484,7 @@ mod tests {
             "crate :: conv :: encode"
         );
 
-        let paren_style = parse_via("Proxy, from(decode_fn), to(encode_fn)").unwrap();
+        let paren_style = parse_via("from(decode_fn), via(Proxy), to(encode_fn)").unwrap();
         assert_eq!(
             paren_style.from_fn.unwrap().to_token_stream().to_string(),
             "decode_fn"
@@ -447,7 +495,7 @@ mod tests {
         );
 
         let mixed =
-            parse_via("crate::Proxy<'a, T>, dump, to(to_proxy), try_from, from = from_proxy,").unwrap();
+            parse_via("dump, to(to_proxy), try_from, via = crate::Proxy<'a, T>, from = from_proxy,").unwrap();
         assert_eq!(
             mixed.proxy_ty.to_token_stream().to_string(),
             "crate :: Proxy < 'a , T >"
@@ -458,7 +506,7 @@ mod tests {
         assert_eq!(mixed.from_fn.unwrap().to_token_stream().to_string(), "from_proxy");
         assert_eq!(mixed.to_fn.unwrap().to_token_stream().to_string(), "to_proxy");
 
-        let fallible_combo = parse_via("Proxy, to = t_fn, fallible, dump, from(f_fn),").unwrap();
+        let fallible_combo = parse_via("to = t_fn, fallible, dump, from(f_fn), via(Proxy),").unwrap();
         assert!(fallible_combo.try_from);
         assert!(fallible_combo.try_into);
         assert!(fallible_combo.dump);
@@ -473,54 +521,72 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_errors_empty_self_unknown_and_missing_comma() {
-        assert!(parse_err("").contains("expected a proxy type"));
-        assert!(parse_err("Self").contains("cannot be `Self`"));
-        assert!(parse_err("Self, dump").contains("cannot be `Self`"));
+    fn test_parse_errors_empty_self_unknown_missing_comma_and_mixing() {
+        assert!(parse_err("").contains("expected `via = <Type>` or `via(<Type>)`"));
+        assert!(parse_err("dump").contains("expected `via = <Type>` or `via(<Type>)`"));
+        assert!(parse_err("via").contains("expected `via = <Type>` or `via(<Type>)`"));
+        assert!(parse_err("via(Proxy extra)").contains("unexpected trailing tokens in `via(...)`"));
+        assert!(parse_err("via = Self").contains("cannot be `Self`"));
+        assert!(parse_err("via(Self), dump").contains("cannot be `Self`"));
 
-        let unknown = parse_err("Proxy, bogus");
+        let unknown = parse_err("via = Proxy, bogus");
         assert!(unknown.contains("unknown option `bogus`"));
 
-        assert!(parse_err("Proxy try_from").contains("expected `,`"));
-        assert!(parse_err("Proxy, try_from dump").contains("expected `,`"));
+        assert!(parse_err("via = Proxy try_from").contains("expected `,`"));
+        assert!(parse_err("via = Proxy, try_from dump").contains("expected `,`"));
+
+        // Mixing `via` with schema-versioning options
+        assert!(parse_err("via = Proxy, tag = \"v\"").contains("`tag` cannot be combined with `via`"));
+        assert!(parse_err("tag = \"v\", via = Proxy").contains("`tag` cannot be combined with `via`"));
+        assert!(
+            parse_err("via = Proxy, content = \"d\"").contains("`content` cannot be combined with `via`")
+        );
+        assert!(
+            parse_err("via = Proxy, versions(1: Self)").contains("`versions` cannot be combined with `via`")
+        );
     }
 
     #[test]
     fn test_parse_errors_duplicates_and_fallible_conflicts() {
-        assert!(parse_err("Proxy, try_from, try_from").contains("duplicate `try_from`"));
-        assert!(parse_err("Proxy, try_into, try_into").contains("duplicate `try_into`"));
-        assert!(parse_err("Proxy, fallible, fallible").contains("duplicate `fallible`"));
-        assert!(parse_err("Proxy, from = a, from(b)").contains("duplicate `from`"));
-        assert!(parse_err("Proxy, to(a), to = b").contains("duplicate `to`"));
-        assert!(parse_err("Proxy, dump, dump").contains("duplicate `dump`"));
+        assert!(parse_err("via = Proxy, via(Other)").contains("duplicate `via`"));
+        assert!(parse_err("via = Proxy, try_from, try_from").contains("duplicate `try_from`"));
+        assert!(parse_err("via = Proxy, try_into, try_into").contains("duplicate `try_into`"));
+        assert!(parse_err("via = Proxy, fallible, fallible").contains("duplicate `fallible`"));
+        assert!(parse_err("via = Proxy, from = a, from(b)").contains("duplicate `from`"));
+        assert!(parse_err("via = Proxy, to(a), to = b").contains("duplicate `to`"));
+        assert!(parse_err("via = Proxy, dump, dump").contains("duplicate `dump`"));
 
-        assert!(parse_err("Proxy, fallible, try_from").contains("cannot be combined with `fallible`"));
-        assert!(parse_err("Proxy, fallible, try_into").contains("cannot be combined with `fallible`"));
+        assert!(parse_err("via = Proxy, fallible, try_from").contains("cannot be combined with `fallible`"));
+        assert!(parse_err("via = Proxy, fallible, try_into").contains("cannot be combined with `fallible`"));
         assert!(
-            parse_err("Proxy, try_from, fallible")
+            parse_err("via = Proxy, try_from, fallible")
                 .contains("cannot be combined with `try_from` or `try_into`")
         );
         assert!(
-            parse_err("Proxy, try_into, fallible")
+            parse_err("via = Proxy, try_into, fallible")
                 .contains("cannot be combined with `try_from` or `try_into`")
         );
     }
 
     #[test]
     fn test_parse_errors_bad_fn_path_and_flag_values() {
-        assert!(parse_err("Proxy, from").contains("expected `from = <path>` or `from(<path>)`"));
-        assert!(parse_err("Proxy, to").contains("expected `to = <path>` or `to(<path>)`"));
-        assert!(parse_err("Proxy, from(my_fn extra)").contains("unexpected trailing tokens in `from(...)`"));
-        assert!(parse_err("Proxy, to(my_fn, extra)").contains("unexpected trailing tokens in `to(...)`"));
+        assert!(parse_err("via = Proxy, from").contains("expected `from = <path>` or `from(<path>)`"));
+        assert!(parse_err("via = Proxy, to").contains("expected `to = <path>` or `to(<path>)`"));
+        assert!(
+            parse_err("via = Proxy, from(my_fn extra)").contains("unexpected trailing tokens in `from(...)`")
+        );
+        assert!(
+            parse_err("via = Proxy, to(my_fn, extra)").contains("unexpected trailing tokens in `to(...)`")
+        );
 
         for flag in ["try_from", "try_into", "fallible", "dump"] {
-            let eq_err = parse_err(&format!("Proxy, {flag} = true"));
+            let eq_err = parse_err(&format!("via = Proxy, {flag} = true"));
             assert!(
                 eq_err.contains(&format!("`{flag}` does not take a value")),
                 "unexpected error for `{flag} = true`: {eq_err}"
             );
 
-            let paren_err = parse_err(&format!("Proxy, {flag}(true)"));
+            let paren_err = parse_err(&format!("via = Proxy, {flag}(true)"));
             assert!(
                 paren_err.contains(&format!("`{flag}` does not take a value")),
                 "unexpected error for `{flag}(true)`: {paren_err}"
@@ -539,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_generate_via_default_infallible() {
-        let rendered = render_via("Proxy", "struct Domain { val: u32 }");
+        let rendered = render_via("via = Proxy", "struct Domain { val: u32 }");
 
         assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompat for Domain"));
         assert!(rendered.contains("Proxy : :: backwards_compat :: BackwardsCompat"));
@@ -562,7 +628,7 @@ mod tests {
 
     #[test]
     fn test_generate_via_try_from() {
-        let rendered = render_via("Proxy, try_from", "struct Domain { val: u32 }");
+        let rendered = render_via("via = Proxy, try_from", "struct Domain { val: u32 }");
 
         assert!(rendered.contains("Self : :: core :: convert :: TryFrom < Proxy >"));
         assert!(rendered.contains(
@@ -580,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_generate_via_try_into() {
-        let rendered = render_via("Proxy, try_into", "struct Domain { val: u32 }");
+        let rendered = render_via("via(Proxy), try_into", "struct Domain { val: u32 }");
 
         assert!(rendered.contains("Self : :: core :: convert :: From < Proxy >"));
         assert!(
@@ -596,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_generate_via_fallible() {
-        let rendered = render_via("Proxy, fallible", "struct Domain { val: u32 }");
+        let rendered = render_via("fallible, via = Proxy", "struct Domain { val: u32 }");
 
         assert!(rendered.contains("Self : :: core :: convert :: TryFrom < Proxy >"));
         assert!(rendered.contains(
@@ -615,7 +681,7 @@ mod tests {
     #[test]
     fn test_generate_via_custom_from_and_to_fns() {
         let infallible = render_via(
-            "Proxy, from = conv::from_proxy, to(conv::to_proxy)",
+            "via = Proxy, from = conv::from_proxy, to(conv::to_proxy)",
             "struct Domain { val: u32 }",
         );
         assert!(infallible.contains("(conv :: from_proxy) (__migrated . value)"));
@@ -627,7 +693,7 @@ mod tests {
         assert!(!infallible.contains("map_err"));
 
         let try_from_only = render_via(
-            "Proxy, try_from, from = conv::try_from_proxy, to = conv::to_proxy",
+            "via = Proxy, try_from, from = conv::try_from_proxy, to = conv::to_proxy",
             "struct Domain { val: u32 }",
         );
         assert!(try_from_only.contains(
@@ -638,7 +704,7 @@ mod tests {
         assert!(!try_from_only.contains("serde :: ser :: Error :: custom"));
 
         let try_into_only = render_via(
-            "Proxy, try_into, from(conv::from_proxy), to(conv::try_to_proxy)",
+            "via(Proxy), try_into, from(conv::from_proxy), to(conv::try_to_proxy)",
             "struct Domain { val: u32 }",
         );
         assert!(try_into_only.contains("(conv :: from_proxy) (__migrated . value)"));
@@ -649,7 +715,7 @@ mod tests {
         assert!(!try_into_only.contains("serde :: de :: Error :: custom"));
 
         let fallible = render_via(
-            "Proxy, fallible, from = conv::try_from_proxy, to = conv::try_to_proxy",
+            "via = Proxy, fallible, from = conv::try_from_proxy, to = conv::try_to_proxy",
             "struct Domain { val: u32 }",
         );
         assert!(fallible.contains(
@@ -665,7 +731,7 @@ mod tests {
     #[test]
     fn test_generate_via_generics_lifetimes_and_where_clause() {
         let rendered = render_via(
-            "Proxy<'a, T>, fallible",
+            "via = Proxy<'a, T>, fallible",
             "struct GenericDomain<'a, T: Clone> where T: core::fmt::Debug { name: &'a str, val: T }",
         );
 
@@ -685,7 +751,7 @@ mod tests {
 
     #[test]
     fn test_generate_via_dump_flag() {
-        let rendered = render_via("Proxy, dump", "struct DumpDomain { val: u32 }");
+        let rendered = render_via("via = Proxy, dump", "struct DumpDomain { val: u32 }");
         assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompat for DumpDomain"));
         assert!(rendered.contains("impl :: serde :: Serialize for DumpDomain"));
     }
