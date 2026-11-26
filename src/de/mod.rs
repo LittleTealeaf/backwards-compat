@@ -10,4 +10,6 @@ pub use streaming::{
     OptionForwardingDeserializer, RemainingMapDeserializer, UntaggedMultiDispatch, UntaggedMultiVisitor,
     UntaggedSingleDispatch, UntaggedSingleVisitor, cautious_size_hint, drain_map, read_adjacent_content,
 };
-pub use tag::{TagValue, unknown_version_error};
+pub use tag::{
+    IntTagOrContent, StrTag, StrTagOrContent, unknown_int_version_error, unknown_str_version_error,
+};

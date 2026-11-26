@@ -898,7 +898,7 @@ impl From<SharedV2> for MultiRowTypeTarget {
 #[backwards_compat(
     versions(
         1: SharedV1 => SharedV2,
-        _ | 2 | "2": SharedV2,
+        _ | 2 | 20: SharedV2,
         3: Self,
     )
 )]
@@ -926,7 +926,7 @@ fn test_explicit_type_target_shared_rows_and_pipe_aliases() {
     let p1: PipeAliasTypeTarget = serde_json::from_str(r#"{"version":1,"val":4}"#).unwrap();
     let p_untagged: PipeAliasTypeTarget = serde_json::from_str(r#"{"val":8}"#).unwrap();
     let p_int: PipeAliasTypeTarget = serde_json::from_str(r#"{"version":2,"val":8}"#).unwrap();
-    let p_str: PipeAliasTypeTarget = serde_json::from_str(r#"{"version":"2","val":8}"#).unwrap();
+    let p_str: PipeAliasTypeTarget = serde_json::from_str(r#"{"version":20,"val":8}"#).unwrap();
     assert_eq!(p1, PipeAliasTypeTarget { val: 18 });
     assert_eq!(p_untagged, p1);
     assert_eq!(p_int, p1);

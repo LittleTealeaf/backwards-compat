@@ -497,3 +497,146 @@ fn test_schemars_field_level_container() {
         "endpoint v2 cfg should have `port`"
     );
 }
+
+// =========================================================================
+// 6. Externally-tagged (`external`) struct, enum, field-level, and `via`
+// =========================================================================
+
+#[backwards_compat(
+    external,
+    versions(
+        1: AdjStructV1,
+        2: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq, JsonSchema)]
+pub struct ExtStruct {
+    pub new_val: u64,
+    pub label: String,
+}
+
+impl From<AdjStructV1> for ExtStruct {
+    fn from(v: AdjStructV1) -> Self {
+        Self {
+            new_val: u64::from(v.old_val),
+            label: "migrated".to_owned(),
+        }
+    }
+}
+
+#[backwards_compat(
+    external,
+    versions(
+        "v1": AdjEnumV1,
+        "v2": Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq, JsonSchema)]
+pub enum ExtEnum {
+    Ping,
+    Val { amount: i64 },
+}
+
+impl From<AdjEnumV1> for ExtEnum {
+    fn from(v: AdjEnumV1) -> Self {
+        match v {
+            AdjEnumV1::Ping => Self::Ping,
+            AdjEnumV1::Val(n) => Self::Val { amount: i64::from(n) },
+        }
+    }
+}
+
+#[backwards_compat(via = ExtStruct)]
+#[derive(Debug, PartialEq, Eq, JsonSchema)]
+pub struct ViaExtDomain {
+    pub new_val: u64,
+    pub label: String,
+}
+
+impl From<ExtStruct> for ViaExtDomain {
+    fn from(p: ExtStruct) -> Self {
+        Self {
+            new_val: p.new_val,
+            label: p.label,
+        }
+    }
+}
+
+impl From<&ViaExtDomain> for ExtStruct {
+    fn from(d: &ViaExtDomain) -> Self {
+        Self {
+            new_val: d.new_val,
+            label: d.label.clone(),
+        }
+    }
+}
+
+#[backwards_compat]
+#[derive(Debug, PartialEq, Eq, JsonSchema)]
+pub struct ContainerWithExternalField {
+    #[backwards_compat(external, versions(1: EndpointV1, 2: Self))]
+    pub endpoint: Endpoint,
+}
+
+#[test]
+fn test_schemars_externally_tagged_struct_enum_field_and_via() {
+    // Struct with integer tags ("1", "2")
+    let struct_val = serde_json::to_value(schemars::schema_for!(ExtStruct)).unwrap();
+    let struct_one_of = struct_val
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .expect("external struct should have oneOf");
+    assert_eq!(struct_one_of.len(), 2, "expected 2 variants for ExtStruct");
+
+    for (idx, expected_key) in ["1", "2"].into_iter().enumerate() {
+        let entry = struct_one_of.get(idx).expect("variant entry");
+        assert_eq!(entry.get("type").and_then(Value::as_str), Some("object"));
+        assert_eq!(
+            entry.get("additionalProperties").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(as_required_strs(entry), vec![expected_key]);
+        assert!(
+            entry
+                .get("properties")
+                .and_then(|p| p.get(expected_key))
+                .is_some(),
+            "external wrapper should have property `{expected_key}`"
+        );
+    }
+
+    // Via proxy delegates identically
+    let via_val = serde_json::to_value(schemars::schema_for!(ViaExtDomain)).unwrap();
+    assert_eq!(via_val, struct_val, "via proxy to external struct should match");
+
+    // Enum with string tags ("v1", "v2")
+    let enum_val = serde_json::to_value(schemars::schema_for!(ExtEnum)).unwrap();
+    let enum_one_of = enum_val
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .expect("external enum should have oneOf");
+    assert_eq!(enum_one_of.len(), 2, "expected 2 variants for ExtEnum");
+    assert_eq!(enum_one_of.first().map(as_required_strs), Some(vec!["v1"]));
+    assert_eq!(enum_one_of.get(1).map(as_required_strs), Some(vec!["v2"]));
+
+    // Field-level external
+    let container_val = serde_json::to_value(schemars::schema_for!(ContainerWithExternalField)).unwrap();
+    let ep_prop = container_val
+        .pointer("/properties/endpoint")
+        .expect("endpoint property");
+    let ep_schema = resolve_ref(&container_val, ep_prop);
+    let ep_one_of = ep_schema
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .expect("external field schema should have oneOf");
+    assert_eq!(ep_one_of.len(), 2, "external field should have 2 variants");
+    assert_eq!(ep_one_of.first().map(as_required_strs), Some(vec!["1"]));
+    assert_eq!(
+        ep_one_of
+            .first()
+            .and_then(|e| e.get("additionalProperties"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(ep_one_of.get(1).map(as_required_strs), Some(vec!["2"]));
+}

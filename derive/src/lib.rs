@@ -191,9 +191,12 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 ///
 /// - **`tag: Type`**: Sequential chain step (e.g. `1: ModelV1, 2: ModelV2, 3: Self`). Integer tags
 ///   (`1`) and string tags (`"1"`) are matched strictly as native types.
-/// - **`tag1 | tag2: Type`**: Inline tag aliases mapping multiple wire tags (including mixed integer
-///   and string tags such as `1 | "1": ModelV1`) to the same type and migration path. The first tag
+/// - **`tag1 | tag2: Type`**: Inline tag aliases mapping multiple homogeneous wire tags (e.g.
+///   `1 | 10: ModelV1` or `"1" | "v1": ModelV1`) to the same type and migration path. The first tag
 ///   is canonical for `#[current]` / `#[serialize]`.
+/// - **`external`**: Uses externally tagged enum representation (`{ "1": ... }` in JSON, or
+///   compact variant indices in positional binary formats like `bincode`, `postcard`, `bitcode`).
+///   Mutually exclusive with `tag = ...`, `content = ...`, and `_`.
 /// - **`_: Type` / `_: Self`**: Pre-backwards-compat (unversioned) entry used when the version tag
 ///   field is absent. Multiple `_` entries are supported and tried in declaration order (`#[serde(untagged)]`).
 /// - **`tag: Type => target_tag` / `tag: Type => TargetType` / `tag: Type => Self`**: Custom DAG
@@ -319,7 +322,7 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 /// #[backwards_compat(
 ///     tag = "version",
 ///     versions(
-///         #[serialize(with = to_v1)] 1 | "1": ConfigV1,
+///         #[serialize(with = to_v1)] 1 | 10: ConfigV1,
 ///         #[current] 2: Self,
 ///     )
 /// )]
@@ -696,6 +699,7 @@ fn backwards_compat_impl(
         || input.versions.iter().any(|v| v.ty == input.target_ty);
 
     if needs_shadow_wire
+        && !input.external
         && input.content_field.is_none()
         && let Some(ref orig_struct) = original_struct
         && let Err(err) = check_tag_field_collision(orig_struct, &input.tag_field)

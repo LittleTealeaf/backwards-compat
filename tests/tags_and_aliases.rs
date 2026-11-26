@@ -74,9 +74,13 @@ fn test_strict_native_int_and_str_tags_with_deny_unknown_fields() {
         }
     );
 
-    // String "1" is strictly rejected when only integer 1 is declared
+    // String "1" is strictly rejected by typed u64 deserialization when only integer tags are declared
     let str_err = serde_json::from_str::<StrictIntModel>(r#"{"version":"1","name":"alpha"}"#).unwrap_err();
-    assert!(str_err.to_string().contains("unknown version \"1\""));
+    let str_err_msg = str_err.to_string();
+    assert!(
+        str_err_msg.contains("invalid type") && str_err_msg.contains("u64"),
+        "unexpected error: {str_err_msg}"
+    );
 
     // Serializes native integer 2 (not "2")
     let json = serde_json::to_string(&v1).unwrap();
@@ -115,9 +119,9 @@ pub struct AliasV1 {
 
 #[backwards_compat(
     versions(
-        1 | "1" | "v1": AliasV1 => 2,
+        1 | 10 | 100: AliasV1 => 2,
         #[current]
-        2 | "2": Self,
+        2 | 20: Self,
     )
 )]
 #[derive(Debug, PartialEq, Eq)]
@@ -128,6 +132,24 @@ pub struct AliasedSelfModel {
 impl From<AliasV1> for AliasedSelfModel {
     fn from(v: AliasV1) -> Self {
         Self { x: v.x + 10 }
+    }
+}
+
+#[backwards_compat(
+    versions(
+        "1" | "v1": AliasV1 => "2",
+        #[current]
+        "2" | "v2": Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct AliasedStrModel {
+    pub x: i32,
+}
+
+impl From<AliasV1> for AliasedStrModel {
+    fn from(v: AliasV1) -> Self {
+        Self { x: v.x + 20 }
     }
 }
 
@@ -144,8 +166,8 @@ impl From<AliasV1> for AliasWireV2 {
 
 #[backwards_compat(
     versions(
-        1 | "1": AliasV1 => 2,
-        2 | "2": AliasWireV2,
+        1 | 10: AliasV1 => 2,
+        2 | 20: AliasWireV2,
     )
 )]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,14 +191,14 @@ impl From<AliasedWireModel> for AliasWireV2 {
 fn test_inline_pipe_aliases_for_historical_and_current() {
     for payload in [
         r#"{"version":1,"x":5}"#,
-        r#"{"version":"1","x":5}"#,
-        r#"{"version":"v1","x":5}"#,
+        r#"{"version":10,"x":5}"#,
+        r#"{"version":100,"x":5}"#,
     ] {
         let m: AliasedSelfModel = serde_json::from_str(payload).unwrap();
         assert_eq!(m, AliasedSelfModel { x: 15 });
     }
 
-    for payload in [r#"{"version":2,"x":99}"#, r#"{"version":"2","x":99}"#] {
+    for payload in [r#"{"version":2,"x":99}"#, r#"{"version":20,"x":99}"#] {
         let m: AliasedSelfModel = serde_json::from_str(payload).unwrap();
         assert_eq!(m, AliasedSelfModel { x: 99 });
 
@@ -184,11 +206,23 @@ fn test_inline_pipe_aliases_for_historical_and_current() {
         assert_eq!(w, AliasedWireModel { x: 99 });
     }
 
-    // Serialization emits the primary tag (integer 2)
+    for payload in [r#"{"version":"1","x":5}"#, r#"{"version":"v1","x":5}"#] {
+        let s: AliasedStrModel = serde_json::from_str(payload).unwrap();
+        assert_eq!(s, AliasedStrModel { x: 25 });
+    }
+
+    for payload in [r#"{"version":"2","x":99}"#, r#"{"version":"v2","x":99}"#] {
+        let s: AliasedStrModel = serde_json::from_str(payload).unwrap();
+        assert_eq!(s, AliasedStrModel { x: 99 });
+    }
+
+    // Serialization emits the primary tag (integer 2 / string "2")
     let json = serde_json::to_string(&AliasedSelfModel { x: 99 }).unwrap();
     assert!(json.contains(r#""version":2"#));
     let w_json = serde_json::to_string(&AliasedWireModel { x: 99 }).unwrap();
     assert!(w_json.contains(r#""version":2"#));
+    let s_json = serde_json::to_string(&AliasedStrModel { x: 99 }).unwrap();
+    assert!(s_json.contains(r#""version":"2""#));
 }
 
 // =========================================================================
@@ -241,11 +275,19 @@ fn test_rich_version_error_messages() {
             .starts_with("unknown version \"0.5\" (supported versions: \"1.0\", \"2.0\")")
     );
 
-    // Invalid tag type (boolean)
+    // Invalid tag type (boolean on int-tagged, integer on str-tagged)
     let bad_type_err = serde_json::from_str::<StrictIntModel>(r#"{"version":true,"name":"x"}"#).unwrap_err();
+    let bad_type_msg = bad_type_err.to_string();
     assert!(
-        bad_type_err
-            .to_string()
-            .contains("expected an integer or string version tag")
+        bad_type_msg.contains("invalid type") && bad_type_msg.contains("u64"),
+        "unexpected bad int tag error: {bad_type_msg}"
+    );
+
+    let bad_str_type_err =
+        serde_json::from_str::<StrictStrModel>(r#"{"schema_version":123,"name":"x"}"#).unwrap_err();
+    let bad_str_type_msg = bad_str_type_err.to_string();
+    assert!(
+        bad_str_type_msg.contains("invalid type") && bad_str_type_msg.contains("string version tag"),
+        "unexpected bad str tag error: {bad_str_type_msg}"
     );
 }
