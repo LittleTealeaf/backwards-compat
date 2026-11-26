@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.0.0](https://github.com/LittleTealeaf/backwards-compat/compare/v3.1.0...v4.0.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* support full serialization formats, external tagging, and homogeneous version tags ([#59](https://github.com/LittleTealeaf/backwards-compat/issues/59))
+
+### Features
+
+* support full serialization formats, external tagging, and homogeneous version tags ([#59](https://github.com/LittleTealeaf/backwards-compat/issues/59)) ([5eb7fa8](https://github.com/LittleTealeaf/backwards-compat/commit/5eb7fa82caa70f57058b4f1192e1e2e713c49e91))
+
 ## [3.1.0](https://github.com/LittleTealeaf/backwards-compat/compare/v3.0.1...v3.1.0) (2026-11-26)
 
 
