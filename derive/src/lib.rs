@@ -17,9 +17,104 @@ fn is_serde_derive(path: &syn::Path, name: &str) -> bool {
     }
 }
 
+#[cfg(feature = "schemars")]
+fn is_json_schema_derive(path: &syn::Path) -> bool {
+    let segments: Vec<_> = path.segments.iter().collect();
+    match segments.as_slice() {
+        [single] => single.ident == "JsonSchema",
+        [first, second] => first.ident == "schemars" && second.ident == "JsonSchema",
+        _ => false,
+    }
+}
+
+#[cfg(feature = "schemars")]
+fn has_json_schema_derive(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let Ok(nested) =
+            attr.parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+        else {
+            continue;
+        };
+        if nested.iter().any(is_json_schema_derive) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(feature = "schemars")]
+fn schemars_attrs_have_crate(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("schemars") {
+            continue;
+        }
+        let mut found = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("crate") {
+                found = true;
+            }
+            if meta.input.peek(syn::Token![=]) {
+                let _: syn::Expr = meta.value()?.parse()?;
+            } else if meta.input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let _: proc_macro2::TokenStream = content.parse()?;
+            }
+            Ok(())
+        });
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(feature = "schemars")]
+fn field_has_schemars_with(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("schemars") {
+            continue;
+        }
+        let mut found = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("with") || meta.path.is_ident("schema_with") {
+                found = true;
+            }
+            if meta.input.peek(syn::Token![=]) {
+                let _: syn::Expr = meta.value()?.parse()?;
+            } else if meta.input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let _: proc_macro2::TokenStream = content.parse()?;
+            }
+            Ok(())
+        });
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_forwarded_attr(attr: &syn::Attribute) -> bool {
+    #[cfg(feature = "schemars")]
+    const FORWARDED_ATTRS: &[&str] = &[
+        "serde", "schemars", "allow", "warn", "deny", "forbid", "cfg", "cfg_attr",
+    ];
+    #[cfg(not(feature = "schemars"))]
     const FORWARDED_ATTRS: &[&str] = &["serde", "allow", "warn", "deny", "forbid", "cfg", "cfg_attr"];
     FORWARDED_ATTRS.iter().any(|&name| attr.path().is_ident(name))
+}
+
+fn is_stripped_domain_attr(attr: &syn::Attribute) -> bool {
+    #[cfg(feature = "schemars")]
+    if attr.path().is_ident("schemars") {
+        return true;
+    }
+    attr.path().is_ident("serde")
 }
 
 fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
@@ -35,7 +130,14 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 
         let retained: Vec<syn::Path> = nested
             .into_iter()
-            .filter(|path| !is_serde_derive(path, "Serialize") && !is_serde_derive(path, "Deserialize"))
+            .filter(|path| {
+                let is_serde = is_serde_derive(path, "Serialize") || is_serde_derive(path, "Deserialize");
+                #[cfg(feature = "schemars")]
+                let is_schema = is_json_schema_derive(path);
+                #[cfg(not(feature = "schemars"))]
+                let is_schema = false;
+                !is_serde && !is_schema
+            })
             .collect();
 
         if retained.is_empty() {
@@ -102,6 +204,9 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 ///   it is not the last primary entry in `versions`).
 /// - **`#[serialize]` / `#[serialize(with = fn_path)]`**: Overrides which version is emitted during
 ///   serialization (useful for rolling deployments). Defaults to the current version.
+/// - **`#[serializable]` / `#[serializable(with = fn_path)]` / `#[serializable(try_with = fn_path)]`**:
+///   Marks a historical version entry as a valid runtime target for `BackwardsCompatSerialize::serialize_as_version`
+///   and includes it in `BackwardsCompatSerialize::SERIALIZABLE_VERSIONS`.
 /// - **`#[fallible]`**: Marks a transition as fallible, using `TryFrom` (or a `Result`-returning
 ///   `#[with]` function). Error types only need to implement `core::fmt::Display`.
 /// - **`#[with(fn_path)]`**: Uses a custom conversion function `fn(FromTy) -> ToTy` (or
@@ -293,6 +398,97 @@ fn respan_to_call_site<T: quote::ToTokens + syn::parse::Parse>(node: &T) -> T {
     syn::parse2(tokens).expect("respanning a parsed syntax node must remain valid syntax")
 }
 
+fn check_tag_field_collision(item_struct: &syn::ItemStruct, tag_field: &str) -> syn::Result<()> {
+    let syn::Fields::Named(ref named) = item_struct.fields else {
+        return Ok(());
+    };
+
+    let mut has_rename_all = false;
+    for attr in &item_struct.attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename_all") {
+                has_rename_all = true;
+            }
+            if meta.input.peek(syn::Token![=]) {
+                let _: syn::Expr = meta.value()?.parse()?;
+            } else if meta.input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let _: proc_macro2::TokenStream = content.parse()?;
+            }
+            Ok(())
+        });
+    }
+
+    for field in &named.named {
+        let mut skip_or_flatten = false;
+        let mut renames: Vec<String> = Vec::new();
+        for attr in &field.attrs {
+            if !attr.path().is_ident("serde") {
+                continue;
+            }
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("skip") || meta.path.is_ident("flatten") {
+                    skip_or_flatten = true;
+                } else if meta.path.is_ident("rename") {
+                    if meta.input.peek(syn::Token![=]) {
+                        let lit: syn::LitStr = meta.value()?.parse()?;
+                        renames.push(lit.value());
+                    } else if meta.input.peek(syn::token::Paren) {
+                        meta.parse_nested_meta(|nested| {
+                            if (nested.path.is_ident("serialize") || nested.path.is_ident("deserialize"))
+                                && nested.input.peek(syn::Token![=])
+                            {
+                                let lit: syn::LitStr = nested.value()?.parse()?;
+                                renames.push(lit.value());
+                            } else if nested.input.peek(syn::Token![=]) {
+                                let _: syn::Expr = nested.value()?.parse()?;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                } else if meta.input.peek(syn::Token![=]) {
+                    let _: syn::Expr = meta.value()?.parse()?;
+                } else if meta.input.peek(syn::token::Paren) {
+                    let content;
+                    syn::parenthesized!(content in meta.input);
+                    let _: proc_macro2::TokenStream = content.parse()?;
+                }
+                Ok(())
+            });
+        }
+
+        if skip_or_flatten {
+            continue;
+        }
+
+        let collides = if !renames.is_empty() {
+            renames.iter().any(|r| r == tag_field)
+        } else if !has_rename_all {
+            field.ident.as_ref().is_some_and(|ident| {
+                let s = ident.to_string();
+                s.strip_prefix("r#").unwrap_or(&s) == tag_field
+            })
+        } else {
+            false
+        };
+
+        if collides {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!(
+                    "field wire name `{tag_field}` collides with the `#[backwards_compat]` version tag field `{tag_field}`; rename the field, use `#[backwards_compat(tag = ...)]`, or use adjacent tagging `content = ...`"
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn backwards_compat_impl(
     attr: proc_macro2::TokenStream,
     item: proc_macro2::TokenStream,
@@ -302,6 +498,8 @@ fn backwards_compat_impl(
         target_ident: syn::Ident,
         vis: syn::Visibility,
         generics: syn::Generics,
+        derive_json_schema: bool,
+        original_struct: Option<syn::ItemStruct>,
         field_helper_tokens: Vec<proc_macro2::TokenStream>,
         built_shadow_fn: Box<dyn FnOnce() -> BuiltShadowWire>,
     }
@@ -322,13 +520,18 @@ fn backwards_compat_impl(
 
     let prepared = match item {
         syn::Item::Struct(mut item_struct) => {
+            #[cfg(feature = "schemars")]
+            let derive_json_schema = has_json_schema_derive(&item_struct.attrs);
+            #[cfg(not(feature = "schemars"))]
+            let derive_json_schema = false;
+
             let field_specs = match field::extract_struct_field_compat(&item_struct) {
                 Ok(specs) => specs,
                 Err(err) => return err.to_compile_error(),
             };
             let mut helpers = Vec::with_capacity(field_specs.len());
             for spec in &field_specs {
-                match field::generate_field_helper(spec) {
+                match field::generate_field_helper(spec, derive_json_schema) {
                     Ok(ts) => helpers.push(ts),
                     Err(err) => return err.to_compile_error(),
                 }
@@ -340,6 +543,12 @@ fn backwards_compat_impl(
                         f.attrs.retain(|a| !a.path().is_ident("backwards_compat"));
                         let helper_str = spec.helper_ident.to_string();
                         f.attrs.push(syn::parse_quote!(#[serde(with = #helper_str)]));
+                        #[cfg(feature = "schemars")]
+                        if derive_json_schema && !field_has_schemars_with(&f.attrs) {
+                            let schema_ty_str = spec.schema_helper_ty_str();
+                            f.attrs
+                                .push(syn::parse_quote!(#[schemars(with = #schema_ty_str)]));
+                        }
                     }
                 }
                 return quote::quote! {
@@ -348,14 +557,15 @@ fn backwards_compat_impl(
                 };
             }
 
+            let original_struct = item_struct.clone();
             let mut cleaned_item_struct = item_struct.clone();
             cleaned_item_struct
                 .attrs
-                .retain(|attr| !attr.path().is_ident("serde"));
+                .retain(|attr| !is_stripped_domain_attr(attr));
             clean_derive_attrs(&mut cleaned_item_struct.attrs);
             for field in &mut cleaned_item_struct.fields {
                 field.attrs.retain(|attr| {
-                    !attr.path().is_ident("serde") && !attr.path().is_ident("backwards_compat")
+                    !is_stripped_domain_attr(attr) && !attr.path().is_ident("backwards_compat")
                 });
             }
 
@@ -368,18 +578,27 @@ fn backwards_compat_impl(
                 target_ident,
                 vis,
                 generics,
+                derive_json_schema,
+                original_struct: Some(original_struct),
                 field_helper_tokens: helpers,
-                built_shadow_fn: Box::new(move || build_struct_shadow_wire(&shadow_struct, &field_specs)),
+                built_shadow_fn: Box::new(move || {
+                    build_struct_shadow_wire(&shadow_struct, &field_specs, derive_json_schema)
+                }),
             }
         }
         syn::Item::Enum(mut item_enum) => {
+            #[cfg(feature = "schemars")]
+            let derive_json_schema = has_json_schema_derive(&item_enum.attrs);
+            #[cfg(not(feature = "schemars"))]
+            let derive_json_schema = false;
+
             let field_specs = match field::extract_enum_field_compat(&item_enum) {
                 Ok(specs) => specs,
                 Err(err) => return err.to_compile_error(),
             };
             let mut helpers = Vec::with_capacity(field_specs.len());
             for spec in &field_specs {
-                match field::generate_field_helper(spec) {
+                match field::generate_field_helper(spec, derive_json_schema) {
                     Ok(ts) => helpers.push(ts),
                     Err(err) => return err.to_compile_error(),
                 }
@@ -394,6 +613,12 @@ fn backwards_compat_impl(
                         f.attrs.retain(|a| !a.path().is_ident("backwards_compat"));
                         let helper_str = spec.helper_ident.to_string();
                         f.attrs.push(syn::parse_quote!(#[serde(with = #helper_str)]));
+                        #[cfg(feature = "schemars")]
+                        if derive_json_schema && !field_has_schemars_with(&f.attrs) {
+                            let schema_ty_str = spec.schema_helper_ty_str();
+                            f.attrs
+                                .push(syn::parse_quote!(#[schemars(with = #schema_ty_str)]));
+                        }
                     }
                 }
                 return quote::quote! {
@@ -405,13 +630,13 @@ fn backwards_compat_impl(
             let mut cleaned_item_enum = item_enum.clone();
             cleaned_item_enum
                 .attrs
-                .retain(|attr| !attr.path().is_ident("serde"));
+                .retain(|attr| !is_stripped_domain_attr(attr));
             clean_derive_attrs(&mut cleaned_item_enum.attrs);
             for variant in &mut cleaned_item_enum.variants {
-                variant.attrs.retain(|attr| !attr.path().is_ident("serde"));
+                variant.attrs.retain(|attr| !is_stripped_domain_attr(attr));
                 for field in &mut variant.fields {
                     field.attrs.retain(|attr| {
-                        !attr.path().is_ident("serde") && !attr.path().is_ident("backwards_compat")
+                        !is_stripped_domain_attr(attr) && !attr.path().is_ident("backwards_compat")
                     });
                 }
             }
@@ -425,8 +650,12 @@ fn backwards_compat_impl(
                 target_ident,
                 vis,
                 generics,
+                derive_json_schema,
+                original_struct: None,
                 field_helper_tokens: helpers,
-                built_shadow_fn: Box::new(move || build_enum_shadow_wire(&shadow_enum, &field_specs)),
+                built_shadow_fn: Box::new(move || {
+                    build_enum_shadow_wire(&shadow_enum, &field_specs, derive_json_schema)
+                }),
             }
         }
         other => {
@@ -443,6 +672,8 @@ fn backwards_compat_impl(
         target_ident,
         vis,
         generics,
+        derive_json_schema,
+        original_struct,
         field_helper_tokens,
         built_shadow_fn,
     } = prepared;
@@ -464,6 +695,14 @@ fn backwards_compat_impl(
         || dag_plan.serialize_target_is_wire
         || input.versions.iter().any(|v| v.ty == input.target_ty);
 
+    if needs_shadow_wire
+        && input.content_field.is_none()
+        && let Some(ref orig_struct) = original_struct
+        && let Err(err) = check_tag_field_collision(orig_struct, &input.tag_field)
+    {
+        return err.to_compile_error();
+    }
+
     if needs_shadow_wire {
         let built = built_shadow_fn();
         let shadow_info = codegen::ShadowWireInfo {
@@ -476,8 +715,10 @@ fn backwards_compat_impl(
 
         let codegen_tokens = match codegen::generate_backwards_compat(
             &input,
+            &dag_plan,
             codegen::SelfWireMode::Shadow(&shadow_info),
             Some(built.shadow_tokens),
+            derive_json_schema,
         ) {
             Ok(t) => t,
             Err(err) => return err.to_compile_error(),
@@ -489,11 +730,16 @@ fn backwards_compat_impl(
             #(#field_helper_tokens)*
         }
     } else {
-        let codegen_tokens =
-            match codegen::generate_backwards_compat(&input, codegen::SelfWireMode::Disallowed, None) {
-                Ok(t) => t,
-                Err(err) => return err.to_compile_error(),
-            };
+        let codegen_tokens = match codegen::generate_backwards_compat(
+            &input,
+            &dag_plan,
+            codegen::SelfWireMode::Disallowed,
+            None,
+            derive_json_schema,
+        ) {
+            Ok(t) => t,
+            Err(err) => return err.to_compile_error(),
+        };
         quote::quote! {
             #cleaned_item_tokens
             #codegen_tokens
@@ -537,9 +783,26 @@ fn backwards_compat_via_impl(
             if let Some(err_tokens) = reject_field_compat_attrs(&item_struct.fields) {
                 return err_tokens;
             }
+            #[cfg(feature = "schemars")]
+            let derive_json_schema = has_json_schema_derive(&item_struct.attrs);
+            #[cfg(not(feature = "schemars"))]
+            let derive_json_schema = false;
+
+            #[cfg(feature = "schemars")]
+            if derive_json_schema {
+                item_struct.attrs.retain(|a| !a.path().is_ident("schemars"));
+                for f in &mut item_struct.fields {
+                    f.attrs.retain(|a| !a.path().is_ident("schemars"));
+                }
+            }
             clean_derive_attrs(&mut item_struct.attrs);
             let codegen_struct = respan_to_call_site(&item_struct);
-            let codegen_tokens = via::generate_via(&args, &codegen_struct.ident, &codegen_struct.generics);
+            let codegen_tokens = via::generate_via(
+                &args,
+                &codegen_struct.ident,
+                &codegen_struct.generics,
+                derive_json_schema,
+            );
             quote::quote! {
                 #item_struct
                 #codegen_tokens
@@ -551,9 +814,29 @@ fn backwards_compat_via_impl(
                     return err_tokens;
                 }
             }
+            #[cfg(feature = "schemars")]
+            let derive_json_schema = has_json_schema_derive(&item_enum.attrs);
+            #[cfg(not(feature = "schemars"))]
+            let derive_json_schema = false;
+
+            #[cfg(feature = "schemars")]
+            if derive_json_schema {
+                item_enum.attrs.retain(|a| !a.path().is_ident("schemars"));
+                for variant in &mut item_enum.variants {
+                    variant.attrs.retain(|a| !a.path().is_ident("schemars"));
+                    for f in &mut variant.fields {
+                        f.attrs.retain(|a| !a.path().is_ident("schemars"));
+                    }
+                }
+            }
             clean_derive_attrs(&mut item_enum.attrs);
             let codegen_enum = respan_to_call_site(&item_enum);
-            let codegen_tokens = via::generate_via(&args, &codegen_enum.ident, &codegen_enum.generics);
+            let codegen_tokens = via::generate_via(
+                &args,
+                &codegen_enum.ident,
+                &codegen_enum.generics,
+                derive_json_schema,
+            );
             quote::quote! {
                 #item_enum
                 #codegen_tokens
@@ -658,7 +941,11 @@ fn should_mark_transparent(item_struct: &syn::ItemStruct) -> bool {
 fn build_struct_shadow_wire(
     item_struct: &syn::ItemStruct,
     field_specs: &[field::FieldCompatSpec],
+    derive_json_schema: bool,
 ) -> BuiltShadowWire {
+    #[cfg(not(feature = "schemars"))]
+    let _ = derive_json_schema;
+
     let call_site_span = proc_macro2::Span::call_site();
     let target_ident = &item_struct.ident;
     let shadow_ident = quote::format_ident!("__{}ShadowWire", target_ident, span = call_site_span);
@@ -694,16 +981,47 @@ fn build_struct_shadow_wire(
             field
                 .attrs
                 .push(syn::parse_quote!(#[serde(deserialize_with = #de_with)]));
+            #[cfg(feature = "schemars")]
+            if derive_json_schema && !field_has_schemars_with(&field.attrs) {
+                let schema_ty_str = spec.schema_helper_ty_str();
+                field
+                    .attrs
+                    .push(syn::parse_quote!(#[schemars(with = #schema_ty_str)]));
+            }
         }
         if let Some(ref mut ident) = field.ident {
             ident.set_span(call_site_span);
         }
     }
 
+    #[cfg(feature = "schemars")]
+    let (shadow_derive_attr, shadow_schemars_crate_attr) = if derive_json_schema {
+        let crate_attr = if schemars_attrs_have_crate(&preserved_attrs) {
+            proc_macro2::TokenStream::new()
+        } else {
+            quote::quote!(#[schemars(crate = "::backwards_compat::__private::schemars")])
+        };
+        (
+            quote::quote!(#[derive(::serde::Deserialize, ::backwards_compat::__private::schemars::JsonSchema)]),
+            crate_attr,
+        )
+    } else {
+        (
+            quote::quote!(#[derive(::serde::Deserialize)]),
+            proc_macro2::TokenStream::new(),
+        )
+    };
+    #[cfg(not(feature = "schemars"))]
+    let (shadow_derive_attr, shadow_schemars_crate_attr) = (
+        quote::quote!(#[derive(::serde::Deserialize)]),
+        proc_macro2::TokenStream::new(),
+    );
+
     let owned_struct_def = quote::quote! {
         #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
         #[doc(hidden)]
-        #[derive(::serde::Deserialize)]
+        #shadow_derive_attr
+        #shadow_schemars_crate_attr
         #transparent_attr
         #(#preserved_attrs)*
         struct #shadow_ident #generics #shadow_fields #semi
@@ -863,7 +1181,11 @@ fn build_struct_shadow_wire(
 fn build_enum_shadow_wire(
     item_enum: &syn::ItemEnum,
     field_specs: &[field::FieldCompatSpec],
+    derive_json_schema: bool,
 ) -> BuiltShadowWire {
+    #[cfg(not(feature = "schemars"))]
+    let _ = derive_json_schema;
+
     let call_site_span = proc_macro2::Span::call_site();
     let target_ident = &item_enum.ident;
     let shadow_ident = quote::format_ident!("__{}ShadowWire", target_ident, span = call_site_span);
@@ -894,6 +1216,13 @@ fn build_enum_shadow_wire(
                 field
                     .attrs
                     .push(syn::parse_quote!(#[serde(deserialize_with = #de_with)]));
+                #[cfg(feature = "schemars")]
+                if derive_json_schema && !field_has_schemars_with(&field.attrs) {
+                    let schema_ty_str = spec.schema_helper_ty_str();
+                    field
+                        .attrs
+                        .push(syn::parse_quote!(#[schemars(with = #schema_ty_str)]));
+                }
             }
             if let Some(ref mut ident) = field.ident {
                 ident.set_span(call_site_span);
@@ -901,10 +1230,34 @@ fn build_enum_shadow_wire(
         }
     }
 
+    #[cfg(feature = "schemars")]
+    let (shadow_derive_attr, shadow_schemars_crate_attr) = if derive_json_schema {
+        let crate_attr = if schemars_attrs_have_crate(&preserved_attrs) {
+            proc_macro2::TokenStream::new()
+        } else {
+            quote::quote!(#[schemars(crate = "::backwards_compat::__private::schemars")])
+        };
+        (
+            quote::quote!(#[derive(::serde::Deserialize, ::backwards_compat::__private::schemars::JsonSchema)]),
+            crate_attr,
+        )
+    } else {
+        (
+            quote::quote!(#[derive(::serde::Deserialize)]),
+            proc_macro2::TokenStream::new(),
+        )
+    };
+    #[cfg(not(feature = "schemars"))]
+    let (shadow_derive_attr, shadow_schemars_crate_attr) = (
+        quote::quote!(#[derive(::serde::Deserialize)]),
+        proc_macro2::TokenStream::new(),
+    );
+
     let owned_enum_def = quote::quote! {
         #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
         #[doc(hidden)]
-        #[derive(::serde::Deserialize)]
+        #shadow_derive_attr
+        #shadow_schemars_crate_attr
         #(#preserved_attrs)*
         enum #shadow_ident #generics #where_clause {
             #owned_variants
@@ -1217,7 +1570,7 @@ mod tests {
             }
         };
 
-        let built = build_enum_shadow_wire(&item_enum, &[]);
+        let built = build_enum_shadow_wire(&item_enum, &[], false);
         assert!(!built.is_unit_struct);
 
         let shadow_str = built.shadow_tokens.to_string();
@@ -1257,7 +1610,7 @@ mod tests {
             }
         };
 
-        let built = build_enum_shadow_wire(&item_enum, &[]);
+        let built = build_enum_shadow_wire(&item_enum, &[], false);
         assert!(!built.is_unit_struct);
 
         let shadow_str = built.shadow_tokens.to_string();
@@ -1277,7 +1630,7 @@ mod tests {
             pub enum Never {}
         };
 
-        let built = build_enum_shadow_wire(&item_enum, &[]);
+        let built = build_enum_shadow_wire(&item_enum, &[], false);
         assert!(!built.is_unit_struct);
 
         let shadow_str = built.shadow_tokens.to_string();
@@ -1665,5 +2018,180 @@ mod tests {
         .to_string();
         assert!(unref_gen.contains("compile_error !"));
         assert!(unref_gen.contains("outer generic type parameter `U`"));
+    }
+
+    #[test]
+    fn test_tag_field_collision_validation() {
+        // Direct field name collision on internally tagged struct
+        let direct_err = backwards_compat_impl(
+            quote::quote!(versions(1: Self)),
+            quote::quote! {
+                pub struct Bad {
+                    pub version: u64,
+                    pub name: String,
+                }
+            },
+        )
+        .to_string();
+        assert!(direct_err.contains("compile_error !"));
+        assert!(direct_err.contains("collides with the `#[backwards_compat]` version tag field `version`"));
+
+        // #[serde(rename = "...")] collision even when struct has rename_all
+        let rename_err = backwards_compat_impl(
+            quote::quote!(tag = "v", versions(1: Self)),
+            quote::quote! {
+                #[serde(rename_all = "camelCase")]
+                pub struct BadRename {
+                    #[serde(rename = "v")]
+                    pub ver_num: u64,
+                }
+            },
+        )
+        .to_string();
+        assert!(rename_err.contains("compile_error !"));
+        assert!(rename_err.contains("collides with the `#[backwards_compat]` version tag field `v`"));
+
+        // Raw ident r#type collides with tag = "type"
+        let raw_err = backwards_compat_impl(
+            quote::quote!(tag = "type", versions(1: Self)),
+            quote::quote! {
+                pub struct BadRaw {
+                    pub r#type: String,
+                }
+            },
+        )
+        .to_string();
+        assert!(raw_err.contains("compile_error !"));
+
+        // Safe cases: #[serde(skip)], #[serde(flatten)], #[serde(rename = "other")], rename_all without explicit rename, adjacent content = "data"
+        for ok_case in [
+            backwards_compat_impl(
+                quote::quote!(versions(1: Self)),
+                quote::quote! {
+                    pub struct Skipped {
+                        #[serde(skip)]
+                        pub version: u64,
+                    }
+                },
+            ),
+            backwards_compat_impl(
+                quote::quote!(versions(1: Self)),
+                quote::quote! {
+                    pub struct Flattened {
+                        #[serde(flatten)]
+                        pub version: Extra,
+                    }
+                },
+            ),
+            backwards_compat_impl(
+                quote::quote!(versions(1: Self)),
+                quote::quote! {
+                    pub struct RenamedAway {
+                        #[serde(rename = "schema_ver")]
+                        pub version: u64,
+                    }
+                },
+            ),
+            backwards_compat_impl(
+                quote::quote!(tag = "myField", versions(1: Self)),
+                quote::quote! {
+                    #[serde(rename_all = "camelCase")]
+                    pub struct RenameAll {
+                        pub myField: u64,
+                    }
+                },
+            ),
+            backwards_compat_impl(
+                quote::quote!(tag = "version", content = "data", versions(1: Self)),
+                quote::quote! {
+                    pub struct Adjacent {
+                        pub version: u64,
+                    }
+                },
+            ),
+            backwards_compat_impl(
+                quote::quote!(versions(1: V1, 2: V2)),
+                quote::quote! {
+                    pub struct NonShadow {
+                        pub version: u64,
+                    }
+                },
+            ),
+        ] {
+            assert!(!ok_case.to_string().contains("compile_error !"));
+        }
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn test_schemars_integration_shadow_mode1_and_via() {
+        // has_json_schema_derive & clean_derive_attrs
+        let mut attrs: Vec<syn::Attribute> = vec![
+            syn::parse_quote!(#[derive(Debug, JsonSchema, ::schemars::JsonSchema, Serialize)]),
+            syn::parse_quote!(#[schemars(title = "T")]),
+        ];
+        assert!(has_json_schema_derive(&attrs));
+        clean_derive_attrs(&mut attrs);
+        let cleaned_str = quote::quote!(#(#attrs)*).to_string();
+        assert!(cleaned_str.contains("Debug"));
+        assert!(!cleaned_str.contains("JsonSchema"));
+        assert!(!cleaned_str.contains("Serialize"));
+
+        // Type-level #[backwards_compat] with #[derive(JsonSchema)]
+        let main_ts = backwards_compat_impl(
+            quote::quote!(versions(1: V1, 2: Self)),
+            quote::quote! {
+                #[derive(Serialize, Deserialize, JsonSchema)]
+                #[schemars(title = "MyModel")]
+                pub struct MyModel {
+                    #[schemars(range(min = 1))]
+                    pub count: u32,
+                }
+            },
+        );
+        let main_str = main_ts.to_string();
+        assert!(!main_str.contains("compile_error !"));
+        assert!(main_str.contains(
+            "derive (:: serde :: Deserialize , :: backwards_compat :: __private :: schemars :: JsonSchema)"
+        ));
+        assert!(
+            main_str.contains("impl :: backwards_compat :: __private :: schemars :: JsonSchema for MyModel")
+        );
+        syn::parse2::<syn::File>(main_ts).unwrap();
+
+        // Mode 1 bare #[backwards_compat] with field-level + #[derive(JsonSchema)]
+        let mode1_ts = backwards_compat_impl(
+            quote::quote!(),
+            quote::quote! {
+                #[derive(Serialize, Deserialize, JsonSchema)]
+                pub struct Mode1Model {
+                    #[backwards_compat(versions(1: u32, 2: Self))]
+                    pub port: u16,
+                }
+            },
+        );
+        let mode1_str = mode1_ts.to_string();
+        assert!(!mode1_str.contains("compile_error !"));
+        assert!(mode1_str.contains("with = \"__BcField_Mode1Model_port_Schema\""));
+        assert!(mode1_str.contains("struct __BcField_Mode1Model_port_Schema"));
+        syn::parse2::<syn::File>(mode1_ts).unwrap();
+
+        // Via mode with #[derive(JsonSchema)]
+        let via_ts = backwards_compat_impl(
+            quote::quote!(via = Proxy),
+            quote::quote! {
+                #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+                #[schemars(deny_unknown_fields)]
+                pub struct ViaModel {
+                    pub a: u32,
+                }
+            },
+        );
+        let via_str = via_ts.to_string();
+        assert!(!via_str.contains("compile_error !"));
+        assert!(
+            via_str.contains("impl :: backwards_compat :: __private :: schemars :: JsonSchema for ViaModel")
+        );
+        syn::parse2::<syn::File>(via_ts).unwrap();
     }
 }

@@ -14,10 +14,21 @@ pub struct FieldCompatSpec {
     pub variant_idx: Option<usize>,
     pub field_idx: usize,
     pub helper_ident: syn::Ident,
+    #[allow(dead_code, reason = "used when schemars feature is enabled")]
+    pub schema_helper_ident: syn::Ident,
     pub field_ty: syn::Type,
     pub filtered_generics: syn::Generics,
     pub cfgs: Vec<syn::Attribute>,
     pub args: BackwardsCompatArgs,
+}
+
+impl FieldCompatSpec {
+    #[cfg(feature = "schemars")]
+    pub fn schema_helper_ty_str(&self) -> String {
+        let (_, ty_generics, _) = self.filtered_generics.split_for_impl();
+        let ident = &self.schema_helper_ident;
+        quote!(#ident #ty_generics).to_string()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -594,11 +605,13 @@ fn extract_single_field(
 
     let mut cfgs: Vec<syn::Attribute> = extra_cfgs.to_vec();
     cfgs.extend(field.attrs.iter().filter(|a| a.path().is_ident("cfg")).cloned());
+    let schema_helper_ident = format_ident!("{}_Schema", helper_ident, span = Span::call_site());
 
     Ok(Some(FieldCompatSpec {
         variant_idx,
         field_idx,
         helper_ident,
+        schema_helper_ident,
         field_ty: field.ty.clone(),
         filtered_generics,
         cfgs,
@@ -704,8 +717,12 @@ fn with_bound(where_clause: Option<&syn::WhereClause>, extra: syn::WherePredicat
     wc
 }
 
-/// Generates the `__BcField_...` helper struct and its `serialize` / `serialize_ref` / `deserialize` methods.
-pub fn generate_field_helper(spec: &FieldCompatSpec) -> syn::Result<TokenStream> {
+/// Generates the `__BcField_...` helper struct and its `serialize` / `serialize_ref` / `deserialize` methods
+/// (and optionally a `__BcField_..._Schema` `JsonSchema` helper when `derive_json_schema` is true).
+pub fn generate_field_helper(spec: &FieldCompatSpec, derive_json_schema: bool) -> syn::Result<TokenStream> {
+    #[cfg(not(feature = "schemars"))]
+    let _ = derive_json_schema;
+
     let input = spec.args.clone().into_input(
         spec.field_ty.clone(),
         syn::Visibility::Inherited,
@@ -720,6 +737,72 @@ pub fn generate_field_helper(spec: &FieldCompatSpec) -> syn::Result<TokenStream>
     let helper_ident = &spec.helper_ident;
     let field_ty = &spec.field_ty;
     let cfgs = &spec.cfgs;
+
+    #[cfg(feature = "schemars")]
+    let (schema_struct_def, schema_impl_items) = if derive_json_schema {
+        let schema_helper_ident = &spec.schema_helper_ident;
+        let (filtered_impl_generics, filtered_ty_generics, filtered_where_clause) =
+            spec.filtered_generics.split_for_impl();
+        let schema_helper_ty: syn::Type = syn::parse_quote!(#schema_helper_ident #filtered_ty_generics);
+        let mut schema_wc = filtered_where_clause
+            .cloned()
+            .unwrap_or_else(|| syn::WhereClause {
+                where_token: syn::token::Where::default(),
+                predicates: syn::punctuated::Punctuated::new(),
+            });
+        let mut schema_helper_defs = Vec::new();
+        let (schema_name_body, schema_id_body) = codegen::build_schema_name_and_id(
+            &helper_ident.to_string(),
+            &spec.filtered_generics,
+            &mut schema_wc,
+        );
+        let json_schema_body = codegen::generate_json_schema_body(
+            &input,
+            &dag_plan,
+            SelfWireMode::Direct,
+            &schema_helper_ty,
+            &filtered_impl_generics,
+            filtered_where_clause,
+            &mut schema_wc,
+            &mut schema_helper_defs,
+        )?;
+        let schema_where_clause = (!schema_wc.predicates.is_empty()).then_some(schema_wc);
+
+        let def = quote! {
+            #(#cfgs)*
+            #[doc(hidden)]
+            #[allow(non_camel_case_types, dead_code, reason = "internal field-level schemars helper")]
+            struct #schema_helper_ident #filtered_impl_generics (
+                ::core::marker::PhantomData<fn() -> #field_ty>,
+            ) #filtered_where_clause;
+        };
+        let impl_tokens = quote! {
+            #(#schema_helper_defs)*
+
+            impl #filtered_impl_generics ::backwards_compat::__private::schemars::JsonSchema
+                for #schema_helper_ident #filtered_ty_generics #schema_where_clause
+            {
+                fn schema_name() -> ::backwards_compat::__private::schemars::_private::alloc::borrow::Cow<'static, str> {
+                    #schema_name_body
+                }
+
+                fn schema_id() -> ::backwards_compat::__private::schemars::_private::alloc::borrow::Cow<'static, str> {
+                    #schema_id_body
+                }
+
+                fn json_schema(
+                    __gen: &mut ::backwards_compat::__private::schemars::SchemaGenerator,
+                ) -> ::backwards_compat::__private::schemars::Schema {
+                    #json_schema_body
+                }
+            }
+        };
+        (def, impl_tokens)
+    } else {
+        (TokenStream::new(), TokenStream::new())
+    };
+    #[cfg(not(feature = "schemars"))]
+    let (schema_struct_def, schema_impl_items) = (TokenStream::new(), TokenStream::new());
 
     let mut ser_fn_generics = input.generics.clone();
     ser_fn_generics.params.push(syn::parse_quote!(__S));
@@ -784,10 +867,13 @@ pub fn generate_field_helper(spec: &FieldCompatSpec) -> syn::Result<TokenStream>
         #[allow(non_camel_case_types, dead_code, reason = "internal field-level backwards_compat helper")]
         struct #helper_ident;
 
+        #schema_struct_def
+
         #(#cfgs)*
         const _: () = {
             #ser_helper_def
             #de_helper_defs
+            #schema_impl_items
 
             #[allow(dead_code, reason = "internal field-level backwards_compat helper methods")]
             impl #helper_ident {
@@ -1046,7 +1132,7 @@ mod tests {
             }
         };
         let specs = extract_struct_field_compat(&item).unwrap();
-        let tokens = generate_field_helper(&specs[0]).unwrap();
+        let tokens = generate_field_helper(&specs[0], false).unwrap();
         let rendered = tokens.to_string();
 
         assert!(rendered.contains("struct __BcField_Outer_field ;"));
@@ -1055,6 +1141,25 @@ mod tests {
         assert!(rendered.contains("fn serialize_ref < 'a , T , const N : usize , __S >"));
         assert!(rendered.contains("fn deserialize < '__de : 'a , 'a , T , const N : usize , __D >"));
         assert!(!rendered.contains('U'));
+        syn::parse2::<syn::File>(tokens).unwrap();
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn test_generate_field_helper_with_schemars() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            pub struct Outer<T> {
+                #[backwards_compat(versions(1: OldField<T>, 2: Self))]
+                pub field: NewField<T>,
+            }
+        };
+        let specs = extract_struct_field_compat(&item).unwrap();
+        let tokens = generate_field_helper(&specs[0], true).unwrap();
+        let rendered = tokens.to_string();
+
+        assert!(rendered.contains("struct __BcField_Outer_field_Schema < T >"));
+        assert!(rendered.contains("impl < T > :: backwards_compat :: __private :: schemars :: JsonSchema for __BcField_Outer_field_Schema < T >"));
+        assert!(rendered.contains("schema_adjacently_tagged"));
         syn::parse2::<syn::File>(tokens).unwrap();
     }
 }

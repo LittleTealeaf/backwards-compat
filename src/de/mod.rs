@@ -7,6 +7,7 @@ pub use content::{Content, ContentDeserializer};
 pub use content_ref::ContentRefDeserializer;
 pub use streaming::{
     AdjacentKey, AdjacentKeyResult, ChainedMapAccess, InternalKey, InternalKeyResult,
-    OptionForwardingDeserializer, RemainingMapDeserializer, drain_map, read_adjacent_content,
+    OptionForwardingDeserializer, RemainingMapDeserializer, UntaggedMultiDispatch, UntaggedMultiVisitor,
+    UntaggedSingleDispatch, UntaggedSingleVisitor, cautious_size_hint, drain_map, read_adjacent_content,
 };
 pub use tag::{TagValue, unknown_version_error};

@@ -7,6 +7,7 @@ use serde::ser::{self, Impossible, Serialize, SerializeMap, SerializeStruct, Ser
 /// Falls back to `serialize_map` only when `content` itself serializes as a map.
 /// Using `serialize_struct` ensures formats like RON emit `(version: ..., ...)`
 /// instead of `{"version": ..., ...}`.
+#[inline]
 pub fn serialize_internally_tagged<S, T, C>(
     serializer: S,
     struct_name: &'static str,
@@ -34,6 +35,7 @@ struct FlatStructSerializer<'a, S, T: ?Sized> {
     tag: &'a T,
 }
 
+#[cold]
 fn cannot_flatten<E: ser::Error>() -> E {
     ser::Error::custom("can only flatten structs and maps")
 }
@@ -44,6 +46,7 @@ impl<SS: SerializeStruct> SerializeStruct for FlatSerializeStruct<SS> {
     type Ok = SS::Ok;
     type Error = SS::Error;
 
+    #[inline]
     fn serialize_field<T: Serialize + ?Sized>(
         &mut self,
         key: &'static str,
@@ -52,10 +55,12 @@ impl<SS: SerializeStruct> SerializeStruct for FlatSerializeStruct<SS> {
         self.0.serialize_field(key, value)
     }
 
+    #[inline]
     fn skip_field(&mut self, key: &'static str) -> Result<(), Self::Error> {
         self.0.skip_field(key)
     }
 
+    #[inline]
     fn end(self) -> Result<Self::Ok, Self::Error> {
         self.0.end()
     }
@@ -67,14 +72,17 @@ impl<SM: SerializeMap> SerializeMap for FlatSerializeMap<SM> {
     type Ok = SM::Ok;
     type Error = SM::Error;
 
+    #[inline]
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Self::Error> {
         self.0.serialize_key(key)
     }
 
+    #[inline]
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
         self.0.serialize_value(value)
     }
 
+    #[inline]
     fn serialize_entry<K: Serialize + ?Sized, V: Serialize + ?Sized>(
         &mut self,
         key: &K,
@@ -83,6 +91,7 @@ impl<SM: SerializeMap> SerializeMap for FlatSerializeMap<SM> {
         self.0.serialize_entry(key, value)
     }
 
+    #[inline]
     fn end(self) -> Result<Self::Ok, Self::Error> {
         self.0.end()
     }

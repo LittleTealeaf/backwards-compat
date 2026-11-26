@@ -1,4 +1,4 @@
-use backwards_compat::{BackwardsCompat, Migrated, VersionKey, backwards_compat};
+use backwards_compat::{BackwardsCompat, BackwardsCompatSerialize, Migrated, VersionKey, backwards_compat};
 use serde::{Deserialize, Serialize};
 
 // =========================================================================
@@ -318,4 +318,383 @@ fn test_rolling_deployment_serialize_older_version() {
     let w_migrated: Migrated<RollingWithFn> = serde_json::from_str(&w_json).unwrap();
     assert_eq!(w_migrated.source_version, Some(2));
     assert!(w_migrated.was_migrated());
+}
+
+// =========================================================================
+// 4. TAG_FIELD & CONTENT_FIELD constants + Migrated<T> ergonomics
+// =========================================================================
+
+#[backwards_compat(
+    tag = "schema",
+    versions(
+        1: MetaV1,
+        2: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct CustomTagOnlyModel {
+    pub x: i32,
+}
+
+impl From<MetaV1> for CustomTagOnlyModel {
+    fn from(v: MetaV1) -> Self {
+        Self { x: v.x }
+    }
+}
+
+#[backwards_compat(
+    content = "data",
+    versions(
+        1: MetaV1,
+        2: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct CustomContentOnlyModel {
+    pub x: i32,
+}
+
+impl From<MetaV1> for CustomContentOnlyModel {
+    fn from(v: MetaV1) -> Self {
+        Self { x: v.x }
+    }
+}
+
+#[backwards_compat(
+    tag = "v",
+    content = "payload",
+    versions(
+        1: MetaV1,
+        2: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct CustomTagAndContentModel {
+    pub x: i32,
+}
+
+impl From<MetaV1> for CustomTagAndContentModel {
+    fn from(v: MetaV1) -> Self {
+        Self { x: v.x }
+    }
+}
+
+#[test]
+fn test_tag_and_content_field_constants() {
+    const {
+        assert!(matches!(IntMetaModel::TAG_FIELD.as_bytes(), b"version"));
+        assert!(IntMetaModel::CONTENT_FIELD.is_none());
+    }
+    assert_eq!(IntMetaModel::TAG_FIELD, "version");
+    assert_eq!(IntMetaModel::CONTENT_FIELD, None);
+    assert_eq!(StrMetaModel::TAG_FIELD, "version");
+    assert_eq!(StrMetaModel::CONTENT_FIELD, None);
+    assert_eq!(MixedMetaModel::TAG_FIELD, "version");
+    assert_eq!(MixedMetaModel::CONTENT_FIELD, None);
+
+    assert_eq!(CustomTagOnlyModel::TAG_FIELD, "schema");
+    assert_eq!(CustomTagOnlyModel::CONTENT_FIELD, None);
+
+    assert_eq!(CustomContentOnlyModel::TAG_FIELD, "version");
+    assert_eq!(CustomContentOnlyModel::CONTENT_FIELD, Some("data"));
+
+    assert_eq!(CustomTagAndContentModel::TAG_FIELD, "v");
+    assert_eq!(CustomTagAndContentModel::CONTENT_FIELD, Some("payload"));
+}
+
+#[test]
+fn test_migrated_ergonomics() {
+    fn take_ref(model: &IntMetaModel) -> i32 {
+        model.x
+    }
+
+    // Tagged current version
+    let mut current: Migrated<IntMetaModel> = serde_json::from_str(r#"{"version":2,"x":10}"#).unwrap();
+    assert!(!current.is_untagged(), "v2 payload should not be untagged");
+    assert_eq!(current.source_version(), Some(2));
+    assert_eq!(current.x, 10); // Deref
+    assert_eq!(take_ref(current.as_ref()), 10); // AsRef
+    current.x += 5; // DerefMut
+    assert_eq!(*current, IntMetaModel { x: 15 });
+
+    // Tagged older version + map() preserving source_version and transforming target type
+    let older: Migrated<IntMetaModel> = serde_json::from_str(r#"{"version":1,"x":10}"#).unwrap();
+    assert!(!older.is_untagged(), "v1 payload should not be untagged");
+    assert_eq!(older.source_version(), Some(1));
+    let mapped_tagged = older.map(|m| CustomTagOnlyModel { x: m.x * 2 });
+    assert_eq!(mapped_tagged.source_version(), Some(1));
+    assert!(!mapped_tagged.is_untagged());
+    assert_eq!(*mapped_tagged, CustomTagOnlyModel { x: 22 });
+
+    // Untagged `_` payload + map() preserving None source_version
+    let untagged: Migrated<IntMetaModel> = serde_json::from_str(r#"{"x":7}"#).unwrap();
+    assert!(untagged.is_untagged(), "unversioned payload should be untagged");
+    assert_eq!(untagged.source_version(), None);
+    let mapped_untagged = untagged.map(|m| IntMetaModel { x: m.x + 100 });
+    assert!(mapped_untagged.is_untagged());
+    assert_eq!(mapped_untagged.source_version(), None);
+    assert_eq!(mapped_untagged.into_inner(), IntMetaModel { x: 107 });
+}
+
+// =========================================================================
+// 5. BackwardsCompatSerialize: runtime version selection, #[serializable],
+//    #[serializable(with = ...)], #[serializable(try_with = ...)],
+//    adjacent tagging, via delegation, and unsupported version errors
+// =========================================================================
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiSerV1 {
+    pub label: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiSerV2 {
+    pub label: String,
+    pub count: u16,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiSerV3 {
+    pub label: String,
+    pub count: u32,
+}
+
+impl From<MultiSerV1> for MultiSerV2 {
+    fn from(v: MultiSerV1) -> Self {
+        Self {
+            label: v.label,
+            count: 0,
+        }
+    }
+}
+
+impl From<MultiSerV2> for MultiSerV3 {
+    fn from(v: MultiSerV2) -> Self {
+        Self {
+            label: v.label,
+            count: u32::from(v.count),
+        }
+    }
+}
+
+fn to_v2_infallible(m: &MultiSerModel) -> MultiSerV2 {
+    MultiSerV2 {
+        label: m.label.clone(),
+        count: u16::try_from(m.count).unwrap_or(u16::MAX),
+    }
+}
+
+fn try_to_v3(m: &MultiSerModel) -> Result<MultiSerV3, String> {
+    if m.label.is_empty() {
+        return Err("label cannot be empty for v3".to_owned());
+    }
+    Ok(MultiSerV3 {
+        label: m.label.clone(),
+        count: m.count,
+    })
+}
+
+#[backwards_compat(
+    versions(
+        _: MultiSerV1 => 1,
+        #[cfg(any())]
+        0: MultiSerV1 => 1,
+        #[serializable]
+        1: MultiSerV1,
+        #[serializable(with = to_v2_infallible)]
+        2: MultiSerV2,
+        #[serializable(try_with = try_to_v3)]
+        3: MultiSerV3,
+        4: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct MultiSerModel {
+    pub label: String,
+    pub count: u32,
+    pub extra: bool,
+}
+
+impl From<MultiSerV3> for MultiSerModel {
+    fn from(v: MultiSerV3) -> Self {
+        Self {
+            label: v.label,
+            count: v.count,
+            extra: false,
+        }
+    }
+}
+
+impl From<&MultiSerModel> for MultiSerV1 {
+    fn from(m: &MultiSerModel) -> Self {
+        Self {
+            label: m.label.clone(),
+        }
+    }
+}
+
+// Adjacently-tagged BackwardsCompatSerialize model using Clone + From<Owned> for v1
+#[backwards_compat(
+    tag = "v",
+    content = "data",
+    versions(
+        #[serializable]
+        1: MultiSerV1,
+        2: Self,
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdjMultiSerModel {
+    pub label: String,
+    pub count: u32,
+}
+
+impl From<MultiSerV1> for AdjMultiSerModel {
+    fn from(v: MultiSerV1) -> Self {
+        Self {
+            label: v.label,
+            count: 0,
+        }
+    }
+}
+
+impl From<AdjMultiSerModel> for MultiSerV1 {
+    fn from(m: AdjMultiSerModel) -> Self {
+        Self { label: m.label }
+    }
+}
+
+// Proxy + #[backwards_compat(via = ...)] delegation
+#[backwards_compat(via = MultiSerModel)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct ViaMultiSerDomain {
+    pub label: String,
+    pub count: u32,
+    pub extra: bool,
+}
+
+impl From<MultiSerModel> for ViaMultiSerDomain {
+    fn from(p: MultiSerModel) -> Self {
+        Self {
+            label: p.label,
+            count: p.count,
+            extra: p.extra,
+        }
+    }
+}
+
+impl From<&ViaMultiSerDomain> for MultiSerModel {
+    fn from(d: &ViaMultiSerDomain) -> Self {
+        Self {
+            label: d.label.clone(),
+            count: d.count,
+            extra: d.extra,
+        }
+    }
+}
+
+#[test]
+fn test_backwards_compat_serialize_and_via_delegation() {
+    // Default model without #[serializable] only includes its serialize version
+    assert_eq!(IntMetaModel::SERIALIZABLE_VERSIONS, &[2]);
+
+    // MultiSerModel exposes 1, 2, 3, 4 (excludes `_` and #[cfg(any())] 0)
+    assert_eq!(MultiSerModel::SERIALIZABLE_VERSIONS, &[1, 2, 3, 4]);
+    assert_eq!(AdjMultiSerModel::SERIALIZABLE_VERSIONS, &[1, 2]);
+    assert_eq!(ViaMultiSerDomain::SERIALIZABLE_VERSIONS, &[1, 2, 3, 4]);
+    assert_eq!(ViaMultiSerDomain::TAG_FIELD, MultiSerModel::TAG_FIELD);
+    assert_eq!(ViaMultiSerDomain::CONTENT_FIELD, MultiSerModel::CONTENT_FIELD);
+
+    let model = MultiSerModel {
+        label: "svc".to_owned(),
+        count: 42,
+        extra: true,
+    };
+
+    // #[serializable] (v1) via as_version and serialize_as_version
+    let v1_json = serde_json::to_string(&model.as_version(1)).unwrap();
+    assert_eq!(v1_json, r#"{"version":1,"label":"svc"}"#);
+    let mut direct_v1_ser = serde_json::Serializer::new(Vec::new());
+    model.serialize_as_version(1, &mut direct_v1_ser).unwrap();
+    assert_eq!(String::from_utf8(direct_v1_ser.into_inner()).unwrap(), v1_json);
+
+    // #[serializable(with = to_v2_infallible)] (v2)
+    let v2_json = serde_json::to_string(&model.as_version(2)).unwrap();
+    assert_eq!(v2_json, r#"{"version":2,"label":"svc","count":42}"#);
+
+    // #[serializable(try_with = try_to_v3)] Ok case (v3)
+    let v3_json = serde_json::to_string(&model.as_version(3)).unwrap();
+    assert_eq!(v3_json, r#"{"version":3,"label":"svc","count":42}"#);
+
+    // Current version (v4)
+    let v4_json = serde_json::to_string(&model.as_version(4)).unwrap();
+    assert_eq!(v4_json, r#"{"version":4,"label":"svc","count":42,"extra":true}"#);
+
+    // #[serializable(try_with = try_to_v3)] Err case
+    let invalid_for_v3 = MultiSerModel {
+        label: String::new(),
+        count: 1,
+        extra: false,
+    };
+    let try_err = serde_json::to_string(&invalid_for_v3.as_version(3)).unwrap_err();
+    assert!(
+        try_err.to_string().contains("label cannot be empty for v3"),
+        "unexpected try_with error: {try_err}"
+    );
+
+    // Unsupported runtime version error
+    let unsupported_err = serde_json::to_string(&model.as_version(99)).unwrap_err();
+    assert!(
+        unsupported_err
+            .to_string()
+            .contains("version 99 is not supported for serialization"),
+        "unexpected unsupported version error: {unsupported_err}"
+    );
+    let mut bad_ser = serde_json::Serializer::new(Vec::new());
+    let direct_err = model.serialize_as_version(99, &mut bad_ser).unwrap_err();
+    assert!(
+        direct_err
+            .to_string()
+            .contains("version 99 is not supported for serialization"),
+        "unexpected direct serialize_as_version error: {direct_err}"
+    );
+
+    // Adjacently-tagged runtime version serialization
+    let adj = AdjMultiSerModel {
+        label: "adj".to_owned(),
+        count: 9,
+    };
+    let adj_v1 = serde_json::to_string(&adj.as_version(1)).unwrap();
+    assert_eq!(adj_v1, r#"{"v":1,"data":{"label":"adj"}}"#);
+    let adj_v2 = serde_json::to_string(&adj.as_version(2)).unwrap();
+    assert_eq!(adj_v2, r#"{"v":2,"data":{"label":"adj","count":9}}"#);
+    assert_eq!(
+        serde_json::from_str::<AdjMultiSerModel>(&adj_v1).unwrap(),
+        AdjMultiSerModel {
+            label: "adj".to_owned(),
+            count: 0,
+        }
+    );
+
+    // #[backwards_compat(via = ...)] delegation
+    let via_domain = ViaMultiSerDomain {
+        label: "via".to_owned(),
+        count: 12,
+        extra: true,
+    };
+    let via_v2 = serde_json::to_string(&via_domain.as_version(2)).unwrap();
+    assert_eq!(via_v2, r#"{"version":2,"label":"via","count":12}"#);
+    let mut via_ser = serde_json::Serializer::new(Vec::new());
+    via_domain.serialize_as_version(3, &mut via_ser).unwrap();
+    assert_eq!(
+        String::from_utf8(via_ser.into_inner()).unwrap(),
+        r#"{"version":3,"label":"via","count":12}"#
+    );
+    let via_err = serde_json::to_string(&via_domain.as_version(77)).unwrap_err();
+    assert!(
+        via_err
+            .to_string()
+            .contains("version 77 is not supported for serialization"),
+        "unexpected via unsupported version error: {via_err}"
+    );
 }

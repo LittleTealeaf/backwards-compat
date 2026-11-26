@@ -477,3 +477,102 @@ mod tuple_and_scalar_roundtrips {
         }
     }
 }
+
+// =========================================================================
+// 5. RON pretty struct_names(true) emits real domain struct name
+// =========================================================================
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct AdjUserProfileV1 {
+    pub handle: String,
+}
+
+#[backwards_compat(
+    tag = "version",
+    content = "data",
+    versions(
+        1: AdjUserProfileV1,
+        2: Self,
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdjUserProfile {
+    pub handle: String,
+    pub verified: bool,
+}
+
+impl From<AdjUserProfileV1> for AdjUserProfile {
+    fn from(v: AdjUserProfileV1) -> Self {
+        Self {
+            handle: v.handle,
+            verified: false,
+        }
+    }
+}
+
+#[test]
+fn test_ron_pretty_emits_real_struct_names() {
+    let pretty_cfg = ron::ser::PrettyConfig::new().struct_names(true);
+
+    // Internally-tagged struct emits `UserProfile(...)`, never `__SerializeHelper(...)`
+    let profile = UserProfile {
+        first_name: "Alice".to_owned(),
+        last_name: "Smith".to_owned(),
+        active: true,
+    };
+    let profile_ron = ron::ser::to_string_pretty(&profile, pretty_cfg.clone()).unwrap();
+    assert!(
+        profile_ron.starts_with("UserProfile("),
+        "expected UserProfile struct name in RON output, got: {profile_ron}"
+    );
+    assert!(
+        !profile_ron.contains("__SerializeHelper"),
+        "RON output must not leak __SerializeHelper: {profile_ron}"
+    );
+    assert_eq!(ron::from_str::<UserProfile>(&profile_ron).unwrap(), profile);
+
+    // Adjacently-tagged struct emits `AdjUserProfile(...)`, never `__SerializeHelper(...)`
+    let adj_profile = AdjUserProfile {
+        handle: "alice".to_owned(),
+        verified: true,
+    };
+    let adj_ron = ron::ser::to_string_pretty(&adj_profile, pretty_cfg.clone()).unwrap();
+    assert!(
+        adj_ron.starts_with("AdjUserProfile("),
+        "expected AdjUserProfile struct name in RON output, got: {adj_ron}"
+    );
+    assert!(
+        !adj_ron.contains("__SerializeHelper"),
+        "RON output must not leak __SerializeHelper: {adj_ron}"
+    );
+    let adj_compact_ron = ron::to_string(&adj_profile).unwrap();
+    assert_eq!(
+        ron::from_str::<AdjUserProfile>(&adj_compact_ron).unwrap(),
+        adj_profile
+    );
+
+    // Unit struct and tuple struct also emit their real struct names
+    let unit_ron = ron::ser::to_string_pretty(&EmptyUnit, pretty_cfg.clone()).unwrap();
+    assert!(
+        unit_ron.starts_with("EmptyUnit("),
+        "expected EmptyUnit struct name in RON output, got: {unit_ron}"
+    );
+    assert!(
+        !unit_ron.contains("__SerializeHelper"),
+        "RON output must not leak __SerializeHelper: {unit_ron}"
+    );
+    assert_eq!(ron::from_str::<EmptyUnit>(&unit_ron).unwrap(), EmptyUnit);
+
+    let point = Point(3, 4);
+    let point_ron = ron::ser::to_string_pretty(&point, pretty_cfg).unwrap();
+    assert!(
+        point_ron.starts_with("Point("),
+        "expected Point struct name in RON output, got: {point_ron}"
+    );
+    assert!(
+        !point_ron.contains("__SerializeHelper"),
+        "RON output must not leak __SerializeHelper: {point_ron}"
+    );
+    let point_compact_ron = ron::to_string(&point).unwrap();
+    assert_eq!(ron::from_str::<Point>(&point_compact_ron).unwrap(), point);
+}

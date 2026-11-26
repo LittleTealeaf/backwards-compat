@@ -30,8 +30,9 @@ In applications with evolving data formats (such as configuration files, databas
 - **Unified Proxy Redirection (`#[backwards_compat(via = ...)]`)**: Redirect `Serialize`, `Deserialize`, `BackwardsCompat`, and `BackwardsCompatDeserialize` through a separate versioned proxy type with infallible or fallible (`try_from`, `try_into`, `fallible`) conversions, custom `from` / `to` functions, and zero-clone `&Self` support.
 - **Native Integer & String Tags**: Emits native integer (`"version": 2`) or string (`"version": "2.0"`) tags with strict type matching, plus inline `|` aliases (`1 | "1": ModelV1`) for mixed or legacy tag compatibility.
 - **Zero-Boilerplate & Zero-Copy**: Your target type does not need `#[derive(Serialize, Deserialize)]` or `Clone`—serialization borrows fields directly without cloning.
-- **Metadata & Opt-In Migration Tracking**: Implements `BackwardsCompat` (`CURRENT_VERSION`, `SERIALIZE_VERSION`, `SUPPORTED_VERSIONS`, `ACCEPTS_UNTAGGED`) and `Migrated<T>` to detect when payloads were upgraded.
-- **Rolling Deployments (`#[serialize]`)**: Override the serialized wire version (`#[serialize]` or `#[serialize(with = fn_path)]`) while already accepting newer incoming schemas.
+- **Metadata & Opt-In Migration Tracking**: Implements `BackwardsCompat` (`CURRENT_VERSION`, `SERIALIZE_VERSION`, `SUPPORTED_VERSIONS`, `ACCEPTS_UNTAGGED`, `TAG_FIELD`, `CONTENT_FIELD`) and `Migrated<T>` (`Deref`, `DerefMut`, `AsRef`, `is_untagged()`, `source_version()`, `map(...)`) to detect and inspect upgraded payloads.
+- **Rolling Deployments & Runtime Version Selection**: Override the default wire version with `#[serialize]` / `#[serialize(with = ...)]`, or opt older versions into runtime selection with `#[serializable]` / `BackwardsCompatSerialize::as_version(...)`.
+- **`no_std` + `alloc` & Optional `schemars`**: Compiles with `default-features = false` for `no_std` + `alloc` targets, and optionally derives `schemars::JsonSchema` (`features = ["schemars"]`).
 - **Custom Converters (`#[with(fn_path)]`)**: Supply a custom conversion function per step instead of implementing `From` / `TryFrom`.
 - **Generics & Lifetimes**: Full support for structs and enums with type parameters, lifetimes, const generics, and `where` clauses.
 - **Adjacent Tagging**: Use `content = "..."` for tuple structs, scalar types, newtypes, and enums (field-level `#[backwards_compat(...)]` defaults to `content = "data"`).
@@ -49,9 +50,13 @@ Add `backwards-compat` and `serde` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-backwards-compat = "2.0"
+backwards-compat = "3.0"
 serde = { version = "1.0", features = ["derive"] }
 ```
+
+Optional Cargo features:
+- `default-features = false`: Enables `#![no_std]` + `alloc` support (disables the default `std` feature).
+- `features = ["schemars"]`: Enables [`schemars`](https://docs.rs/schemars) `JsonSchema` generation when `#[derive(..., JsonSchema)]` is used alongside `#[backwards_compat(...)]`.
 
 ---
 
@@ -485,12 +490,151 @@ pub struct Doc {
 // Introspect metadata:
 assert_eq!(Doc::CURRENT_VERSION, 2);
 assert_eq!(Doc::SERIALIZE_VERSION, 1);
+assert_eq!(Doc::TAG_FIELD, "version");
+assert_eq!(Doc::CONTENT_FIELD, None);
 
 // Track whether an incoming payload was upgraded:
 let migrated: Migrated<Doc> = serde_json::from_str(r#"{"version": 1, "title": "hi"}"#).unwrap();
 assert!(migrated.was_migrated());
-assert_eq!(migrated.source_version, Some(1));
+assert!(!migrated.is_untagged());
+assert_eq!(migrated.source_version(), Some(1));
+assert_eq!(migrated.title, "hi"); // Deref / DerefMut / AsRef<Doc>
+let upper = migrated.map(|mut d| {
+    d.title = d.title.to_uppercase();
+    d
+});
 ```
+
+### Runtime Version Selection (`BackwardsCompatSerialize` & `#[serializable]`)
+
+When you want to keep serializing at `CURRENT_VERSION` by default while allowing callers to emit older wire versions on demand (for example, per-client API negotiation or targeted exports), annotate older version entries with `#[serializable]`, `#[serializable(with = fn_path)]`, or `#[serializable(try_with = fn_path)]`. This generates a `BackwardsCompatSerialize` implementation with `SERIALIZABLE_VERSIONS`, `serialize_as_version`, and `as_version(...)`:
+
+```rust
+use backwards_compat::{BackwardsCompatSerialize, backwards_compat};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ItemV1 {
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ItemV2 {
+    pub label: String,
+    pub weight: u32,
+}
+
+impl From<ItemV1> for ItemV2 {
+    fn from(v1: ItemV1) -> Self {
+        Self { label: v1.label, weight: 1 }
+    }
+}
+
+impl From<ItemV2> for Item {
+    fn from(v2: ItemV2) -> Self {
+        Self { label: v2.label, weight: v2.weight, active: true }
+    }
+}
+
+fn to_v1(item: &Item) -> ItemV1 {
+    ItemV1 { label: item.label.clone() }
+}
+
+fn try_to_v2(item: &Item) -> Result<ItemV2, &'static str> {
+    if !item.active {
+        return Err("inactive items cannot be downgraded to v2");
+    }
+    Ok(ItemV2 { label: item.label.clone(), weight: item.weight })
+}
+
+#[backwards_compat(
+    tag = "version",
+    versions(
+        #[serializable(with = to_v1)] 1: ItemV1,
+        #[serializable(try_with = try_to_v2)] 2: ItemV2,
+        3: Self,
+    )
+)]
+#[derive(Debug, PartialEq)]
+pub struct Item {
+    pub label: String,
+    pub weight: u32,
+    pub active: bool,
+}
+
+# fn main() {
+let item = Item { label: "widget".into(), weight: 5, active: true };
+assert_eq!(Item::SERIALIZABLE_VERSIONS, &[1, 2, 3]);
+
+// Default Serialize still writes version 3, while as_version(...) picks v1 or v2 at runtime:
+let v1_json = serde_json::to_string(&item.as_version(1)).unwrap();
+assert_eq!(v1_json, r#"{"version":1,"label":"widget"}"#);
+
+let v2_json = serde_json::to_string(&item.as_version(2)).unwrap();
+assert_eq!(v2_json, r#"{"version":2,"label":"widget","weight":5}"#);
+# }
+```
+
+- `#[serializable]` converts using `From<&Self>` (or `Clone` + `From<Self>`), `#[serializable(with = fn_path)]` calls an infallible `fn(&Self) -> OldType`, and `#[serializable(try_with = fn_path)]` calls a fallible `fn(&Self) -> Result<OldType, E>` where `E: core::fmt::Display`.
+
+### `no_std` + `alloc` Support
+
+`backwards-compat` supports `#![no_std]` environments that provide `alloc`. Disable the default `std` feature in `Cargo.toml`:
+
+```toml
+[dependencies]
+backwards-compat = { version = "3.0", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+```
+
+All macro-generated `Serialize`, `Deserialize`, `BackwardsCompat`, `BackwardsCompatDeserialize`, `BackwardsCompatSerialize`, and `Migrated<T>` implementations work without `std`.
+
+### JSON Schema Generation (`schemars`)
+
+Enable the `schemars` feature to generate versioned JSON Schemas reflecting every active version and tag format (`oneOf` across versions, internally or adjacently tagged):
+
+```toml
+[dependencies]
+backwards-compat = { version = "3.0", features = ["schemars"] }
+schemars = "1.0"
+```
+
+Place `#[derive(schemars::JsonSchema)]` below `#[backwards_compat(...)]` on your model (and on historical version types):
+
+```rust
+# #[cfg(feature = "schemars")]
+# fn main() {
+use backwards_compat::backwards_compat;
+use schemars::{JsonSchema, schema_for};
+use serde::Deserialize;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PayloadV1 {
+    pub name: String,
+}
+
+#[backwards_compat(tag = "version", versions(1: PayloadV1, 2: Self))]
+#[derive(JsonSchema)]
+pub struct Payload {
+    pub name: String,
+    pub count: u32,
+}
+
+impl From<PayloadV1> for Payload {
+    fn from(v1: PayloadV1) -> Self {
+        Self { name: v1.name, count: 0 }
+    }
+}
+
+let schema = schema_for!(Payload);
+let json = serde_json::to_string(&schema).unwrap();
+assert!(json.contains("oneOf"));
+# }
+# #[cfg(not(feature = "schemars"))]
+# fn main() {}
+```
+
+`Migrated<T>` also implements `schemars::JsonSchema` whenever `T: BackwardsCompat + JsonSchema`.
 
 ### Inline Tag Aliases (`|`) & String Version Keys
 
@@ -680,7 +824,7 @@ pub struct Config {
 | `content` | string | *none* (type-level) / `"data"` (field-level) | Content field name for adjacent tagging (e.g. `content = "data"`). Field-level `#[backwards_compat(...)]` defaults to `"data"`. |
 | `via` | type path | *none* | Unified proxy redirection mode (`via = ProxyType` or `via(ProxyType)`), mutually exclusive with `tag`, `content`, and `versions`. Supports `try_from`, `try_into`, `fallible`, `from = fn_path`, `to = fn_path`, and `dump`. |
 | `dump` | flag | *disabled* | Prints the generated Rust token stream to `stderr` during compilation. |
-| `versions` | list / map | *empty* | Version entries supporting `#[current]`, `#[serialize]`, `#[serialize(with = fn)]`, `#[fallible]`, `#[with(fn)]`, `#[cfg(...)]`, `\|` aliases, `_`, and `=> target` / `=> TargetType` / `=> Self`. |
+| `versions` | list / map | *empty* | Version entries supporting `#[current]`, `#[serialize]`, `#[serialize(with = fn)]`, `#[serializable]`, `#[serializable(with = fn)]`, `#[serializable(try_with = fn)]`, `#[fallible]`, `#[with(fn)]`, `#[cfg(...)]`, `\|` aliases, `_`, and `=> target` / `=> TargetType` / `=> Self`. |
 
 ---
 
