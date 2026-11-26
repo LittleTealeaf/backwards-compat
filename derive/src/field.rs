@@ -1076,7 +1076,7 @@ mod tests {
         let wc_str = fg
             .where_clause
             .as_ref()
-            .map_or_default(|w| quote!(#w).to_string());
+            .map_or_else(String::new, |w| quote!(#w).to_string());
         assert!(wc_str.contains("T : Default"));
         assert!(wc_str.contains("'a : 'static"));
         assert!(!wc_str.contains("U :"));
