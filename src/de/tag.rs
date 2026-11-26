@@ -27,7 +27,7 @@ impl TagValue<'_> {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> Option<&str> {
+    pub const fn as_str(&self) -> Option<&str> {
         match self {
             Self::Str(s) => Some(s),
             Self::String(s) => Some(s.as_str()),
