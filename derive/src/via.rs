@@ -238,13 +238,18 @@ fn make_where_clause(orig: Option<&syn::WhereClause>) -> syn::WhereClause {
     })
 }
 
-/// Generates `BackwardsCompat`, `BackwardsCompatDeserialize`, `Deserialize`, and `Serialize`
-/// implementations for `target_ident` delegating through `args.proxy_ty`.
+/// Generates `BackwardsCompat`, `BackwardsCompatDeserialize`, `BackwardsCompatSerialize`,
+/// `Deserialize`, `Serialize`, and (optionally) `JsonSchema` implementations for `target_ident`
+/// delegating through `args.proxy_ty`.
 pub fn generate_via(
     args: &ViaArgs,
     target_ident: &Ident,
     generics: &syn::Generics,
+    derive_json_schema: bool,
 ) -> proc_macro2::TokenStream {
+    #[cfg(not(feature = "schemars"))]
+    let _ = derive_json_schema;
+
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let target_ty = quote::quote!(#target_ident #ty_generics);
     let proxy_ty = &args.proxy_ty;
@@ -335,6 +340,44 @@ pub fn generate_via(
         },
     };
 
+    let mut ser_as_where_clause = make_where_clause(where_clause);
+    ser_as_where_clause
+        .predicates
+        .push(syn::parse_quote!(#proxy_ty: ::backwards_compat::BackwardsCompatSerialize));
+
+    #[cfg(feature = "schemars")]
+    let json_schema_impl = if derive_json_schema {
+        let mut schema_where_clause = make_where_clause(where_clause);
+        schema_where_clause.predicates.push(syn::parse_quote!(
+            #proxy_ty: ::backwards_compat::__private::schemars::JsonSchema
+        ));
+        quote::quote! {
+            impl #impl_generics ::backwards_compat::__private::schemars::JsonSchema for #target_ty #schema_where_clause {
+                fn inline_schema() -> bool {
+                    <#proxy_ty as ::backwards_compat::__private::schemars::JsonSchema>::inline_schema()
+                }
+
+                fn schema_name() -> ::backwards_compat::__private::schemars::_private::alloc::borrow::Cow<'static, str> {
+                    <#proxy_ty as ::backwards_compat::__private::schemars::JsonSchema>::schema_name()
+                }
+
+                fn schema_id() -> ::backwards_compat::__private::schemars::_private::alloc::borrow::Cow<'static, str> {
+                    <#proxy_ty as ::backwards_compat::__private::schemars::JsonSchema>::schema_id()
+                }
+
+                fn json_schema(
+                    __gen: &mut ::backwards_compat::__private::schemars::SchemaGenerator,
+                ) -> ::backwards_compat::__private::schemars::Schema {
+                    <#proxy_ty as ::backwards_compat::__private::schemars::JsonSchema>::json_schema(__gen)
+                }
+            }
+        }
+    } else {
+        proc_macro2::TokenStream::new()
+    };
+    #[cfg(not(feature = "schemars"))]
+    let json_schema_impl = proc_macro2::TokenStream::new();
+
     let code = quote::quote! {
         const _: () = {
             impl #impl_generics ::backwards_compat::BackwardsCompat for #target_ty #bc_where_clause {
@@ -343,6 +386,8 @@ pub fn generate_via(
                 const SERIALIZE_VERSION: Self::Version = <#proxy_ty as ::backwards_compat::BackwardsCompat>::SERIALIZE_VERSION;
                 const SUPPORTED_VERSIONS: &'static [Self::Version] = <#proxy_ty as ::backwards_compat::BackwardsCompat>::SUPPORTED_VERSIONS;
                 const ACCEPTS_UNTAGGED: bool = <#proxy_ty as ::backwards_compat::BackwardsCompat>::ACCEPTS_UNTAGGED;
+                const TAG_FIELD: &'static str = <#proxy_ty as ::backwards_compat::BackwardsCompat>::TAG_FIELD;
+                const CONTENT_FIELD: ::core::option::Option<&'static str> = <#proxy_ty as ::backwards_compat::BackwardsCompat>::CONTENT_FIELD;
             }
 
             impl #de_impl_generics ::backwards_compat::BackwardsCompatDeserialize<'__de> for #target_ty #de_where_clause {
@@ -380,6 +425,29 @@ pub fn generate_via(
                     ::serde::Serialize::serialize(&__proxy, __serializer)
                 }
             }
+
+            impl #impl_generics ::backwards_compat::BackwardsCompatSerialize for #target_ty #ser_as_where_clause {
+                const SERIALIZABLE_VERSIONS: &'static [Self::Version] =
+                    <#proxy_ty as ::backwards_compat::BackwardsCompatSerialize>::SERIALIZABLE_VERSIONS;
+
+                fn serialize_as_version<__S>(
+                    &self,
+                    __version: Self::Version,
+                    __serializer: __S,
+                ) -> ::core::result::Result<__S::Ok, __S::Error>
+                where
+                    __S: ::serde::Serializer,
+                {
+                    #to_proxy_stmt
+                    <#proxy_ty as ::backwards_compat::BackwardsCompatSerialize>::serialize_as_version(
+                        &__proxy,
+                        __version,
+                        __serializer,
+                    )
+                }
+            }
+
+            #json_schema_impl
         };
     };
 
@@ -597,7 +665,7 @@ mod tests {
     fn render_via(args_str: &str, item_str: &str) -> String {
         let args = parse_via(args_str).unwrap();
         let item: syn::DeriveInput = syn::parse_str(item_str).unwrap();
-        let ts = super::generate_via(&args, &item.ident, &item.generics);
+        let ts = super::generate_via(&args, &item.ident, &item.generics, false);
         let parsed: syn::File = syn::parse2(ts.clone()).expect("generated code must be valid Rust syntax");
         assert_eq!(parsed.items.len(), 1);
         ts.to_string()
@@ -754,5 +822,26 @@ mod tests {
         let rendered = render_via("via = Proxy, dump", "struct DumpDomain { val: u32 }");
         assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompat for DumpDomain"));
         assert!(rendered.contains("impl :: serde :: Serialize for DumpDomain"));
+        assert!(rendered.contains("const TAG_FIELD : & 'static str = < Proxy as :: backwards_compat :: BackwardsCompat > :: TAG_FIELD"));
+        assert!(rendered.contains("const CONTENT_FIELD : :: core :: option :: Option < & 'static str > = < Proxy as :: backwards_compat :: BackwardsCompat > :: CONTENT_FIELD"));
+        assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompatSerialize for DumpDomain"));
+        assert!(rendered.contains("serialize_as_version (& __proxy , __version , __serializer ,)"));
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn test_generate_via_schemars_delegation() {
+        let args = parse_via("via = Proxy").unwrap();
+        let item: syn::DeriveInput = syn::parse_str("struct Domain<T> { val: T }").unwrap();
+        let ts = super::generate_via(&args, &item.ident, &item.generics, true);
+        let rendered = ts.to_string();
+        assert!(rendered.contains(
+            "impl < T > :: backwards_compat :: __private :: schemars :: JsonSchema for Domain < T >"
+        ));
+        assert!(rendered.contains("Proxy : :: backwards_compat :: __private :: schemars :: JsonSchema"));
+        assert!(rendered.contains(
+            "< Proxy as :: backwards_compat :: __private :: schemars :: JsonSchema > :: json_schema (__gen)"
+        ));
+        syn::parse2::<syn::File>(ts).unwrap();
     }
 }

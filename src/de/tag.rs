@@ -1,3 +1,7 @@
+use alloc::borrow::ToOwned as _;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 use serde::de::{
@@ -239,6 +243,9 @@ pub fn unknown_version_error<E: de::Error>(
 mod tests {
     use super::*;
     use crate::de::content::{Content, ContentDeserializer};
+    use alloc::boxed::Box;
+    use alloc::string::ToString as _;
+    use alloc::vec;
     use serde::de::value::{Error as ValueError, MapAccessDeserializer, MapDeserializer};
 
     #[test]
@@ -289,16 +296,16 @@ mod tests {
             TagValue::Int(u64::MAX)
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(u128::from(
-                u64::MAX
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(Box::new(
+                u128::from(u64::MAX)
             ))))
             .unwrap(),
             TagValue::Int(u64::MAX)
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(Box::new(
                 u128::from(u64::MAX) + 1
-            )))
+            ))))
             .unwrap(),
             TagValue::Other
         );
@@ -337,30 +344,30 @@ mod tests {
             TagValue::NegativeInt(i64::MIN)
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(i128::from(
-                u64::MAX
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
+                i128::from(u64::MAX)
             ))))
             .unwrap(),
             TagValue::Int(u64::MAX)
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
                 i128::from(u64::MAX) + 1
-            )))
+            ))))
             .unwrap(),
             TagValue::Other
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(i128::from(
-                i64::MIN
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
+                i128::from(i64::MIN)
             ))))
             .unwrap(),
             TagValue::NegativeInt(i64::MIN)
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
                 i128::from(i64::MIN) - 1
-            )))
+            ))))
             .unwrap(),
             TagValue::Other
         );
@@ -372,7 +379,7 @@ mod tests {
         );
         assert_eq!(
             TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::String(
-                "v2".to_owned()
+                Box::from("v2")
             )))
             .unwrap(),
             TagValue::String("v2".to_owned())
@@ -391,13 +398,13 @@ mod tests {
             Content::F64(2.5),
             Content::Char('x'),
             Content::Bytes(b"raw"),
-            Content::ByteBuf(vec![1, 2]),
+            Content::ByteBuf(vec![1, 2].into_boxed_slice()),
             Content::None,
             Content::Some(Box::new(Content::U8(1))),
             Content::Unit,
             Content::Newtype(Box::new(Content::U8(1))),
-            Content::Seq(vec![Content::U8(1), Content::Str("a")]),
-            Content::Map(vec![(Content::Str("k"), Content::U8(1))]),
+            Content::Seq(vec![Content::U8(1), Content::Str("a")].into_boxed_slice()),
+            Content::Map(vec![(Content::Str("k"), Content::U8(1))].into_boxed_slice()),
         ] {
             assert_eq!(
                 TagValue::deserialize(ContentDeserializer::<ValueError>::new(non_tag)).unwrap(),
@@ -475,31 +482,44 @@ mod tests {
     #[test]
     fn test_tag_value_deserialize_numeric_boundaries_and_strings() {
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(u128::MAX))).unwrap(),
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(Box::new(
+                u128::MAX
+            ))))
+            .unwrap(),
             TagValue::Other
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(u128::from(
-                u64::MAX
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(Box::new(
+                u128::from(u64::MAX)
             ))))
             .unwrap(),
             TagValue::Int(u64::MAX)
         );
 
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(i128::MIN))).unwrap(),
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
+                i128::MIN
+            ))))
+            .unwrap(),
             TagValue::Other
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(i128::MAX))).unwrap(),
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
+                i128::MAX
+            ))))
+            .unwrap(),
             TagValue::Other
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(0))).unwrap(),
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(0))))
+                .unwrap(),
             TagValue::Int(0)
         );
         assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(-1))).unwrap(),
+            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
+                -1
+            ))))
+            .unwrap(),
             TagValue::NegativeInt(-1)
         );
 
@@ -559,10 +579,9 @@ mod tests {
                 visitor.visit_enum(MapAccessDeserializer::new(MapDeserializer::<_, ValueError>::new(
                     [(
                         "Var",
-                        ContentDeserializer::<ValueError>::new(Content::Map(vec![(
-                            Content::Str("a"),
-                            Content::U8(1),
-                        )])),
+                        ContentDeserializer::<ValueError>::new(Content::Map(
+                            vec![(Content::Str("a"), Content::U8(1))].into_boxed_slice(),
+                        )),
                     )]
                     .into_iter(),
                 )))
@@ -591,17 +610,20 @@ mod tests {
 
         assert_eq!(
             TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::Newtype(
-                Box::new(Content::Seq(vec![
-                    Content::U8(1),
-                    Content::Map(vec![(Content::Str("a"), Content::Bool(true))]),
-                ]))
+                Box::new(Content::Seq(
+                    vec![
+                        Content::U8(1),
+                        Content::Map(vec![(Content::Str("a"), Content::Bool(true))].into_boxed_slice()),
+                    ]
+                    .into_boxed_slice()
+                ))
             )))
             .unwrap(),
             TagValue::Other
         );
         assert_eq!(
             TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::Some(Box::new(
-                Content::Map(vec![(Content::Str("x"), Content::U32(7))])
+                Content::Map(vec![(Content::Str("x"), Content::U32(7))].into_boxed_slice())
             ))))
             .unwrap(),
             TagValue::Other

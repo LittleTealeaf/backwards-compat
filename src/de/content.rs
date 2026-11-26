@@ -1,3 +1,7 @@
+use super::streaming::cautious_size_hint;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::{IntoIter as VecIntoIter, Vec};
 use core::fmt;
 use core::marker::PhantomData;
 use serde::de::{
@@ -12,25 +16,25 @@ pub enum Content<'de> {
     U16(u16),
     U32(u32),
     U64(u64),
-    U128(u128),
+    U128(Box<u128>),
     I8(i8),
     I16(i16),
     I32(i32),
     I64(i64),
-    I128(i128),
+    I128(Box<i128>),
     F32(f32),
     F64(f64),
     Char(char),
-    String(String),
+    String(Box<str>),
     Str(&'de str),
-    ByteBuf(Vec<u8>),
+    ByteBuf(Box<[u8]>),
     Bytes(&'de [u8]),
     None,
     Some(Box<Self>),
     Unit,
     Newtype(Box<Self>),
-    Seq(Vec<Self>),
-    Map(Vec<(Self, Self)>),
+    Seq(Box<[Self]>),
+    Map(Box<[(Self, Self)]>),
 }
 
 impl Content<'_> {
@@ -105,7 +109,7 @@ impl<'de> Visitor<'de> for ContentVisitor<'de> {
     }
 
     fn visit_i128<F>(self, v: i128) -> Result<Self::Value, F> {
-        Ok(Content::I128(v))
+        Ok(Content::I128(Box::new(v)))
     }
 
     fn visit_u8<F>(self, v: u8) -> Result<Self::Value, F> {
@@ -125,7 +129,7 @@ impl<'de> Visitor<'de> for ContentVisitor<'de> {
     }
 
     fn visit_u128<F>(self, v: u128) -> Result<Self::Value, F> {
-        Ok(Content::U128(v))
+        Ok(Content::U128(Box::new(v)))
     }
 
     fn visit_f32<F>(self, v: f32) -> Result<Self::Value, F> {
@@ -144,7 +148,7 @@ impl<'de> Visitor<'de> for ContentVisitor<'de> {
     where
         F: de::Error,
     {
-        Ok(Content::String(v.to_owned()))
+        Ok(Content::String(Box::from(v)))
     }
 
     fn visit_borrowed_str<F>(self, v: &'de str) -> Result<Self::Value, F> {
@@ -152,14 +156,14 @@ impl<'de> Visitor<'de> for ContentVisitor<'de> {
     }
 
     fn visit_string<F>(self, v: String) -> Result<Self::Value, F> {
-        Ok(Content::String(v))
+        Ok(Content::String(v.into_boxed_str()))
     }
 
     fn visit_bytes<F>(self, v: &[u8]) -> Result<Self::Value, F>
     where
         F: de::Error,
     {
-        Ok(Content::ByteBuf(v.to_vec()))
+        Ok(Content::ByteBuf(Box::from(v)))
     }
 
     fn visit_borrowed_bytes<F>(self, v: &'de [u8]) -> Result<Self::Value, F> {
@@ -167,7 +171,7 @@ impl<'de> Visitor<'de> for ContentVisitor<'de> {
     }
 
     fn visit_byte_buf<F>(self, v: Vec<u8>) -> Result<Self::Value, F> {
-        Ok(Content::ByteBuf(v))
+        Ok(Content::ByteBuf(v.into_boxed_slice()))
     }
 
     fn visit_unit<F>(self) -> Result<Self::Value, F> {
@@ -196,22 +200,24 @@ impl<'de> Visitor<'de> for ContentVisitor<'de> {
     where
         V: SeqAccess<'de>,
     {
-        let mut vec = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        let mut vec = Vec::with_capacity(cautious_size_hint::<Content<'de>>(seq.size_hint()));
         while let Some(e) = seq.next_element()? {
             vec.push(e);
         }
-        Ok(Content::Seq(vec))
+        Ok(Content::Seq(vec.into_boxed_slice()))
     }
 
     fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
     where
         V: MapAccess<'de>,
     {
-        let mut vec = Vec::with_capacity(map.size_hint().unwrap_or(0));
+        let mut vec = Vec::with_capacity(cautious_size_hint::<(Content<'de>, Content<'de>)>(
+            map.size_hint(),
+        ));
         while let Some(kv) = map.next_entry()? {
             vec.push(kv);
         }
-        Ok(Content::Map(vec))
+        Ok(Content::Map(vec.into_boxed_slice()))
     }
 }
 
@@ -246,12 +252,12 @@ where
             Content::U16(v) => visitor.visit_u16(v),
             Content::U32(v) => visitor.visit_u32(v),
             Content::U64(v) => visitor.visit_u64(v),
-            Content::U128(v) => visitor.visit_u128(v),
+            Content::U128(v) => visitor.visit_u128(*v),
             Content::I8(v) => visitor.visit_i8(v),
             Content::I16(v) => visitor.visit_i16(v),
             Content::I32(v) => visitor.visit_i32(v),
             Content::I64(v) => visitor.visit_i64(v),
-            Content::I128(v) => visitor.visit_i128(v),
+            Content::I128(v) => visitor.visit_i128(*v),
             _ => Err(self.invalid_type(&visitor)),
         }
     }
@@ -292,25 +298,25 @@ where
             Content::U16(v) => visitor.visit_u16(v),
             Content::U32(v) => visitor.visit_u32(v),
             Content::U64(v) => visitor.visit_u64(v),
-            Content::U128(v) => visitor.visit_u128(v),
+            Content::U128(v) => visitor.visit_u128(*v),
             Content::I8(v) => visitor.visit_i8(v),
             Content::I16(v) => visitor.visit_i16(v),
             Content::I32(v) => visitor.visit_i32(v),
             Content::I64(v) => visitor.visit_i64(v),
-            Content::I128(v) => visitor.visit_i128(v),
+            Content::I128(v) => visitor.visit_i128(*v),
             Content::F32(v) => visitor.visit_f32(v),
             Content::F64(v) => visitor.visit_f64(v),
             Content::Char(v) => visitor.visit_char(v),
-            Content::String(v) => visitor.visit_string(v),
+            Content::String(v) => visitor.visit_string(v.into_string()),
             Content::Str(v) => visitor.visit_borrowed_str(v),
-            Content::ByteBuf(v) => visitor.visit_byte_buf(v),
+            Content::ByteBuf(v) => visitor.visit_byte_buf(v.into_vec()),
             Content::Bytes(v) => visitor.visit_borrowed_bytes(v),
             Content::Unit => visitor.visit_unit(),
             Content::None => visitor.visit_none(),
             Content::Some(v) => visitor.visit_some(Self::new(*v)),
             Content::Newtype(v) => visitor.visit_newtype_struct(Self::new(*v)),
-            Content::Seq(v) => visit_content_seq(v, visitor),
-            Content::Map(v) => visit_content_map(v, visitor),
+            Content::Seq(v) => visit_content_seq(v.into_vec(), visitor),
+            Content::Map(v) => visit_content_map(v.into_vec(), visitor),
         }
     }
 
@@ -414,7 +420,7 @@ where
     {
         match self.content {
             Content::Char(v) => visitor.visit_char(v),
-            Content::String(v) => visitor.visit_string(v),
+            Content::String(v) => visitor.visit_string(v.into_string()),
             Content::Str(v) => visitor.visit_borrowed_str(v),
             _ => Err(self.invalid_type(&visitor)),
         }
@@ -432,9 +438,9 @@ where
         V: Visitor<'de>,
     {
         match self.content {
-            Content::String(v) => visitor.visit_string(v),
+            Content::String(v) => visitor.visit_string(v.into_string()),
             Content::Str(v) => visitor.visit_borrowed_str(v),
-            Content::ByteBuf(v) => visitor.visit_byte_buf(v),
+            Content::ByteBuf(v) => visitor.visit_byte_buf(v.into_vec()),
             Content::Bytes(v) => visitor.visit_borrowed_bytes(v),
             _ => Err(self.invalid_type(&visitor)),
         }
@@ -452,11 +458,11 @@ where
         V: Visitor<'de>,
     {
         match self.content {
-            Content::String(v) => visitor.visit_string(v),
+            Content::String(v) => visitor.visit_string(v.into_string()),
             Content::Str(v) => visitor.visit_borrowed_str(v),
-            Content::ByteBuf(v) => visitor.visit_byte_buf(v),
+            Content::ByteBuf(v) => visitor.visit_byte_buf(v.into_vec()),
             Content::Bytes(v) => visitor.visit_borrowed_bytes(v),
-            Content::Seq(v) => visit_content_seq(v, visitor),
+            Content::Seq(v) => visit_content_seq(v.into_vec(), visitor),
             _ => Err(self.invalid_type(&visitor)),
         }
     }
@@ -510,7 +516,7 @@ where
         V: Visitor<'de>,
     {
         match self.content {
-            Content::Seq(v) => visit_content_seq(v, visitor),
+            Content::Seq(v) => visit_content_seq(v.into_vec(), visitor),
             _ => Err(self.invalid_type(&visitor)),
         }
     }
@@ -539,7 +545,7 @@ where
         V: Visitor<'de>,
     {
         match self.content {
-            Content::Map(v) => visit_content_map(v, visitor),
+            Content::Map(v) => visit_content_map(v.into_vec(), visitor),
             _ => Err(self.invalid_type(&visitor)),
         }
     }
@@ -554,8 +560,8 @@ where
         V: Visitor<'de>,
     {
         match self.content {
-            Content::Seq(v) => visit_content_seq(v, visitor),
-            Content::Map(v) => visit_content_map(v, visitor),
+            Content::Seq(v) => visit_content_seq(v.into_vec(), visitor),
+            Content::Map(v) => visit_content_map(v.into_vec(), visitor),
             _ => Err(self.invalid_type(&visitor)),
         }
     }
@@ -571,7 +577,7 @@ where
     {
         let (variant, value) = match self.content {
             Content::Map(value) => {
-                let mut iter = value.into_iter();
+                let mut iter = value.into_vec().into_iter();
                 let Some((variant, value)) = iter.next() else {
                     return Err(de::Error::invalid_value(
                         Unexpected::Map,
@@ -604,9 +610,9 @@ where
         V: Visitor<'de>,
     {
         match self.content {
-            Content::String(v) => visitor.visit_string(v),
+            Content::String(v) => visitor.visit_string(v.into_string()),
             Content::Str(v) => visitor.visit_borrowed_str(v),
-            Content::ByteBuf(v) => visitor.visit_byte_buf(v),
+            Content::ByteBuf(v) => visitor.visit_byte_buf(v.into_vec()),
             Content::Bytes(v) => visitor.visit_borrowed_bytes(v),
             Content::U8(v) => visitor.visit_u8(v),
             Content::U64(v) => visitor.visit_u64(v),
@@ -698,7 +704,7 @@ where
         V: Visitor<'de>,
     {
         match self.value {
-            Some(Content::Seq(v)) => visit_content_seq(v, visitor),
+            Some(Content::Seq(v)) => visit_content_seq(v.into_vec(), visitor),
             Some(other) => Err(de::Error::invalid_type(other.unexpected(), &"tuple variant")),
             None => Err(de::Error::invalid_type(Unexpected::UnitVariant, &"tuple variant")),
         }
@@ -709,8 +715,8 @@ where
         V: Visitor<'de>,
     {
         match self.value {
-            Some(Content::Map(v)) => visit_content_map(v, visitor),
-            Some(Content::Seq(v)) => visit_content_seq(v, visitor),
+            Some(Content::Map(v)) => visit_content_map(v.into_vec(), visitor),
+            Some(Content::Seq(v)) => visit_content_seq(v.into_vec(), visitor),
             Some(other) => Err(de::Error::invalid_type(other.unexpected(), &"struct variant")),
             None => Err(de::Error::invalid_type(
                 Unexpected::UnitVariant,
@@ -721,7 +727,7 @@ where
 }
 
 struct SeqDeserializer<'de, E> {
-    iter: <Vec<Content<'de>> as IntoIterator>::IntoIter,
+    iter: VecIntoIter<Content<'de>>,
     err: PhantomData<E>,
 }
 
@@ -759,7 +765,7 @@ where
 }
 
 struct MapDeserializer<'de, E> {
-    iter: <Vec<(Content<'de>, Content<'de>)> as IntoIterator>::IntoIter,
+    iter: VecIntoIter<(Content<'de>, Content<'de>)>,
     value: Option<Content<'de>>,
     err: PhantomData<E>,
 }
@@ -814,7 +820,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::borrow::ToOwned as _;
+    use alloc::collections::BTreeMap;
+    use alloc::string::ToString as _;
+    use alloc::vec;
     use serde::de::value::Error as ValueError;
+
+    #[test]
+    fn test_content_size() {
+        assert!(
+            core::mem::size_of::<Content<'_>>() <= 24,
+            "Content<'_> exceeded 24 bytes: {}",
+            core::mem::size_of::<Content<'_>>()
+        );
+    }
 
     #[test]
     fn test_content_unexpected_all_variants() {
@@ -823,25 +842,28 @@ mod tests {
             (Content::U16(2), "integer `2`"),
             (Content::U32(3), "integer `3`"),
             (Content::U64(4), "integer `4`"),
-            (Content::U128(5), "128-bit unsigned integer"),
+            (Content::U128(Box::new(5)), "128-bit unsigned integer"),
             (Content::I8(-1), "integer `-1`"),
             (Content::I16(-2), "integer `-2`"),
             (Content::I32(-3), "integer `-3`"),
             (Content::I64(-4), "integer `-4`"),
-            (Content::I128(-5), "128-bit signed integer"),
+            (Content::I128(Box::new(-5)), "128-bit signed integer"),
             (Content::F32(1.5), "floating point"),
             (Content::F64(2.5), "floating point"),
             (Content::Char('x'), "character `x`"),
-            (Content::String("owned".to_owned()), "string \"owned\""),
+            (
+                Content::String("owned".to_owned().into_boxed_str()),
+                "string \"owned\"",
+            ),
             (Content::Str("borrowed"), "string \"borrowed\""),
-            (Content::ByteBuf(vec![1, 2]), "byte array"),
+            (Content::ByteBuf(vec![1, 2].into_boxed_slice()), "byte array"),
             (Content::Bytes(b"ab"), "byte array"),
             (Content::None, "Option value"),
             (Content::Some(Box::new(Content::U8(1))), "Option value"),
             (Content::Unit, "unit value"),
             (Content::Newtype(Box::new(Content::U8(1))), "newtype struct"),
-            (Content::Seq(vec![]), "sequence"),
-            (Content::Map(vec![]), "map"),
+            (Content::Seq(vec![].into_boxed_slice()), "sequence"),
+            (Content::Map(vec![].into_boxed_slice()), "map"),
         ];
 
         for (content, expected_substr) in non_bool_cases {
@@ -884,7 +906,7 @@ mod tests {
         ));
         assert!(matches!(
             visitor().visit_i128::<ValueError>(-5),
-            Ok(Content::I128(-5))
+            Ok(Content::I128(v)) if *v == -5
         ));
         assert!(matches!(visitor().visit_u8::<ValueError>(1), Ok(Content::U8(1))));
         assert!(matches!(
@@ -901,7 +923,7 @@ mod tests {
         ));
         assert!(matches!(
             visitor().visit_u128::<ValueError>(5),
-            Ok(Content::U128(5))
+            Ok(Content::U128(v)) if *v == 5
         ));
         assert!(
             matches!(visitor().visit_f32::<ValueError>(1.25), Ok(Content::F32(v)) if (v - 1.25).abs() < f32::EPSILON)
@@ -913,21 +935,23 @@ mod tests {
             visitor().visit_char::<ValueError>('z'),
             Ok(Content::Char('z'))
         ));
-        assert!(matches!(visitor().visit_str::<ValueError>("hi"), Ok(Content::String(s)) if s == "hi"));
+        assert!(matches!(visitor().visit_str::<ValueError>("hi"), Ok(Content::String(s)) if &*s == "hi"));
         assert!(matches!(
             visitor().visit_borrowed_str::<ValueError>("hi"),
             Ok(Content::Str("hi"))
         ));
         assert!(
-            matches!(visitor().visit_string::<ValueError>("hi".to_owned()), Ok(Content::String(s)) if s == "hi")
+            matches!(visitor().visit_string::<ValueError>("hi".to_owned()), Ok(Content::String(s)) if &*s == "hi")
         );
-        assert!(matches!(visitor().visit_bytes::<ValueError>(b"ok"), Ok(Content::ByteBuf(b)) if b == b"ok"));
+        assert!(
+            matches!(visitor().visit_bytes::<ValueError>(b"ok"), Ok(Content::ByteBuf(b)) if &*b == b"ok")
+        );
         assert!(matches!(
             visitor().visit_borrowed_bytes::<ValueError>(b"ok"),
             Ok(Content::Bytes(b"ok"))
         ));
         assert!(
-            matches!(visitor().visit_byte_buf::<ValueError>(vec![9]), Ok(Content::ByteBuf(b)) if b == [9])
+            matches!(visitor().visit_byte_buf::<ValueError>(vec![9]), Ok(Content::ByteBuf(b)) if *b == [9])
         );
         assert!(matches!(visitor().visit_unit::<ValueError>(), Ok(Content::Unit)));
         assert!(matches!(visitor().visit_none::<ValueError>(), Ok(Content::None)));
@@ -1010,7 +1034,10 @@ mod tests {
             -64
         );
         assert_eq!(
-            i128::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(-128))).unwrap(),
+            i128::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
+                -128
+            ))))
+            .unwrap(),
             -128
         );
         assert_eq!(
@@ -1030,7 +1057,10 @@ mod tests {
             64
         );
         assert_eq!(
-            u128::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(128))).unwrap(),
+            u128::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(Box::new(
+                128
+            ))))
+            .unwrap(),
             128
         );
         let _ = i32::deserialize(ContentDeserializer::<ValueError>::new(Content::Str("nope"))).unwrap_err();
@@ -1068,7 +1098,7 @@ mod tests {
         );
         assert_eq!(
             char::deserialize(ContentDeserializer::<ValueError>::new(Content::String(
-                "b".to_owned()
+                "b".to_owned().into_boxed_str()
             )))
             .unwrap(),
             'b'
@@ -1086,14 +1116,14 @@ mod tests {
         );
         assert_eq!(
             String::deserialize(ContentDeserializer::<ValueError>::new(Content::String(
-                "o".to_owned()
+                "o".to_owned().into_boxed_str()
             )))
             .unwrap(),
             "o"
         );
         assert_eq!(
             String::deserialize(ContentDeserializer::<ValueError>::new(Content::ByteBuf(
-                b"bb".to_vec()
+                b"bb".to_vec().into_boxed_slice()
             )))
             .unwrap(),
             "bb"
@@ -1106,7 +1136,7 @@ mod tests {
 
         // Bytes & ByteBuf
         assert_eq!(
-            ContentDeserializer::<ValueError>::new(Content::String("ab".to_owned()))
+            ContentDeserializer::<ValueError>::new(Content::String("ab".to_owned().into_boxed_str()))
                 .deserialize_bytes(BytesVisitor)
                 .unwrap(),
             b"ab"
@@ -1118,7 +1148,7 @@ mod tests {
             b"cd"
         );
         assert_eq!(
-            ContentDeserializer::<ValueError>::new(Content::ByteBuf(vec![1, 2]))
+            ContentDeserializer::<ValueError>::new(Content::ByteBuf(vec![1, 2].into_boxed_slice()))
                 .deserialize_bytes(BytesVisitor)
                 .unwrap(),
             vec![1, 2]
@@ -1130,9 +1160,11 @@ mod tests {
             vec![3, 4]
         );
         assert_eq!(
-            ContentDeserializer::<ValueError>::new(Content::Seq(vec![Content::U8(5), Content::U8(6)]))
-                .deserialize_byte_buf(BytesVisitor)
-                .unwrap(),
+            ContentDeserializer::<ValueError>::new(Content::Seq(
+                vec![Content::U8(5), Content::U8(6)].into_boxed_slice()
+            ))
+            .deserialize_byte_buf(BytesVisitor)
+            .unwrap(),
             vec![5, 6]
         );
         let _ = ContentDeserializer::<ValueError>::new(Content::Bool(true))
@@ -1162,15 +1194,24 @@ mod tests {
 
         // Unit & unit struct
         <()>::deserialize(ContentDeserializer::<ValueError>::new(Content::Unit)).unwrap();
-        <()>::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(vec![]))).unwrap();
+        <()>::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+            vec![].into_boxed_slice(),
+        )))
+        .unwrap();
         let _ = <()>::deserialize(ContentDeserializer::<ValueError>::new(Content::U8(1))).unwrap_err();
 
         assert_eq!(
-            UnitS::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(vec![]))).unwrap(),
+            UnitS::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+                vec![].into_boxed_slice()
+            )))
+            .unwrap(),
             UnitS
         );
         assert_eq!(
-            UnitS::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(vec![]))).unwrap(),
+            UnitS::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(
+                vec![].into_boxed_slice()
+            )))
+            .unwrap(),
             UnitS
         );
         assert_eq!(
@@ -1194,57 +1235,55 @@ mod tests {
 
         // Seq, tuple, tuple struct, map, struct
         assert_eq!(
-            Vec::<u8>::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(vec![
-                Content::U8(1)
-            ])))
+            Vec::<u8>::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(
+                vec![Content::U8(1)].into_boxed_slice()
+            )))
             .unwrap(),
             vec![1]
         );
         let _ = Vec::<u8>::deserialize(ContentDeserializer::<ValueError>::new(Content::Unit)).unwrap_err();
         assert_eq!(
-            <(u8, bool)>::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(vec![
-                Content::U8(2),
-                Content::Bool(true),
-            ])))
+            <(u8, bool)>::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(
+                vec![Content::U8(2), Content::Bool(true)].into_boxed_slice()
+            )))
             .unwrap(),
             (2, true)
         );
 
         assert_eq!(
-            Pair::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(vec![
-                Content::U8(3),
-                Content::U8(4),
-            ])))
+            Pair::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(
+                vec![Content::U8(3), Content::U8(4)].into_boxed_slice()
+            )))
             .unwrap(),
             Pair(3, 4)
         );
 
         assert_eq!(
-            std::collections::BTreeMap::<String, u8>::deserialize(ContentDeserializer::<ValueError>::new(
-                Content::Map(vec![(Content::Str("k"), Content::U8(5))])
-            ))
+            BTreeMap::<String, u8>::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+                vec![(Content::Str("k"), Content::U8(5))].into_boxed_slice()
+            )))
             .unwrap()
             .get("k"),
             Some(&5)
         );
-        let _ = std::collections::BTreeMap::<String, u8>::deserialize(
-            ContentDeserializer::<ValueError>::new(Content::Unit),
-        )
-        .unwrap_err();
+        let _ = BTreeMap::<String, u8>::deserialize(ContentDeserializer::<ValueError>::new(Content::Unit))
+            .unwrap_err();
 
         assert_eq!(
-            Pt::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(vec![
-                Content::U8(1),
-                Content::U8(2),
-            ])))
+            Pt::deserialize(ContentDeserializer::<ValueError>::new(Content::Seq(
+                vec![Content::U8(1), Content::U8(2)].into_boxed_slice()
+            )))
             .unwrap(),
             Pt { x: 1, y: 2 }
         );
         assert_eq!(
-            Pt::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(vec![
-                (Content::Str("x"), Content::U8(3)),
-                (Content::Str("y"), Content::U8(4)),
-            ])))
+            Pt::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+                vec![
+                    (Content::Str("x"), Content::U8(3)),
+                    (Content::Str("y"), Content::U8(4)),
+                ]
+                .into_boxed_slice()
+            )))
             .unwrap(),
             Pt { x: 3, y: 4 }
         );
@@ -1252,9 +1291,9 @@ mod tests {
 
         // Identifier (String, Str, ByteBuf, Bytes, U8, U64, invalid)
         for id_content in [
-            Content::String("alpha".to_owned()),
+            Content::String("alpha".to_owned().into_boxed_str()),
             Content::Str("alpha"),
-            Content::ByteBuf(b"alpha".to_vec()),
+            Content::ByteBuf(b"alpha".to_vec().into_boxed_slice()),
             Content::Bytes(b"alpha"),
             Content::U8(0),
             Content::U64(0),
@@ -1279,25 +1318,25 @@ mod tests {
             Content::U16(2),
             Content::U32(3),
             Content::U64(4),
-            Content::U128(5),
+            Content::U128(Box::new(5)),
             Content::I8(-1),
             Content::I16(-2),
             Content::I32(-3),
             Content::I64(-4),
-            Content::I128(-5),
+            Content::I128(Box::new(-5)),
             Content::F32(1.0),
             Content::F64(2.0),
             Content::Char('a'),
-            Content::String("s".to_owned()),
+            Content::String("s".to_owned().into_boxed_str()),
             Content::Str("b"),
-            Content::ByteBuf(vec![1]),
+            Content::ByteBuf(vec![1].into_boxed_slice()),
             Content::Bytes(&[2]),
             Content::Unit,
             Content::None,
             Content::Some(Box::new(Content::U8(1))),
             Content::Newtype(Box::new(Content::U8(2))),
-            Content::Seq(vec![Content::U8(3)]),
-            Content::Map(vec![(Content::Str("k"), Content::U8(4))]),
+            Content::Seq(vec![Content::U8(3)].into_boxed_slice()),
+            Content::Map(vec![(Content::Str("k"), Content::U8(4))].into_boxed_slice()),
         ] {
             let _ = Content::deserialize(ContentDeserializer::<ValueError>::new(sample)).unwrap();
         }
@@ -1319,45 +1358,50 @@ mod tests {
             Sample::Unit
         );
         assert_eq!(
-            Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(vec![(
-                Content::Str("Struct"),
-                Content::Seq(vec![Content::U8(7)]),
-            )])))
+            Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+                vec![(
+                    Content::Str("Struct"),
+                    Content::Seq(vec![Content::U8(7)].into_boxed_slice()),
+                )]
+                .into_boxed_slice()
+            )))
             .unwrap(),
             Sample::Struct { a: 7 }
         );
 
         // deserialize_enum errors: empty map, multi-key map, non-string/non-map
-        let _ =
-            Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(vec![]))).unwrap_err();
-        let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(vec![
-            (Content::Str("Unit"), Content::Unit),
-            (Content::Str("Newtype"), Content::U8(1)),
-        ])))
+        let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+            vec![].into_boxed_slice(),
+        )))
+        .unwrap_err();
+        let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+            vec![
+                (Content::Str("Unit"), Content::Unit),
+                (Content::Str("Newtype"), Content::U8(1)),
+            ]
+            .into_boxed_slice(),
+        )))
         .unwrap_err();
         let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::U8(1))).unwrap_err();
 
         // VariantDeserializer error arms
-        let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(vec![(
-            Content::Str("Unit"),
-            Content::U8(1),
-        )])))
+        let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+            vec![(Content::Str("Unit"), Content::U8(1))].into_boxed_slice(),
+        )))
         .unwrap_err();
         let _ =
             Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Str("Newtype"))).unwrap_err();
         let _ =
             Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Str("Tuple"))).unwrap_err();
-        let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(vec![(
-            Content::Str("Tuple"),
-            Content::U8(1),
-        )])))
+        let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+            vec![(Content::Str("Tuple"), Content::U8(1))].into_boxed_slice(),
+        )))
         .unwrap_err();
         let _ =
             Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Str("Struct"))).unwrap_err();
-        let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(vec![(
-            Content::Str("Struct"),
-            Content::U8(1),
-        )])))
+        let _ = Sample::deserialize(ContentDeserializer::<ValueError>::new(Content::Map(
+            vec![(Content::Str("Struct"), Content::U8(1))].into_boxed_slice(),
+        )))
         .unwrap_err();
     }
 }

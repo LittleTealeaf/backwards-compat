@@ -129,6 +129,14 @@ pub enum ExplicitNext {
     Type(Box<Type>, proc_macro2::Span),
 }
 
+/// Represents the conversion mode for `#[serializable...]` on a version entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SerializableMode {
+    Infallible,
+    With(syn::ExprPath),
+    TryWith(syn::ExprPath),
+}
+
 /// Represents a single version entry inside the compat macro body.
 #[derive(Debug, Clone)]
 #[allow(dead_code, reason = "fields used across macro parsing and validation")]
@@ -146,6 +154,7 @@ pub struct VersionEntry {
     pub is_serialize: bool,
     pub is_alias: bool,
     pub serialize_with_fn: Option<syn::ExprPath>,
+    pub serializable: Option<SerializableMode>,
     pub with_fn: Option<syn::ExprPath>,
     pub explicit_next: Option<ExplicitNext>,
 }
@@ -163,7 +172,9 @@ pub struct BackwardsCompatArgs {
 impl Parse for BackwardsCompatArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut tag_field = "version".to_owned();
+        let mut tag_field_span = None;
         let mut content_field = None;
+        let mut content_field_span = None;
         let mut dump = false;
         let mut versions = Vec::new();
 
@@ -172,31 +183,37 @@ impl Parse for BackwardsCompatArgs {
             let ident_str = ident.to_string();
 
             if ident_str == "tag" {
-                if input.peek(Token![=]) {
+                let s: syn::LitStr = if input.peek(Token![=]) {
                     input.parse::<Token![=]>()?;
-                    let s: syn::LitStr = input.parse()?;
-                    tag_field = s.value();
+                    input.parse()?
                 } else if input.peek(syn::token::Paren) {
                     let inner;
                     syn::parenthesized!(inner in input);
-                    let s: syn::LitStr = inner.parse()?;
-                    tag_field = s.value();
+                    inner.parse()?
                 } else {
                     return Err(syn::Error::new(ident.span(), "expected `=` or `()` for tag"));
+                };
+                if s.value().is_empty() {
+                    return Err(syn::Error::new(s.span(), "tag field name cannot be empty"));
                 }
+                tag_field_span = Some(s.span());
+                tag_field = s.value();
             } else if ident_str == "content" {
-                if input.peek(Token![=]) {
+                let s: syn::LitStr = if input.peek(Token![=]) {
                     input.parse::<Token![=]>()?;
-                    let s: syn::LitStr = input.parse()?;
-                    content_field = Some(s.value());
+                    input.parse()?
                 } else if input.peek(syn::token::Paren) {
                     let inner;
                     syn::parenthesized!(inner in input);
-                    let s: syn::LitStr = inner.parse()?;
-                    content_field = Some(s.value());
+                    inner.parse()?
                 } else {
                     return Err(syn::Error::new(ident.span(), "expected `=` or `()` for content"));
+                };
+                if s.value().is_empty() {
+                    return Err(syn::Error::new(s.span(), "content field name cannot be empty"));
                 }
+                content_field_span = Some(s.span());
+                content_field = Some(s.value());
             } else if ident_str == "version" {
                 return Err(syn::Error::new(
                     ident.span(),
@@ -239,6 +256,8 @@ impl Parse for BackwardsCompatArgs {
                     let mut is_serialize = false;
                     let mut serialize_attr_span = None;
                     let mut serialize_with_fn = None;
+                    let mut serializable: Option<SerializableMode> = None;
+                    let mut serializable_attr_span = None;
                     let mut with_fn = None;
                     let mut cfgs = Vec::new();
 
@@ -302,6 +321,58 @@ impl Parse for BackwardsCompatArgs {
                                     ));
                                 }
                             }
+                        } else if attr.path().is_ident("serializable") {
+                            if serializable.is_some() {
+                                return Err(syn::Error::new_spanned(
+                                    attr,
+                                    "duplicate `#[serializable]` attribute on version entry",
+                                ));
+                            }
+                            match &attr.meta {
+                                syn::Meta::Path(_) => {
+                                    serializable = Some(SerializableMode::Infallible);
+                                    serializable_attr_span = Some(attr.span());
+                                }
+                                syn::Meta::List(_) => {
+                                    let mode = attr.parse_args_with(|args: ParseStream| {
+                                        let kw: Ident = args.parse()?;
+                                        if kw == "with" {
+                                            args.parse::<Token![=]>()?;
+                                            let fn_path: syn::ExprPath = args.parse()?;
+                                            if !args.is_empty() {
+                                                return Err(syn::Error::new(
+                                                    args.span(),
+                                                    "unexpected trailing tokens in `#[serializable(with = ...)]`",
+                                                ));
+                                            }
+                                            Ok(SerializableMode::With(fn_path))
+                                        } else if kw == "try_with" {
+                                            args.parse::<Token![=]>()?;
+                                            let fn_path: syn::ExprPath = args.parse()?;
+                                            if !args.is_empty() {
+                                                return Err(syn::Error::new(
+                                                    args.span(),
+                                                    "unexpected trailing tokens in `#[serializable(try_with = ...)]`",
+                                                ));
+                                            }
+                                            Ok(SerializableMode::TryWith(fn_path))
+                                        } else {
+                                            Err(syn::Error::new(
+                                                kw.span(),
+                                                "expected `with = <fn_path>` or `try_with = <fn_path>` inside `#[serializable(...)]`",
+                                            ))
+                                        }
+                                    })?;
+                                    serializable = Some(mode);
+                                    serializable_attr_span = Some(attr.span());
+                                }
+                                syn::Meta::NameValue(_) => {
+                                    return Err(syn::Error::new_spanned(
+                                        attr,
+                                        "expected `#[serializable]`, `#[serializable(with = fn_path)]`, or `#[serializable(try_with = fn_path)]`",
+                                    ));
+                                }
+                            }
                         } else if attr.path().is_ident("with") {
                             if with_fn.is_some() {
                                 return Err(syn::Error::new_spanned(
@@ -332,7 +403,7 @@ impl Parse for BackwardsCompatArgs {
                             return Err(syn::Error::new_spanned(
                                 &attr,
                                 format!(
-                                    "unsupported attribute `{}` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[fallible]`, and `#[with(...)]` are supported",
+                                    "unsupported attribute `{}` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported",
                                     attr.path().to_token_stream()
                                 ),
                             ));
@@ -358,6 +429,14 @@ impl Parse for BackwardsCompatArgs {
                         return Err(syn::Error::new(
                             serialize_attr_span.unwrap_or(*untagged_span),
                             "unversioned `_` cannot be marked `#[serialize]`",
+                        ));
+                    }
+                    if serializable.is_some()
+                        && let Some((_, untagged_span)) = tags.iter().find(|(t, _)| t.is_untagged())
+                    {
+                        return Err(syn::Error::new(
+                            serializable_attr_span.unwrap_or(*untagged_span),
+                            "unversioned `_` cannot be marked `#[serializable]`",
                         ));
                     }
 
@@ -404,6 +483,7 @@ impl Parse for BackwardsCompatArgs {
                             is_serialize: idx == 0 && is_serialize,
                             is_alias: idx > 0,
                             serialize_with_fn: if idx == 0 { serialize_with_fn.take() } else { None },
+                            serializable: if idx == 0 { serializable.take() } else { None },
                             with_fn: with_fn.clone(),
                             explicit_next: explicit_next.clone(),
                         });
@@ -419,6 +499,16 @@ impl Parse for BackwardsCompatArgs {
             if input.peek(Token![,]) {
                 input.parse::<Token![,]>()?;
             }
+        }
+
+        if content_field.as_deref() == Some(tag_field.as_str()) {
+            let span = content_field_span
+                .or(tag_field_span)
+                .unwrap_or_else(proc_macro2::Span::call_site);
+            return Err(syn::Error::new(
+                span,
+                format!("tag and content field names cannot be the same (`{tag_field}`)"),
+            ));
         }
 
         Ok(Self {
@@ -437,6 +527,28 @@ impl BackwardsCompatArgs {
         vis: syn::Visibility,
         generics: syn::Generics,
     ) -> syn::Result<BackwardsCompatInput> {
+        if self.tag_field.is_empty() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "tag field name cannot be empty",
+            ));
+        }
+        if self.content_field.as_deref() == Some("") {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "content field name cannot be empty",
+            ));
+        }
+        if self.content_field.as_deref() == Some(self.tag_field.as_str()) {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "tag and content field names cannot be the same (`{}`)",
+                    self.tag_field
+                ),
+            ));
+        }
+
         let mut versions = self.versions;
         for entry in &mut versions {
             if let syn::Type::Path(ref tp) = entry.ty
@@ -1083,7 +1195,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err_typo.to_string(),
-            "unsupported attribute `cgf` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[fallible]`, and `#[with(...)]` are supported"
+            "unsupported attribute `cgf` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported"
         );
 
         let err_serde = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
@@ -1095,7 +1207,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err_serde.to_string(),
-            "unsupported attribute `serde` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[fallible]`, and `#[with(...)]` are supported"
+            "unsupported attribute `serde` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported"
         );
 
         let err_path = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
@@ -1108,7 +1220,7 @@ mod tests {
         assert_eq!(
             err_path.to_string(),
             format!(
-                "unsupported attribute `{}` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[fallible]`, and `#[with(...)]` are supported",
+                "unsupported attribute `{}` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported",
                 quote::quote!(foo::bar)
             )
         );
@@ -1820,5 +1932,135 @@ mod tests {
             versions(1: V1 =>)
         })
         .unwrap_err();
+    }
+
+    #[test]
+    fn test_parse_empty_and_colliding_tag_content_rejected() {
+        for input in [
+            quote::quote!(tag = "", versions(1: V1)),
+            quote::quote!(tag(""), versions(1: V1)),
+        ] {
+            let err = syn::parse2::<BackwardsCompatArgs>(input).unwrap_err();
+            assert_eq!(err.to_string(), "tag field name cannot be empty");
+        }
+
+        for input in [
+            quote::quote!(content = "", versions(1: V1)),
+            quote::quote!(content(""), versions(1: V1)),
+        ] {
+            let err = syn::parse2::<BackwardsCompatArgs>(input).unwrap_err();
+            assert_eq!(err.to_string(), "content field name cannot be empty");
+        }
+
+        for input in [
+            quote::quote!(tag = "v", content = "v", versions(1: V1)),
+            quote::quote!(content = "version", versions(1: V1)),
+        ] {
+            let err = syn::parse2::<BackwardsCompatArgs>(input).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("tag and content field names cannot be the same")
+            );
+        }
+
+        // into_input also catches tag == content (e.g. field-level defaulted content = "data")
+        let mut field_like: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            tag = "data",
+            versions(1: V1)
+        })
+        .unwrap();
+        field_like.content_field = Some("data".to_owned());
+        let err = field_like
+            .into_input(
+                syn::parse_quote!(u32),
+                syn::Visibility::Inherited,
+                syn::Generics::default(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "tag and content field names cannot be the same (`data`)"
+        );
+    }
+
+    #[test]
+    fn test_parse_and_validate_serializable_attr() {
+        let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            versions = [
+                #[serializable] 1 | "v1": V1 => 2,
+                #[serializable(with = my_mod::to_v2)] 2: V2 => 3,
+                #[serializable(try_with = my_mod::try_to_v3)] #[with(my_mod::up_v3)] 3: V3 => 4,
+                #[current] #[serializable] 4: Self,
+            ]
+        })
+        .unwrap();
+        assert_eq!(args.versions[0].serializable, Some(SerializableMode::Infallible));
+        assert_eq!(args.versions[1].serializable, None); // pipe alias does not inherit
+        assert_eq!(
+            args.versions[2].serializable,
+            Some(SerializableMode::With(syn::parse_quote!(my_mod::to_v2)))
+        );
+        assert_eq!(
+            args.versions[3].serializable,
+            Some(SerializableMode::TryWith(syn::parse_quote!(my_mod::try_to_v3)))
+        );
+        assert_eq!(args.versions[4].serializable, Some(SerializableMode::Infallible));
+
+        // Duplicate #[serializable]
+        let err_dup = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions = [#[serializable] #[serializable] 1: V1]
+        })
+        .unwrap_err();
+        assert_eq!(
+            err_dup.to_string(),
+            "duplicate `#[serializable]` attribute on version entry"
+        );
+
+        // #[serializable] on _
+        let err_untagged = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions = [#[serializable] _: V0, 1: V1]
+        })
+        .unwrap_err();
+        assert_eq!(
+            err_untagged.to_string(),
+            "unversioned `_` cannot be marked `#[serializable]`"
+        );
+
+        // Invalid #[serializable(...)] forms
+        let err_kw = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions = [#[serializable(foo = bar)] 1: V1]
+        })
+        .unwrap_err();
+        assert_eq!(
+            err_kw.to_string(),
+            "expected `with = <fn_path>` or `try_with = <fn_path>` inside `#[serializable(...)]`"
+        );
+
+        let err_trailing = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions = [#[serializable(with = my_fn extra)] 1: V1]
+        })
+        .unwrap_err();
+        assert_eq!(
+            err_trailing.to_string(),
+            "unexpected trailing tokens in `#[serializable(with = ...)]`"
+        );
+
+        let err_try_trailing = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions = [#[serializable(try_with = my_fn extra)] 1: V1]
+        })
+        .unwrap_err();
+        assert_eq!(
+            err_try_trailing.to_string(),
+            "unexpected trailing tokens in `#[serializable(try_with = ...)]`"
+        );
+
+        let err_nv = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
+            versions = [#[serializable = "v1"] 1: V1]
+        })
+        .unwrap_err();
+        assert_eq!(
+            err_nv.to_string(),
+            "expected `#[serializable]`, `#[serializable(with = fn_path)]`, or `#[serializable(try_with = fn_path)]`"
+        );
     }
 }

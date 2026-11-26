@@ -1,8 +1,13 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![doc = include_str!("../README.md")]
+
+extern crate alloc;
 
 pub use backwards_compat_derive::backwards_compat;
 
 mod de;
+#[cfg(feature = "schemars")]
+mod schema;
 mod ser;
 
 /// Represents a schema version key for models that mix integer and string version tags.
@@ -51,6 +56,12 @@ pub trait BackwardsCompat: Sized {
 
     /// Whether unversioned (`_`) payloads without a version tag field are accepted.
     const ACCEPTS_UNTAGGED: bool = false;
+
+    /// The serialized field name used for the version tag.
+    const TAG_FIELD: &'static str = "version";
+
+    /// The serialized field name used for the content payload when adjacently tagged, or `None` for internal tagging.
+    const CONTENT_FIELD: Option<&'static str> = None;
 }
 
 /// Extension of [`BackwardsCompat`] supporting deserialization with source-version tracking.
@@ -59,6 +70,42 @@ pub trait BackwardsCompatDeserialize<'de>: BackwardsCompat {
     fn deserialize_migrated<D>(deserializer: D) -> Result<Migrated<Self>, D::Error>
     where
         D: serde::Deserializer<'de>;
+}
+
+/// Extension of [`BackwardsCompat`] supporting runtime selection of the output schema version.
+pub trait BackwardsCompatSerialize: BackwardsCompat {
+    /// All schema versions that this type can serialize to at runtime.
+    const SERIALIZABLE_VERSIONS: &'static [Self::Version];
+
+    /// Serializes `self` using the schema and wire format of `version`.
+    fn serialize_as_version<S>(&self, version: Self::Version, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer;
+
+    /// Returns a `serde::Serialize` adapter that serializes `self` as `version`.
+    #[inline]
+    fn as_version(&self, version: Self::Version) -> SerializeAsVersion<'_, Self> {
+        SerializeAsVersion { value: self, version }
+    }
+}
+
+/// Wrapper that serializes a [`BackwardsCompatSerialize`] value using a chosen runtime schema version.
+#[derive(Debug, Clone, Copy)]
+pub struct SerializeAsVersion<'a, T: BackwardsCompat> {
+    /// Reference to the domain value being serialized.
+    pub value: &'a T,
+    /// Target schema version to emit.
+    pub version: T::Version,
+}
+
+impl<T: BackwardsCompatSerialize> serde::Serialize for SerializeAsVersion<'_, T> {
+    #[inline]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.value.serialize_as_version(self.version, serializer)
+    }
 }
 
 /// Wrapper returned when deserializing a [`BackwardsCompat`] type together with its source version.
@@ -78,10 +125,54 @@ impl<T: BackwardsCompat> Migrated<T> {
         self.source_version != Some(T::CURRENT_VERSION)
     }
 
+    /// Returns `true` if the payload was decoded from an unversioned (`_`) schema without a tag field.
+    #[must_use]
+    pub const fn is_untagged(&self) -> bool {
+        self.source_version.is_none()
+    }
+
+    /// Returns the source schema version found in the payload, or `None` if untagged.
+    #[must_use]
+    pub const fn source_version(&self) -> Option<T::Version> {
+        self.source_version
+    }
+
+    /// Transforms the inner value while preserving `source_version`.
+    #[must_use]
+    pub fn map<U: BackwardsCompat<Version = T::Version>, F: FnOnce(T) -> U>(self, f: F) -> Migrated<U> {
+        Migrated {
+            value: f(self.value),
+            source_version: self.source_version,
+        }
+    }
+
     /// Consumes this wrapper and returns the inner domain value.
     #[must_use]
     pub fn into_inner(self) -> T {
         self.value
+    }
+}
+
+impl<T: BackwardsCompat> core::ops::Deref for Migrated<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T: BackwardsCompat> core::ops::DerefMut for Migrated<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
+impl<T: BackwardsCompat> AsRef<T> for Migrated<T> {
+    #[inline]
+    fn as_ref(&self) -> &T {
+        &self.value
     }
 }
 
@@ -96,12 +187,22 @@ impl<'de, T: BackwardsCompatDeserialize<'de>> serde::Deserialize<'de> for Migrat
 
 #[doc(hidden)]
 pub mod __private {
+    pub use alloc::{borrow::ToOwned, boxed::Box, format, string::String, vec::Vec};
+
     pub use crate::de::{
         AdjacentKey, AdjacentKeyResult, ChainedMapAccess, Content, ContentDeserializer,
         ContentRefDeserializer, InternalKey, InternalKeyResult, OptionForwardingDeserializer,
-        RemainingMapDeserializer, TagValue, drain_map, read_adjacent_content, unknown_version_error,
+        RemainingMapDeserializer, TagValue, UntaggedMultiDispatch, UntaggedMultiVisitor,
+        UntaggedSingleDispatch, UntaggedSingleVisitor, cautious_size_hint, drain_map, read_adjacent_content,
+        unknown_version_error,
+    };
+    #[cfg(feature = "schemars")]
+    pub use crate::schema::{
+        TagSchemaValue, schema_adjacently_tagged, schema_internally_tagged, schema_one_of,
     };
     pub use crate::ser::serialize_internally_tagged;
+    #[cfg(feature = "schemars")]
+    pub use schemars;
 
     pub struct WireConvert<'b, T: ?Sized, W>(pub &'b T, pub ::core::marker::PhantomData<fn() -> W>);
 
@@ -193,6 +294,7 @@ pub mod __private {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString as _;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct MockModel(u64);
@@ -472,6 +574,7 @@ mod tests {
         assert_eq!(wire, Wire(8));
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_version_key_hash_and_eq_consistency() {
         let mut set = std::collections::HashSet::new();
@@ -480,5 +583,30 @@ mod tests {
         assert_eq!(set.len(), 2);
         assert!(set.contains(&VersionKey::Int(1)));
         assert!(set.contains(&VersionKey::Str("1")));
+    }
+
+    #[test]
+    fn test_migrated_ergonomics_deref_as_ref_and_map() {
+        let current = Migrated {
+            value: MockModel(20),
+            source_version: Some(2),
+        };
+        assert!(!current.is_untagged());
+        assert_eq!(current.source_version(), Some(2));
+        assert_eq!(current.0, 20);
+        assert_eq!(current.as_ref(), &MockModel(20));
+
+        let mut untagged = Migrated {
+            value: MockModel(0),
+            source_version: None,
+        };
+        assert!(untagged.is_untagged());
+        assert_eq!(untagged.source_version(), None);
+        untagged.0 = 42;
+        assert_eq!(*untagged, MockModel(42));
+
+        let mapped = untagged.map(|m| MockModel(m.0 + 1));
+        assert!(mapped.is_untagged());
+        assert_eq!(mapped.into_inner(), MockModel(43));
     }
 }
