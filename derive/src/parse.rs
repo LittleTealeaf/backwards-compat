@@ -165,6 +165,7 @@ pub struct VersionEntry {
 pub struct BackwardsCompatArgs {
     pub tag_field: String,
     pub content_field: Option<String>,
+    pub external: bool,
     pub dump: bool,
     pub versions: Vec<VersionEntry>,
 }
@@ -175,6 +176,8 @@ impl Parse for BackwardsCompatArgs {
         let mut tag_field_span = None;
         let mut content_field = None;
         let mut content_field_span = None;
+        let mut external = false;
+        let mut external_span = None;
         let mut dump = false;
         let mut versions = Vec::new();
 
@@ -229,6 +232,18 @@ impl Parse for BackwardsCompatArgs {
                     ident.span(),
                     "expected `via = <Type>` or `via(<Type>)`",
                 ));
+            } else if ident_str == "external" {
+                if input.peek(Token![=]) || input.peek(syn::token::Paren) {
+                    return Err(syn::Error::new(input.span(), "`external` does not take a value"));
+                }
+                if external {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "duplicate `external` attribute argument",
+                    ));
+                }
+                external = true;
+                external_span = Some(ident.span());
             } else if ident_str == "dump" {
                 dump = true;
             } else if ident_str == "versions" {
@@ -501,6 +516,20 @@ impl Parse for BackwardsCompatArgs {
             }
         }
 
+        if external && let Some(tag_span) = tag_field_span {
+            return Err(syn::Error::new(
+                external_span.unwrap_or(tag_span),
+                "cannot combine `external` with `tag = ...`",
+            ));
+        }
+
+        if external && let Some(content_span) = content_field_span {
+            return Err(syn::Error::new(
+                external_span.unwrap_or(content_span),
+                "cannot combine `external` with `content = ...`",
+            ));
+        }
+
         if content_field.as_deref() == Some(tag_field.as_str()) {
             let span = content_field_span
                 .or(tag_field_span)
@@ -514,6 +543,7 @@ impl Parse for BackwardsCompatArgs {
         Ok(Self {
             tag_field,
             content_field,
+            external,
             dump,
             versions,
         })
@@ -527,6 +557,12 @@ impl BackwardsCompatArgs {
         vis: syn::Visibility,
         generics: syn::Generics,
     ) -> syn::Result<BackwardsCompatInput> {
+        if self.external && self.content_field.is_some() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "cannot combine `external` with `content = ...`",
+            ));
+        }
         if self.tag_field.is_empty() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
@@ -627,6 +663,38 @@ impl BackwardsCompatArgs {
             }
         }
 
+        let mut first_int_span: Option<proc_macro2::Span> = None;
+        let mut first_str_span: Option<proc_macro2::Span> = None;
+        for entry in &versions {
+            if self.external && entry.tag.is_untagged() {
+                return Err(syn::Error::new(
+                    entry.tag_span,
+                    "unversioned `_` cannot be used with `external` tagging",
+                ));
+            }
+            match entry.tag {
+                VersionTag::Int(_) => {
+                    if first_str_span.is_some() {
+                        return Err(syn::Error::new(
+                            entry.tag_span,
+                            "cannot mix integer and string version tags in the same #[backwards_compat] type; use either all integer tags or all string tags",
+                        ));
+                    }
+                    first_int_span.get_or_insert(entry.tag_span);
+                }
+                VersionTag::String(_) => {
+                    if first_int_span.is_some() {
+                        return Err(syn::Error::new(
+                            entry.tag_span,
+                            "cannot mix integer and string version tags in the same #[backwards_compat] type; use either all integer tags or all string tags",
+                        ));
+                    }
+                    first_str_span.get_or_insert(entry.tag_span);
+                }
+                VersionTag::Untagged => {}
+            }
+        }
+
         for (i, entry) in versions.iter().enumerate() {
             if entry.tag.is_untagged() {
                 continue;
@@ -649,6 +717,7 @@ impl BackwardsCompatArgs {
             generics,
             tag_field: self.tag_field,
             content_field: self.content_field,
+            external: self.external,
             current_version,
             current_version_span,
             serialize_version,
@@ -669,6 +738,7 @@ pub struct BackwardsCompatInput {
     pub generics: syn::Generics,
     pub tag_field: String,
     pub content_field: Option<String>,
+    pub external: bool,
     pub current_version: VersionTag,
     pub current_version_span: proc_macro2::Span,
     pub serialize_version: VersionTag,
@@ -1319,10 +1389,10 @@ mod tests {
         assert!(VersionTag::Int(1).matches(&VersionTag::Int(1)));
         assert!(VersionTag::String("1".to_owned()).matches(&VersionTag::String("1".to_owned())));
 
-        // 1 | "1" is allowed because Int(1) != String("1")
+        // Homogeneous int pipe alias `1 | 10` succeeds
         let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
             versions = [
-                1 | "1": V1,
+                1 | 10: V1,
             ]
         })
         .unwrap();
@@ -1335,7 +1405,29 @@ mod tests {
             .unwrap();
         assert_eq!(compat_input.versions.len(), 2);
         assert_eq!(compat_input.versions[0].tag, VersionTag::Int(1));
-        assert_eq!(compat_input.versions[1].tag, VersionTag::String("1".to_owned()));
+        assert_eq!(compat_input.versions[1].tag, VersionTag::Int(10));
+
+        // Mixing int and str tags (either inline `1 | "1"` or across entries) is rejected
+        for mixed in [
+            quote::quote! { versions = [1 | "1": V1] },
+            quote::quote! { versions = [1: V1 => "2", "2": V2] },
+            quote::quote! { versions = ["v1": V1, 2: V2] },
+        ] {
+            let mixed_args: BackwardsCompatArgs = syn::parse2(mixed).unwrap();
+            let err_mixed = mixed_args
+                .into_input(
+                    syn::parse_quote!(TargetModel),
+                    syn::Visibility::Inherited,
+                    syn::Generics::default(),
+                )
+                .unwrap_err();
+            assert!(
+                err_mixed
+                    .to_string()
+                    .contains("cannot mix integer and string version tags"),
+                "unexpected mixed error: {err_mixed}"
+            );
+        }
 
         // Duplicate int tag 1 | 1 fails
         let dup_int: BackwardsCompatArgs = syn::parse2(quote::quote! {
@@ -1704,11 +1796,11 @@ mod tests {
                 _: LegacyB => 6,
                 #[cfg(test)]
                 #[with(my_mod::up)]
-                3 | "v3": V3 => Self,
+                3 | 30: V3 => Self,
                 #[serialize(with = my_mod::ser)]
-                5 | "5": V5 => 6,
+                5 | 50: V5 => 6,
                 #[current]
-                6 | "6": V6,
+                6 | 60: V6,
             ]
         })
         .unwrap();
@@ -1725,9 +1817,9 @@ mod tests {
         assert_eq!(compat_input.versions[0].tag, VersionTag::Untagged);
         assert_eq!(compat_input.versions[1].tag, VersionTag::Untagged);
 
-        // 3 | "v3" both inherit cfg, with_fn, and => Self
+        // 3 | 30 both inherit cfg, with_fn, and => Self
         assert_eq!(compat_input.versions[2].tag, VersionTag::Int(3));
-        assert_eq!(compat_input.versions[3].tag, VersionTag::String("v3".to_owned()));
+        assert_eq!(compat_input.versions[3].tag, VersionTag::Int(30));
         assert_eq!(compat_input.versions[2].cfgs.len(), 1);
         assert_eq!(compat_input.versions[3].cfgs.len(), 1);
         assert!(compat_input.versions[2].with_fn.is_some());
@@ -1741,14 +1833,14 @@ mod tests {
             Some(ExplicitNext::SelfTarget(_))
         ));
 
-        // #[serialize(with = ...)] applies only to first tag (5), not alias ("5")
+        // #[serialize(with = ...)] applies only to first tag (5), not alias (50)
         assert_eq!(compat_input.serialize_version, VersionTag::Int(5));
         assert!(compat_input.versions[4].is_serialize);
         assert!(compat_input.versions[4].serialize_with_fn.is_some());
         assert!(!compat_input.versions[5].is_serialize);
         assert!(compat_input.versions[5].serialize_with_fn.is_none());
 
-        // #[current] applies only to first tag (6), not alias ("6")
+        // #[current] applies only to first tag (6), not alias (60)
         assert_eq!(compat_input.current_version, VersionTag::Int(6));
         assert!(compat_input.versions[6].is_current);
         assert!(!compat_input.versions[7].is_current);
@@ -1756,11 +1848,11 @@ mod tests {
 
     #[test]
     fn test_default_current_version_prefers_primary_tag_over_pipe_alias() {
-        // When #[current] is omitted and last entry is `2 | "2": Self`, default to primary `Int(2)`
+        // When #[current] is omitted and last entry is `2 | 20: Self`, default to primary `Int(2)`
         let args1: BackwardsCompatArgs = syn::parse2(quote::quote! {
             versions(
                 1: V1,
-                2 | "2": Self,
+                2 | 20: Self,
             )
         })
         .unwrap();
@@ -1830,7 +1922,7 @@ mod tests {
                 2: V2 => path::to::V3,
                 3: V3 => V4<'a, T>,
                 4: V4 => TargetModel,
-                5 | "v5": V5 => TargetModel,
+                5 | 50: V5 => TargetModel,
             )
         })
         .unwrap();
@@ -1889,27 +1981,34 @@ mod tests {
         let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
             versions(
                 1: V1 => 2,
-                "v1": V1Str => "v2",
                 3: V3 => Self,
                 4: V4,
             )
         })
         .unwrap();
 
-        assert_eq!(args.versions.len(), 4);
+        assert_eq!(args.versions.len(), 3);
         assert!(matches!(
             args.versions[0].explicit_next,
             Some(ExplicitNext::Tag(VersionTag::Int(2), _))
         ));
         assert!(matches!(
             args.versions[1].explicit_next,
-            Some(ExplicitNext::Tag(VersionTag::String(ref s), _)) if s == "v2"
-        ));
-        assert!(matches!(
-            args.versions[2].explicit_next,
             Some(ExplicitNext::SelfTarget(_))
         ));
-        assert!(args.versions[3].explicit_next.is_none());
+        assert!(args.versions[2].explicit_next.is_none());
+
+        let str_args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            versions(
+                "v1": V1Str => "v2",
+                "v2": V2Str,
+            )
+        })
+        .unwrap();
+        assert!(matches!(
+            str_args.versions[0].explicit_next,
+            Some(ExplicitNext::Tag(VersionTag::String(ref s), _)) if s == "v2"
+        ));
     }
 
     #[test]
@@ -1987,7 +2086,7 @@ mod tests {
     fn test_parse_and_validate_serializable_attr() {
         let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
             versions = [
-                #[serializable] 1 | "v1": V1 => 2,
+                #[serializable] 1 | 10: V1 => 2,
                 #[serializable(with = my_mod::to_v2)] 2: V2 => 3,
                 #[serializable(try_with = my_mod::try_to_v3)] #[with(my_mod::up_v3)] 3: V3 => 4,
                 #[current] #[serializable] 4: Self,
@@ -2061,6 +2160,78 @@ mod tests {
         assert_eq!(
             err_nv.to_string(),
             "expected `#[serializable]`, `#[serializable(with = fn_path)]`, or `#[serializable(try_with = fn_path)]`"
+        );
+    }
+
+    #[test]
+    fn test_parse_and_validate_external_flag() {
+        let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            external,
+            versions(1: V1, 2: Self)
+        })
+        .unwrap();
+        assert!(args.external);
+        let input = args
+            .into_input(
+                syn::parse_quote!(TargetModel),
+                syn::Visibility::Inherited,
+                syn::Generics::default(),
+            )
+            .unwrap();
+        assert!(input.external);
+
+        for (tokens, expected_msg) in [
+            (
+                quote::quote!(external = true, versions(1: V1)),
+                "`external` does not take a value",
+            ),
+            (
+                quote::quote!(external(true), versions(1: V1)),
+                "`external` does not take a value",
+            ),
+            (
+                quote::quote!(external, external, versions(1: V1)),
+                "duplicate `external` attribute argument",
+            ),
+            (
+                quote::quote!(external, tag = "v", versions(1: V1)),
+                "cannot combine `external` with `tag = ...`",
+            ),
+            (
+                quote::quote!(tag = "v", external, versions(1: V1)),
+                "cannot combine `external` with `tag = ...`",
+            ),
+            (
+                quote::quote!(external, content = "d", versions(1: V1)),
+                "cannot combine `external` with `content = ...`",
+            ),
+            (
+                quote::quote!(content = "d", external, versions(1: V1)),
+                "cannot combine `external` with `content = ...`",
+            ),
+        ] {
+            let err = syn::parse2::<BackwardsCompatArgs>(tokens).unwrap_err();
+            assert!(
+                err.to_string().contains(expected_msg),
+                "expected `{expected_msg}`, got `{err}`"
+            );
+        }
+
+        let untagged_args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+            external,
+            versions(_: V0 => 1, 1: V1)
+        })
+        .unwrap();
+        let err_untagged = untagged_args
+            .into_input(
+                syn::parse_quote!(TargetModel),
+                syn::Visibility::Inherited,
+                syn::Generics::default(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err_untagged.to_string(),
+            "unversioned `_` cannot be used with `external` tagging"
         );
     }
 }

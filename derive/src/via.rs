@@ -192,7 +192,7 @@ impl Parse for ViaArgs {
                     }
                     dump = true;
                 }
-                "tag" | "content" | "versions" => {
+                "tag" | "content" | "versions" | "external" => {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!("`{ident}` cannot be combined with `via` in #[backwards_compat(...)]"),
@@ -386,8 +386,7 @@ pub fn generate_via(
                 const SERIALIZE_VERSION: Self::Version = <#proxy_ty as ::backwards_compat::BackwardsCompat>::SERIALIZE_VERSION;
                 const SUPPORTED_VERSIONS: &'static [Self::Version] = <#proxy_ty as ::backwards_compat::BackwardsCompat>::SUPPORTED_VERSIONS;
                 const ACCEPTS_UNTAGGED: bool = <#proxy_ty as ::backwards_compat::BackwardsCompat>::ACCEPTS_UNTAGGED;
-                const TAG_FIELD: &'static str = <#proxy_ty as ::backwards_compat::BackwardsCompat>::TAG_FIELD;
-                const CONTENT_FIELD: ::core::option::Option<&'static str> = <#proxy_ty as ::backwards_compat::BackwardsCompat>::CONTENT_FIELD;
+                const TAGGING: ::backwards_compat::Tagging = <#proxy_ty as ::backwards_compat::BackwardsCompat>::TAGGING;
             }
 
             impl #de_impl_generics ::backwards_compat::BackwardsCompatDeserialize<'__de> for #target_ty #de_where_clause {
@@ -612,6 +611,7 @@ mod tests {
         assert!(
             parse_err("via = Proxy, versions(1: Self)").contains("`versions` cannot be combined with `via`")
         );
+        assert!(parse_err("via = Proxy, external").contains("`external` cannot be combined with `via`"));
     }
 
     #[test]
@@ -822,8 +822,7 @@ mod tests {
         let rendered = render_via("via = Proxy, dump", "struct DumpDomain { val: u32 }");
         assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompat for DumpDomain"));
         assert!(rendered.contains("impl :: serde :: Serialize for DumpDomain"));
-        assert!(rendered.contains("const TAG_FIELD : & 'static str = < Proxy as :: backwards_compat :: BackwardsCompat > :: TAG_FIELD"));
-        assert!(rendered.contains("const CONTENT_FIELD : :: core :: option :: Option < & 'static str > = < Proxy as :: backwards_compat :: BackwardsCompat > :: CONTENT_FIELD"));
+        assert!(rendered.contains("const TAGGING : :: backwards_compat :: Tagging = < Proxy as :: backwards_compat :: BackwardsCompat > :: TAGGING"));
         assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompatSerialize for DumpDomain"));
         assert!(rendered.contains("serialize_as_version (& __proxy , __version , __serializer ,)"));
     }

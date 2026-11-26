@@ -10,39 +10,28 @@ mod de;
 mod schema;
 mod ser;
 
-/// Represents a schema version key for models that mix integer and string version tags.
+/// Describes the wire-level tagging representation used by a [`BackwardsCompat`] type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum VersionKey {
-    /// An integer version tag (e.g. `1`, `2`).
-    Int(u64),
-    /// A string version tag (e.g. `"1.0"`, `"v2"`).
-    Str(&'static str),
-}
-
-impl core::fmt::Display for VersionKey {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match *self {
-            Self::Int(n) => write!(f, "{n}"),
-            Self::Str(s) => f.write_str(s),
-        }
-    }
-}
-
-impl PartialEq<u64> for VersionKey {
-    fn eq(&self, other: &u64) -> bool {
-        matches!(*self, Self::Int(n) if n == *other)
-    }
-}
-
-impl PartialEq<&str> for VersionKey {
-    fn eq(&self, other: &&str) -> bool {
-        matches!(*self, Self::Str(s) if s == *other)
-    }
+pub enum Tagging {
+    /// Internally tagged: version tag is merged alongside payload fields.
+    Internal {
+        /// The serialized field name used for the version tag.
+        tag: &'static str,
+    },
+    /// Adjacently tagged: version tag and payload are sibling fields.
+    Adjacent {
+        /// The serialized field name used for the version tag.
+        tag: &'static str,
+        /// The serialized field name used for the content payload.
+        content: &'static str,
+    },
+    /// Externally tagged: version tag wraps the payload as a newtype enum variant.
+    External,
 }
 
 /// Metadata trait implemented for domain models annotated with `#[backwards_compat(...)]`.
 pub trait BackwardsCompat: Sized {
-    /// The type representing version identifiers (`u64`, `&'static str`, or [`VersionKey`]).
+    /// The type representing version identifiers (`u64` or `&'static str`).
     type Version: Copy + Eq + core::fmt::Debug + core::fmt::Display + 'static;
 
     /// The current active schema version.
@@ -57,11 +46,8 @@ pub trait BackwardsCompat: Sized {
     /// Whether unversioned (`_`) payloads without a version tag field are accepted.
     const ACCEPTS_UNTAGGED: bool = false;
 
-    /// The serialized field name used for the version tag.
-    const TAG_FIELD: &'static str = "version";
-
-    /// The serialized field name used for the content payload when adjacently tagged, or `None` for internal tagging.
-    const CONTENT_FIELD: Option<&'static str> = None;
+    /// The wire-level tagging strategy used by this type.
+    const TAGGING: Tagging = Tagging::Internal { tag: "version" };
 }
 
 /// Extension of [`BackwardsCompat`] supporting deserialization with source-version tracking.
@@ -191,14 +177,16 @@ pub mod __private {
 
     pub use crate::de::{
         AdjacentKey, AdjacentKeyResult, ChainedMapAccess, Content, ContentDeserializer,
-        ContentRefDeserializer, InternalKey, InternalKeyResult, OptionForwardingDeserializer,
-        RemainingMapDeserializer, TagValue, UntaggedMultiDispatch, UntaggedMultiVisitor,
-        UntaggedSingleDispatch, UntaggedSingleVisitor, cautious_size_hint, drain_map, read_adjacent_content,
-        unknown_version_error,
+        ContentRefDeserializer, IntTagOrContent, InternalKey, InternalKeyResult,
+        OptionForwardingDeserializer, RemainingMapDeserializer, StrTag, StrTagOrContent,
+        UntaggedMultiDispatch, UntaggedMultiVisitor, UntaggedSingleDispatch, UntaggedSingleVisitor,
+        cautious_size_hint, drain_map, read_adjacent_content, unknown_int_version_error,
+        unknown_str_version_error,
     };
     #[cfg(feature = "schemars")]
     pub use crate::schema::{
-        TagSchemaValue, schema_adjacently_tagged, schema_internally_tagged, schema_one_of,
+        TagSchemaValue, schema_adjacently_tagged, schema_externally_tagged, schema_internally_tagged,
+        schema_one_of,
     };
     pub use crate::ser::serialize_internally_tagged;
     #[cfg(feature = "schemars")]
@@ -294,7 +282,6 @@ pub mod __private {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString as _;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct MockModel(u64);
@@ -321,25 +308,6 @@ mod tests {
     }
 
     use serde::Deserialize as _;
-
-    #[test]
-    fn test_version_key_display_and_equality() {
-        let int_key = VersionKey::Int(42);
-        let str_key = VersionKey::Str("v1.2");
-
-        assert_eq!(int_key.to_string(), "42");
-        assert_eq!(str_key.to_string(), "v1.2");
-
-        // PartialEq<u64>
-        assert_eq!(int_key, 42);
-        assert_ne!(int_key, 7);
-        assert_ne!(VersionKey::Str("42"), 42);
-
-        // PartialEq<&str>
-        assert_eq!(str_key, "v1.2");
-        assert_ne!(str_key, "v2.0");
-        assert_ne!(VersionKey::Int(1), "1");
-    }
 
     #[test]
     fn test_migrated_was_migrated_and_into_inner() {
@@ -572,17 +540,6 @@ mod tests {
         let src = PanicOnCloneSource(7);
         let wire: Wire = WireConvert::<_, Wire>::new(&src).convert_wire();
         assert_eq!(wire, Wire(8));
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn test_version_key_hash_and_eq_consistency() {
-        let mut set = std::collections::HashSet::new();
-        set.insert(VersionKey::Int(1));
-        set.insert(VersionKey::Str("1"));
-        assert_eq!(set.len(), 2);
-        assert!(set.contains(&VersionKey::Int(1)));
-        assert!(set.contains(&VersionKey::Str("1")));
     }
 
     #[test]

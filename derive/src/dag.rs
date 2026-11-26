@@ -1125,7 +1125,7 @@ mod tests {
     fn test_dag_inline_pipe_aliases_resolve_identical_paths() {
         let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
             versions = [
-                1 | "1": V1 => 2,
+                1 | 10: V1 => 2,
                 2: V2,
             ]
         })
@@ -1141,7 +1141,7 @@ mod tests {
 
         assert_eq!(plan.paths.len(), 3);
         assert_eq!(plan.paths[0].tag, VersionTag::Int(1));
-        assert_eq!(plan.paths[1].tag, VersionTag::String("1".to_owned()));
+        assert_eq!(plan.paths[1].tag, VersionTag::Int(10));
         for path in [&plan.paths[0], &plan.paths[1]] {
             assert_eq!(path.steps.len(), 2);
             assert_eq!(path.steps[0].from_ty, v1);
@@ -1156,11 +1156,11 @@ mod tests {
         let v2: Type = parse_quote!(V2);
         let target: Type = parse_quote!(Target);
 
-        // Explicit wire type aliased on current version: `2 | "2": V2` -> 1 step `[V2 -> Target]` each
+        // Explicit wire type aliased on current version: `2 | 20: V2` -> 1 step `[V2 -> Target]` each
         let args1: BackwardsCompatArgs = syn::parse2(quote::quote! {
             versions = [
                 1: V1,
-                2 | "2": V2,
+                2 | 20: V2,
             ]
         })
         .unwrap();
@@ -1176,11 +1176,11 @@ mod tests {
             assert_eq!(path.steps[0].to_ty, target);
         }
 
-        // Shadow wire `Self` aliased on current version: `2 | "2": Self` -> 0 steps each
+        // Shadow wire `Self` aliased on current version: `2 | 20: Self` -> 0 steps each
         let args2: BackwardsCompatArgs = syn::parse2(quote::quote! {
             versions = [
                 1: V1,
-                2 | "2": Self,
+                2 | 20: Self,
             ]
         })
         .unwrap();
@@ -1563,7 +1563,7 @@ mod tests {
             quote::quote! {
                 versions = [
                     1: V1 => V2,
-                    2 | "2": V2,
+                    2 | 20: V2,
                     3: Self,
                 ]
             },
@@ -1856,12 +1856,12 @@ mod tests {
             vec![("V1".into(), "V2".into()), ("V2".into(), "Target".into())]
         );
 
-        // `_ | 2 | "2": V2 => V3` should resolve cleanly to `2: V2` without ambiguity
+        // `_ | 2 | 20: V2 => V3` should resolve cleanly to `2: V2` without ambiguity
         let plan2 = resolve_tokens(
             quote::quote! {
                 versions = [
                     1: V1 => V2,
-                    _ | 2 | "2": V2 => V3,
+                    _ | 2 | 20: V2 => V3,
                     3: V3,
                     4: Self,
                 ]

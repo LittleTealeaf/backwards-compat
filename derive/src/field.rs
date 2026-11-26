@@ -154,7 +154,7 @@ fn parse_field_bc_attr(attr: &syn::Attribute) -> syn::Result<BackwardsCompatArgs
             ));
         }
     };
-    if args.content_field.is_none() {
+    if !args.external && args.content_field.is_none() {
         args.content_field = Some("data".to_owned());
     }
     Ok(args)
@@ -1160,6 +1160,26 @@ mod tests {
         assert!(rendered.contains("struct __BcField_Outer_field_Schema < T >"));
         assert!(rendered.contains("impl < T > :: backwards_compat :: __private :: schemars :: JsonSchema for __BcField_Outer_field_Schema < T >"));
         assert!(rendered.contains("schema_adjacently_tagged"));
+        syn::parse2::<syn::File>(tokens).unwrap();
+    }
+
+    #[test]
+    fn test_field_level_external_does_not_default_content() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            pub struct Config {
+                #[backwards_compat(external, versions(1: u32, 2: Self))]
+                pub port: u64,
+            }
+        };
+        let specs = extract_struct_field_compat(&item).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert!(specs[0].args.external);
+        assert!(specs[0].args.content_field.is_none());
+
+        let tokens = generate_field_helper(&specs[0], false).unwrap();
+        let rendered = tokens.to_string();
+        assert!(rendered.contains("serialize_newtype_variant"));
+        assert!(rendered.contains("deserialize_enum"));
         syn::parse2::<syn::File>(tokens).unwrap();
     }
 }

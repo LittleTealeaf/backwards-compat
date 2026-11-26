@@ -228,3 +228,67 @@ fn test_generic_struct_with_where_clause_and_adjacent_tagging() {
     let roundtrip: GenericRecord<'_, u32> = serde_json::from_str(&json).unwrap();
     assert_eq!(roundtrip, v1);
 }
+
+// =========================================================================
+// 4. External tagging with generics, lifetimes, where clause, and #[cfg]
+// =========================================================================
+
+#[backwards_compat(
+    external,
+    versions(
+        #[cfg(any())]
+        "v0": GenericRecordV1<'a, T> => "v2",
+        #[cfg(test)]
+        "v1": GenericRecordV1<'a, T> => "v2",
+        "v2": Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExtGenericRecord<'a, T>
+where
+    T: Clone + core::fmt::Debug,
+{
+    pub label: &'a str,
+    pub item: T,
+    pub active: bool,
+}
+
+impl<'a, T> From<GenericRecordV1<'a, T>> for ExtGenericRecord<'a, T>
+where
+    T: Clone + core::fmt::Debug,
+{
+    fn from(v: GenericRecordV1<'a, T>) -> Self {
+        Self {
+            label: v.label,
+            item: v.item,
+            active: true,
+        }
+    }
+}
+
+#[test]
+fn test_external_tagging_generics_cfg_and_where_clause() {
+    let v1: ExtGenericRecord<'_, u32> =
+        serde_json::from_str(r#"{"v1":{"label":"sensor","item":42}}"#).unwrap();
+    assert_eq!(
+        v1,
+        ExtGenericRecord {
+            label: "sensor",
+            item: 42,
+            active: true,
+        }
+    );
+
+    let json = serde_json::to_string(&v1).unwrap();
+    assert_eq!(json, r#"{"v2":{"label":"sensor","item":42,"active":true}}"#);
+    let roundtrip: ExtGenericRecord<'_, u32> = serde_json::from_str(&json).unwrap();
+    assert_eq!(roundtrip, v1);
+
+    // Disabled #[cfg(any())] version "v0" must be rejected with feature-flag hint
+    let err =
+        serde_json::from_str::<ExtGenericRecord<'_, u32>>(r#"{"v0":{"label":"old","item":1}}"#).unwrap_err();
+    assert!(
+        err.to_string().contains("disabled by feature flags"),
+        "unexpected gated external error: {err}"
+    );
+}

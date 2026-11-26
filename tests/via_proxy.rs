@@ -1,4 +1,4 @@
-use backwards_compat::{BackwardsCompat, Migrated, VersionKey, backwards_compat};
+use backwards_compat::{BackwardsCompat, BackwardsCompatSerialize as _, Migrated, Tagging, backwards_compat};
 use serde::{Deserialize, Serialize};
 
 // =========================================================================
@@ -316,37 +316,43 @@ impl From<&StrDomain> for StrProxy {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct MixedV1 {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExtProxyV1 {
     pub n: i32,
 }
 
-#[backwards_compat(tag = "v", versions(1 | "1": MixedV1, 2 | "2": Self))]
+#[backwards_compat(external, versions(#[serializable] 1 | 10: ExtProxyV1, 2: Self))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MixedProxy {
+pub struct ExternalProxy {
     pub n: i32,
 }
 
-impl From<MixedV1> for MixedProxy {
-    fn from(v: MixedV1) -> Self {
+impl From<ExtProxyV1> for ExternalProxy {
+    fn from(v: ExtProxyV1) -> Self {
         Self { n: v.n }
     }
 }
 
-#[backwards_compat(via = MixedProxy)]
-#[derive(Debug, PartialEq, Eq)]
-pub struct MixedDomain {
-    pub n: i32,
-}
-
-impl From<MixedProxy> for MixedDomain {
-    fn from(p: MixedProxy) -> Self {
+impl From<&ExternalProxy> for ExtProxyV1 {
+    fn from(p: &ExternalProxy) -> Self {
         Self { n: p.n }
     }
 }
 
-impl From<&MixedDomain> for MixedProxy {
-    fn from(d: &MixedDomain) -> Self {
+#[backwards_compat(via = ExternalProxy)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExternalDomain {
+    pub n: i32,
+}
+
+impl From<ExternalProxy> for ExternalDomain {
+    fn from(p: ExternalProxy) -> Self {
+        Self { n: p.n }
+    }
+}
+
+impl From<&ExternalDomain> for ExternalProxy {
+    fn from(d: &ExternalDomain) -> Self {
         Self { n: d.n }
     }
 }
@@ -419,26 +425,25 @@ fn test_metadata_delegation_and_migrated_tracking() {
         }
     );
 
-    // Mixed VersionKey proxy
-    assert_eq!(MixedDomain::CURRENT_VERSION, VersionKey::Int(2));
-    assert_eq!(MixedDomain::SERIALIZE_VERSION, VersionKey::Int(2));
-    assert_eq!(
-        MixedDomain::SUPPORTED_VERSIONS,
-        &[
-            VersionKey::Int(1),
-            VersionKey::Str("1"),
-            VersionKey::Int(2),
-            VersionKey::Str("2"),
-        ]
-    );
+    // External tagging proxy
+    assert_eq!(ExternalDomain::CURRENT_VERSION, 2);
+    assert_eq!(ExternalDomain::SERIALIZE_VERSION, 2);
+    assert_eq!(ExternalDomain::SUPPORTED_VERSIONS, &[1, 10, 2]);
+    assert_eq!(ExternalDomain::TAGGING, Tagging::External);
     const {
-        assert!(!MixedDomain::ACCEPTS_UNTAGGED);
+        assert!(!ExternalDomain::ACCEPTS_UNTAGGED);
     }
 
-    let mixed_m: Migrated<MixedDomain> = serde_json::from_str(r#"{"v":"1","n":7}"#).expect("mixed v1 str");
-    assert_eq!(mixed_m.source_version, Some(VersionKey::Str("1")));
-    assert!(mixed_m.was_migrated());
-    assert_eq!(mixed_m.into_inner(), MixedDomain { n: 7 });
+    let ext_m: Migrated<ExternalDomain> = serde_json::from_str(r#"{"10":{"n":7}}"#).expect("ext v1 alias");
+    assert_eq!(ext_m.source_version, Some(10));
+    assert!(ext_m.was_migrated());
+    assert_eq!(ext_m.into_inner(), ExternalDomain { n: 7 });
+
+    let ext_json = serde_json::to_string(&ExternalDomain { n: 7 }).expect("ext ser");
+    assert_eq!(ext_json, r#"{"2":{"n":7}}"#);
+
+    let ext_v1_json = serde_json::to_string(&ExternalDomain { n: 7 }.as_version(1)).expect("ext v1 ser");
+    assert_eq!(ext_v1_json, r#"{"1":{"n":7}}"#);
 }
 
 // =========================================================================

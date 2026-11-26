@@ -1,231 +1,135 @@
+use super::content::Content;
 use alloc::borrow::ToOwned as _;
 use alloc::format;
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
-use serde::de::{
-    self, Deserialize, Deserializer, EnumAccess, IgnoredAny, MapAccess, SeqAccess, Unexpected, Visitor,
-};
+use serde::de::{self, Deserialize, Deserializer, Visitor};
 
+/// Zero-copy string version tag helper that deserializes via `deserialize_str`
+/// (avoiding `deserialize_any` and avoiding `Cow<'de, str>`'s `deserialize_string`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TagValue<'de> {
-    Int(u64),
-    NegativeInt(i64),
-    Str(&'de str),
-    String(String),
-    Other,
+pub enum StrTag<'de> {
+    /// Borrowed directly from the input buffer without allocation.
+    Borrowed(&'de str),
+    /// Owned string when the deserializer had to unescape or allocate.
+    Owned(String),
 }
 
-impl TagValue<'_> {
+impl StrTag<'_> {
+    /// Returns the string slice for this tag.
     #[must_use]
-    pub const fn as_u64(&self) -> Option<u64> {
-        match *self {
-            Self::Int(n) => Some(n),
-            _ => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn as_str(&self) -> Option<&str> {
+    pub const fn as_str(&self) -> &str {
         match self {
-            Self::Str(s) => Some(s),
-            Self::String(s) => Some(s.as_str()),
-            _ => None,
+            Self::Borrowed(s) => s,
+            Self::Owned(s) => s.as_str(),
         }
     }
 }
 
-impl fmt::Display for TagValue<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Int(n) => write!(f, "{n}"),
-            Self::NegativeInt(n) => write!(f, "{n}"),
-            Self::Str(s) => write!(f, "\"{s}\""),
-            Self::String(s) => write!(f, "\"{s}\""),
-            Self::Other => f.write_str("<non-version tag>"),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for TagValue<'de> {
+impl<'de> Deserialize<'de> for StrTag<'de> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(TagValueVisitor(PhantomData))
+        deserializer.deserialize_str(StrTagVisitor(PhantomData))
     }
 }
 
-struct TagValueVisitor<'de>(PhantomData<TagValue<'de>>);
+struct StrTagVisitor<'de>(PhantomData<StrTag<'de>>);
 
-impl<'de> Visitor<'de> for TagValueVisitor<'de> {
-    type Value = TagValue<'de>;
+impl<'de> Visitor<'de> for StrTagVisitor<'de> {
+    type Value = StrTag<'de>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a version tag value")
+        formatter.write_str("a string version tag")
     }
 
-    fn visit_bool<E>(self, _v: bool) -> Result<Self::Value, E> {
-        Ok(TagValue::Other)
-    }
-
-    fn visit_i8<E>(self, v: i8) -> Result<Self::Value, E> {
-        Ok(u64::try_from(v).map_or_else(|_| TagValue::NegativeInt(i64::from(v)), TagValue::Int))
-    }
-
-    fn visit_i16<E>(self, v: i16) -> Result<Self::Value, E> {
-        Ok(u64::try_from(v).map_or_else(|_| TagValue::NegativeInt(i64::from(v)), TagValue::Int))
-    }
-
-    fn visit_i32<E>(self, v: i32) -> Result<Self::Value, E> {
-        Ok(u64::try_from(v).map_or_else(|_| TagValue::NegativeInt(i64::from(v)), TagValue::Int))
-    }
-
-    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
-        Ok(u64::try_from(v).map_or(TagValue::NegativeInt(v), TagValue::Int))
-    }
-
-    fn visit_i128<E>(self, v: i128) -> Result<Self::Value, E> {
-        Ok(u64::try_from(v).map_or_else(
-            |_| i64::try_from(v).map_or(TagValue::Other, TagValue::NegativeInt),
-            TagValue::Int,
-        ))
-    }
-
-    fn visit_u8<E>(self, v: u8) -> Result<Self::Value, E> {
-        Ok(TagValue::Int(u64::from(v)))
-    }
-
-    fn visit_u16<E>(self, v: u16) -> Result<Self::Value, E> {
-        Ok(TagValue::Int(u64::from(v)))
-    }
-
-    fn visit_u32<E>(self, v: u32) -> Result<Self::Value, E> {
-        Ok(TagValue::Int(u64::from(v)))
-    }
-
-    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
-        Ok(TagValue::Int(v))
-    }
-
-    fn visit_u128<E>(self, v: u128) -> Result<Self::Value, E> {
-        Ok(u64::try_from(v).map_or(TagValue::Other, TagValue::Int))
-    }
-
-    fn visit_f32<E>(self, _v: f32) -> Result<Self::Value, E> {
-        Ok(TagValue::Other)
-    }
-
-    fn visit_f64<E>(self, _v: f64) -> Result<Self::Value, E> {
-        Ok(TagValue::Other)
-    }
-
-    fn visit_char<E>(self, _v: char) -> Result<Self::Value, E> {
-        Ok(TagValue::Other)
+    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
+        Ok(StrTag::Borrowed(v))
     }
 
     fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(TagValue::String(v.to_owned()))
-    }
-
-    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
-        Ok(TagValue::Str(v))
+        Ok(StrTag::Owned(v.to_owned()))
     }
 
     fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
-        Ok(TagValue::String(v))
-    }
-
-    fn visit_bytes<E>(self, _v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(TagValue::Other)
-    }
-
-    fn visit_borrowed_bytes<E>(self, _v: &'de [u8]) -> Result<Self::Value, E> {
-        Ok(TagValue::Other)
-    }
-
-    fn visit_byte_buf<E>(self, _v: Vec<u8>) -> Result<Self::Value, E> {
-        Ok(TagValue::Other)
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(TagValue::Other)
-    }
-
-    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let _ = IgnoredAny::deserialize(deserializer)?;
-        Ok(TagValue::Other)
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(TagValue::Other)
-    }
-
-    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let _ = IgnoredAny::deserialize(deserializer)?;
-        Ok(TagValue::Other)
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(TagValue::Other)
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-        Ok(TagValue::Other)
-    }
-
-    fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
-    where
-        A: EnumAccess<'de>,
-    {
-        let _ = Visitor::visit_enum(IgnoredAny, data)?;
-        Ok(TagValue::Other)
+        Ok(StrTag::Owned(v))
     }
 }
 
+/// Result of reading a version tag field on an integer-tagged type that accepts untagged (`_`) fallback.
+#[derive(Debug)]
+pub enum IntTagOrContent<'de> {
+    /// Valid non-negative integer version tag.
+    Tag(u64),
+    /// Mismatched value type buffered as `Content` for untagged (`_`) fallback.
+    Other(Content<'de>),
+}
+
+impl<'de> Deserialize<'de> for IntTagOrContent<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Content::deserialize(deserializer)? {
+            Content::U8(n) => Ok(Self::Tag(u64::from(n))),
+            Content::U16(n) => Ok(Self::Tag(u64::from(n))),
+            Content::U32(n) => Ok(Self::Tag(u64::from(n))),
+            Content::U64(n) => Ok(Self::Tag(n)),
+            Content::U128(n) => {
+                Ok(u64::try_from(*n).map_or_else(|_| Self::Other(Content::U128(n)), Self::Tag))
+            }
+            Content::I8(n) => Ok(u64::try_from(n).map_or(Self::Other(Content::I8(n)), Self::Tag)),
+            Content::I16(n) => Ok(u64::try_from(n).map_or(Self::Other(Content::I16(n)), Self::Tag)),
+            Content::I32(n) => Ok(u64::try_from(n).map_or(Self::Other(Content::I32(n)), Self::Tag)),
+            Content::I64(n) => Ok(u64::try_from(n).map_or(Self::Other(Content::I64(n)), Self::Tag)),
+            Content::I128(n) => {
+                Ok(u64::try_from(*n).map_or_else(|_| Self::Other(Content::I128(n)), Self::Tag))
+            }
+            other => Ok(Self::Other(other)),
+        }
+    }
+}
+
+/// Result of reading a version tag field on a string-tagged type that accepts untagged (`_`) fallback.
+#[derive(Debug)]
+pub enum StrTagOrContent<'de> {
+    /// Valid string version tag (borrowed zero-copy when possible).
+    Tag(StrTag<'de>),
+    /// Mismatched value type buffered as `Content` for untagged (`_`) fallback.
+    Other(Content<'de>),
+}
+
+impl<'de> Deserialize<'de> for StrTagOrContent<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Content::deserialize(deserializer)? {
+            Content::Str(s) => Ok(Self::Tag(StrTag::Borrowed(s))),
+            Content::String(s) => Ok(Self::Tag(StrTag::Owned(String::from(s)))),
+            other => Ok(Self::Other(other)),
+        }
+    }
+}
+
+/// Formats a cold-path error for an unrecognized integer version tag.
 #[cold]
 #[must_use]
-pub fn unknown_version_error<E: de::Error>(
-    found: &TagValue<'_>,
-    current_int: Option<u64>,
+pub fn unknown_int_version_error<E: de::Error>(
+    found: u64,
+    current_int: u64,
     supported: &[&str],
     has_disabled_versions: bool,
 ) -> E {
-    if matches!(found, TagValue::Other) {
-        return de::Error::invalid_type(
-            Unexpected::Other("non-version tag"),
-            &"an integer or string version tag",
-        );
-    }
-
     let list = supported.join(", ");
-    if let TagValue::Int(n) = *found
-        && let Some(max) = current_int
-        && n > max
-    {
+    if found > current_int {
         return de::Error::custom(format!(
-            "version {n} is newer than supported version {max} (supported versions: {list})"
+            "version {found} is newer than supported version {current_int} (supported versions: {list})"
         ));
     }
 
@@ -239,240 +143,94 @@ pub fn unknown_version_error<E: de::Error>(
     ))
 }
 
+/// Formats a cold-path error for an unrecognized string version tag.
+#[cold]
+#[must_use]
+pub fn unknown_str_version_error<E: de::Error>(
+    found: &str,
+    supported: &[&str],
+    has_disabled_versions: bool,
+) -> E {
+    let list = supported.join(", ");
+    let gated_hint = if has_disabled_versions {
+        "; some versions may be disabled by feature flags"
+    } else {
+        ""
+    };
+    de::Error::custom(format!(
+        "unknown version \"{found}\" (supported versions: {list}{gated_hint})"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::de::content::{Content, ContentDeserializer};
     use alloc::boxed::Box;
     use alloc::string::ToString as _;
-    use alloc::vec;
-    use serde::de::value::{Error as ValueError, MapAccessDeserializer, MapDeserializer};
+    use serde::de::value::Error as ValueError;
 
     #[test]
-    fn test_tag_value_accessors_and_display() {
-        let int_tag = TagValue::Int(5);
-        assert_eq!(int_tag.as_u64(), Some(5));
-        assert_eq!(int_tag.as_str(), None);
-        assert_eq!(int_tag.to_string(), "5");
+    fn test_str_tag_borrowed_owned_and_as_str() {
+        let borrowed =
+            StrTag::deserialize(ContentDeserializer::<ValueError>::new(Content::Str("v1"))).unwrap();
+        assert_eq!(borrowed, StrTag::Borrowed("v1"));
+        assert_eq!(borrowed.as_str(), "v1");
 
-        let neg_tag = TagValue::NegativeInt(-3);
-        assert_eq!(neg_tag.as_u64(), None);
-        assert_eq!(neg_tag.as_str(), None);
-        assert_eq!(neg_tag.to_string(), "-3");
+        let owned = StrTag::deserialize(ContentDeserializer::<ValueError>::new(Content::String(
+            Box::from("v2"),
+        )))
+        .unwrap();
+        assert_eq!(owned, StrTag::Owned("v2".to_owned()));
+        assert_eq!(owned.as_str(), "v2");
 
-        let str_tag = TagValue::Str("v1");
-        assert_eq!(str_tag.as_u64(), None);
-        assert_eq!(str_tag.as_str(), Some("v1"));
-        assert_eq!(str_tag.to_string(), "\"v1\"");
-
-        let string_tag = TagValue::String("v2".to_owned());
-        assert_eq!(string_tag.as_u64(), None);
-        assert_eq!(string_tag.as_str(), Some("v2"));
-        assert_eq!(string_tag.to_string(), "\"v2\"");
-
-        let other_tag = TagValue::Other;
-        assert_eq!(other_tag.as_u64(), None);
-        assert_eq!(other_tag.as_str(), None);
-        assert_eq!(other_tag.to_string(), "<non-version tag>");
+        let via_visit_str = StrTagVisitor(PhantomData).visit_str::<ValueError>("v3").unwrap();
+        assert_eq!(via_visit_str, StrTag::Owned("v3".to_owned()));
+        assert_eq!(via_visit_str.as_str(), "v3");
     }
 
     #[test]
-    fn test_tag_value_direct_deserialize() {
-        // Unsigned integers
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U8(1))).unwrap(),
-            TagValue::Int(1)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U16(2))).unwrap(),
-            TagValue::Int(2)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U32(3))).unwrap(),
-            TagValue::Int(3)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U64(u64::MAX))).unwrap(),
-            TagValue::Int(u64::MAX)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(Box::new(
-                u128::from(u64::MAX)
-            ))))
-            .unwrap(),
-            TagValue::Int(u64::MAX)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(Box::new(
-                u128::from(u64::MAX) + 1
-            ))))
-            .unwrap(),
-            TagValue::Other
-        );
+    fn test_str_tag_json_borrowed_escaped_and_non_string_error() {
+        let raw_borrowed = String::from("\"v1.2\"");
+        let tag_borrowed: StrTag<'_> = serde_json::from_str(&raw_borrowed).unwrap();
+        assert_eq!(tag_borrowed, StrTag::Borrowed("v1.2"));
 
-        // Signed integers
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I8(7))).unwrap(),
-            TagValue::Int(7)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I8(-5))).unwrap(),
-            TagValue::NegativeInt(-5)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I16(0))).unwrap(),
-            TagValue::Int(0)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I16(-10))).unwrap(),
-            TagValue::NegativeInt(-10)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I32(42))).unwrap(),
-            TagValue::Int(42)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I32(-42))).unwrap(),
-            TagValue::NegativeInt(-42)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I64(99))).unwrap(),
-            TagValue::Int(99)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I64(i64::MIN))).unwrap(),
-            TagValue::NegativeInt(i64::MIN)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
-                i128::from(u64::MAX)
-            ))))
-            .unwrap(),
-            TagValue::Int(u64::MAX)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
-                i128::from(u64::MAX) + 1
-            ))))
-            .unwrap(),
-            TagValue::Other
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
-                i128::from(i64::MIN)
-            ))))
-            .unwrap(),
-            TagValue::NegativeInt(i64::MIN)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
-                i128::from(i64::MIN) - 1
-            ))))
-            .unwrap(),
-            TagValue::Other
-        );
+        let raw_escaped = String::from("\"v1\\n2\"");
+        let tag_escaped: StrTag<'_> = serde_json::from_str(&raw_escaped).unwrap();
+        assert_eq!(tag_escaped, StrTag::Owned("v1\n2".to_owned()));
 
-        // Strings (borrowed and owned)
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::Str("v1"))).unwrap(),
-            TagValue::Str("v1")
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::String(
-                Box::from("v2")
-            )))
-            .unwrap(),
-            TagValue::String("v2".to_owned())
-        );
-        assert_eq!(
-            TagValueVisitor(PhantomData)
-                .visit_str::<ValueError>("v3")
-                .unwrap(),
-            TagValue::String("v3".to_owned())
-        );
-
-        // Non-tag values (drained without allocating Content)
-        for non_tag in [
-            Content::Bool(true),
-            Content::F32(1.5),
-            Content::F64(2.5),
-            Content::Char('x'),
-            Content::Bytes(b"raw"),
-            Content::ByteBuf(vec![1, 2].into_boxed_slice()),
-            Content::None,
-            Content::Some(Box::new(Content::U8(1))),
-            Content::Unit,
-            Content::Newtype(Box::new(Content::U8(1))),
-            Content::Seq(vec![Content::U8(1), Content::Str("a")].into_boxed_slice()),
-            Content::Map(vec![(Content::Str("k"), Content::U8(1))].into_boxed_slice()),
-        ] {
-            assert_eq!(
-                TagValue::deserialize(ContentDeserializer::<ValueError>::new(non_tag)).unwrap(),
-                TagValue::Other
-            );
-        }
-
-        // Direct visit_bytes / visit_enum / JSON round-trip
-        assert_eq!(
-            TagValueVisitor(PhantomData)
-                .visit_bytes::<ValueError>(b"abc")
-                .unwrap(),
-            TagValue::Other
-        );
-        assert_eq!(
-            TagValueVisitor(PhantomData)
-                .visit_enum(MapAccessDeserializer::new(MapDeserializer::<_, ValueError>::new(
-                    [("V", 1u8)].into_iter()
-                )))
-                .unwrap(),
-            TagValue::Other
-        );
-        let json_str: TagValue<'_> = serde_json::from_str("\"v1\"").unwrap();
-        assert_eq!(json_str, TagValue::Str("v1"));
-        let json_int: TagValue<'_> = serde_json::from_str("42").unwrap();
-        assert_eq!(json_int, TagValue::Int(42));
-        let json_obj: TagValue<'_> = serde_json::from_str("{\"nested\":[1,2,3]}").unwrap();
-        assert_eq!(json_obj, TagValue::Other);
+        let err = serde_json::from_str::<StrTag<'_>>("42").unwrap_err();
+        assert!(err.to_string().contains("expected a string version tag"));
     }
 
     #[test]
-    fn test_unknown_version_error() {
-        let err_other: ValueError = unknown_version_error(&TagValue::Other, Some(7), &["5", "6", "7"], false);
-        assert_eq!(
-            err_other.to_string(),
-            "invalid type: non-version tag, expected an integer or string version tag"
-        );
-
-        let err_future: ValueError =
-            unknown_version_error(&TagValue::Int(9), Some(7), &["5", "6", "7"], false);
+    fn test_unknown_int_and_str_version_errors() {
+        let err_future: ValueError = unknown_int_version_error(9, 7, &["5", "6", "7"], false);
         assert_eq!(
             err_future.to_string(),
             "version 9 is newer than supported version 7 (supported versions: 5, 6, 7)"
         );
 
-        let err_unknown_int: ValueError =
-            unknown_version_error(&TagValue::Int(3), Some(7), &["5", "6", "7"], false);
+        let err_unknown_int: ValueError = unknown_int_version_error(3, 7, &["5", "6", "7"], false);
         assert_eq!(
             err_unknown_int.to_string(),
             "unknown version 3 (supported versions: 5, 6, 7)"
         );
 
-        let err_unknown_int_disabled: ValueError =
-            unknown_version_error(&TagValue::Int(3), Some(7), &["5", "6", "7"], true);
+        let err_unknown_int_disabled: ValueError = unknown_int_version_error(3, 7, &["5", "6", "7"], true);
         assert_eq!(
             err_unknown_int_disabled.to_string(),
             "unknown version 3 (supported versions: 5, 6, 7; some versions may be disabled by feature flags)"
         );
 
-        let err_unknown_str: ValueError =
-            unknown_version_error(&TagValue::Str("v0"), None, &["\"v1\"", "\"v2\""], false);
+        let err_unknown_str: ValueError = unknown_str_version_error("v0", &["\"v1\"", "\"v2\""], false);
         assert_eq!(
             err_unknown_str.to_string(),
             "unknown version \"v0\" (supported versions: \"v1\", \"v2\")"
         );
 
         let err_unknown_str_disabled: ValueError =
-            unknown_version_error(&TagValue::Str("v0"), None, &["\"v1\"", "\"v2\""], true);
+            unknown_str_version_error("v0", &["\"v1\"", "\"v2\""], true);
         assert_eq!(
             err_unknown_str_disabled.to_string(),
             "unknown version \"v0\" (supported versions: \"v1\", \"v2\"; some versions may be disabled by feature flags)"
@@ -480,154 +238,66 @@ mod tests {
     }
 
     #[test]
-    fn test_tag_value_deserialize_numeric_boundaries_and_strings() {
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(Box::new(
-                u128::MAX
-            ))))
-            .unwrap(),
-            TagValue::Other
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::U128(Box::new(
-                u128::from(u64::MAX)
-            ))))
-            .unwrap(),
-            TagValue::Int(u64::MAX)
-        );
+    fn test_int_tag_or_content_variants() {
+        for (content, expected) in [
+            (Content::U8(1), 1_u64),
+            (Content::U16(2), 2_u64),
+            (Content::U32(3), 3_u64),
+            (Content::U64(4), 4_u64),
+            (Content::I8(5), 5_u64),
+            (Content::I16(6), 6_u64),
+            (Content::I32(7), 7_u64),
+            (Content::I64(8), 8_u64),
+            (Content::U128(Box::new(9)), 9_u64),
+            (Content::I128(Box::new(10)), 10_u64),
+        ] {
+            let parsed =
+                IntTagOrContent::deserialize(ContentDeserializer::<ValueError>::new(content)).unwrap();
+            assert!(matches!(parsed, IntTagOrContent::Tag(v) if v == expected));
+        }
 
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
-                i128::MIN
-            ))))
-            .unwrap(),
-            TagValue::Other
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
-                i128::MAX
-            ))))
-            .unwrap(),
-            TagValue::Other
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(0))))
-                .unwrap(),
-            TagValue::Int(0)
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::I128(Box::new(
-                -1
-            ))))
-            .unwrap(),
-            TagValue::NegativeInt(-1)
-        );
+        for mismatched in [
+            Content::I8(-1),
+            Content::I64(-42),
+            Content::U128(Box::new(u128::from(u64::MAX) + 1)),
+            Content::I128(Box::new(-1)),
+            Content::Str("v1"),
+            Content::String(Box::from("v2")),
+            Content::Bool(true),
+            Content::None,
+        ] {
+            let parsed =
+                IntTagOrContent::deserialize(ContentDeserializer::<ValueError>::new(mismatched)).unwrap();
+            assert!(matches!(parsed, IntTagOrContent::Other(_)));
+        }
 
-        let raw_borrowed = String::from("\"v1.2\"");
-        let tag_borrowed: TagValue<'_> = serde_json::from_str(&raw_borrowed).unwrap();
-        assert_eq!(tag_borrowed, TagValue::Str("v1.2"));
-
-        let raw_escaped = String::from("\"v1\\n2\"");
-        let tag_escaped: TagValue<'_> = serde_json::from_str(&raw_escaped).unwrap();
-        assert_eq!(tag_escaped, TagValue::String("v1\n2".to_owned()));
-
-        let tag_neg: TagValue<'_> = serde_json::from_str("-42").unwrap();
-        assert_eq!(tag_neg, TagValue::NegativeInt(-42));
+        let json_str: IntTagOrContent<'_> = serde_json::from_str("\"v1\"").unwrap();
+        assert!(matches!(json_str, IntTagOrContent::Other(Content::Str("v1"))));
     }
 
     #[test]
-    fn test_tag_value_deserialize_drains_non_tag_payloads_in_stream() {
-        struct Envelope<'de> {
-            v: TagValue<'de>,
-            after: u32,
-        }
+    fn test_str_tag_or_content_variants() {
+        let borrowed =
+            StrTagOrContent::deserialize(ContentDeserializer::<ValueError>::new(Content::Str("v1"))).unwrap();
+        assert!(matches!(borrowed, StrTagOrContent::Tag(StrTag::Borrowed("v1"))));
 
-        impl<'de> Deserialize<'de> for Envelope<'de> {
-            fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                struct EnvelopeVisitor;
-                impl<'de> Visitor<'de> for EnvelopeVisitor {
-                    type Value = Envelope<'de>;
-                    fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                        formatter.write_str("envelope map")
-                    }
-                    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                        let mut v = None;
-                        let mut after = None;
-                        while let Some(key) = map.next_key::<&str>()? {
-                            match key {
-                                "v" => v = Some(map.next_value::<TagValue<'de>>()?),
-                                "after" => after = Some(map.next_value::<u32>()?),
-                                _ => {
-                                    let _ = map.next_value::<de::IgnoredAny>()?;
-                                }
-                            }
-                        }
-                        Ok(Envelope {
-                            v: v.ok_or_else(|| de::Error::missing_field("v"))?,
-                            after: after.ok_or_else(|| de::Error::missing_field("after"))?,
-                        })
-                    }
-                }
-                deserializer.deserialize_map(EnvelopeVisitor)
-            }
-        }
+        let owned = StrTagOrContent::deserialize(ContentDeserializer::<ValueError>::new(Content::String(
+            Box::from("v2"),
+        )))
+        .unwrap();
+        assert!(matches!(owned, StrTagOrContent::Tag(StrTag::Owned(ref s)) if s == "v2"));
 
-        struct EnumOnlyDe;
-        impl<'de> de::Deserializer<'de> for EnumOnlyDe {
-            type Error = ValueError;
-            fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-                visitor.visit_enum(MapAccessDeserializer::new(MapDeserializer::<_, ValueError>::new(
-                    [(
-                        "Var",
-                        ContentDeserializer::<ValueError>::new(Content::Map(
-                            vec![(Content::Str("a"), Content::U8(1))].into_boxed_slice(),
-                        )),
-                    )]
-                    .into_iter(),
-                )))
-            }
-            serde::forward_to_deserialize_any! {
-                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-                bytes byte_buf option unit unit_struct newtype_struct seq tuple
-                tuple_struct map struct enum identifier ignored_any
-            }
-        }
+        let escaped = String::from("\"v1\\n2\"");
+        let json_escaped: StrTagOrContent<'_> = serde_json::from_str(&escaped).unwrap();
+        assert!(matches!(
+            json_escaped,
+            StrTagOrContent::Tag(StrTag::Owned(ref s)) if s == "v1\n2"
+        ));
 
-        for non_tag_json in [
-            "true",
-            "false",
-            "3.14",
-            "null",
-            "[1, [2, 3], {\"k\": \"val\"}]",
-            "{\"nested\": {\"arr\": [true, null, 1.5]}}",
-        ] {
-            let payload = format!("{{\"v\": {non_tag_json}, \"after\": 99}}");
-            let env: Envelope<'_> = serde_json::from_str(&payload)
-                .unwrap_or_else(|e| panic!("failed to drain {non_tag_json}: {e}"));
-            assert_eq!(env.v, TagValue::Other);
-            assert_eq!(env.after, 99);
+        for mismatched in [Content::U64(1), Content::I64(-1), Content::Bool(false)] {
+            let parsed =
+                StrTagOrContent::deserialize(ContentDeserializer::<ValueError>::new(mismatched)).unwrap();
+            assert!(matches!(parsed, StrTagOrContent::Other(_)));
         }
-
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::Newtype(
-                Box::new(Content::Seq(
-                    vec![
-                        Content::U8(1),
-                        Content::Map(vec![(Content::Str("a"), Content::Bool(true))].into_boxed_slice()),
-                    ]
-                    .into_boxed_slice()
-                ))
-            )))
-            .unwrap(),
-            TagValue::Other
-        );
-        assert_eq!(
-            TagValue::deserialize(ContentDeserializer::<ValueError>::new(Content::Some(Box::new(
-                Content::Map(vec![(Content::Str("x"), Content::U32(7))].into_boxed_slice())
-            ))))
-            .unwrap(),
-            TagValue::Other
-        );
-        assert_eq!(TagValue::deserialize(EnumOnlyDe).unwrap(), TagValue::Other);
     }
 }

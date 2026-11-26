@@ -1,4 +1,4 @@
-use backwards_compat::backwards_compat;
+use backwards_compat::{Migrated, backwards_compat};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -300,6 +300,380 @@ fn test_cfg_gated_single_and_multiple_untagged() {
         tagged,
         InactiveGatedUntagged {
             name: "current".to_owned(),
+        }
+    );
+}
+
+// =========================================================================
+// 5. One-way tag-type migrations & colliding legacy `version` fields
+//    via mismatched-tag fallback to `_`
+// =========================================================================
+
+// 5a. Legacy string-tagged family ("v1" -> "v2") -> New integer-tagged family (3 -> 4)
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrFamilyV1 {
+    pub label: String,
+}
+
+#[backwards_compat(
+    versions(
+        "v1": StrFamilyV1,
+        "v2": Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct LegacyStrFamily {
+    pub label: String,
+    pub weight: u32,
+}
+
+impl From<StrFamilyV1> for LegacyStrFamily {
+    fn from(v: StrFamilyV1) -> Self {
+        Self {
+            label: v.label,
+            weight: 10,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntFamilyV3 {
+    pub label: String,
+    pub weight: u32,
+}
+
+impl From<LegacyStrFamily> for IntFamilyV3 {
+    fn from(v: LegacyStrFamily) -> Self {
+        Self {
+            label: v.label,
+            weight: v.weight,
+        }
+    }
+}
+
+#[backwards_compat(
+    versions(
+        _: LegacyStrFamily => 3,
+        3: IntFamilyV3,
+        4: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct NewIntFamily {
+    pub label: String,
+    pub weight: u32,
+    pub active: bool,
+}
+
+impl From<IntFamilyV3> for NewIntFamily {
+    fn from(v: IntFamilyV3) -> Self {
+        Self {
+            label: v.label,
+            weight: v.weight,
+            active: true,
+        }
+    }
+}
+
+#[test]
+fn test_mismatched_string_tag_falls_back_to_legacy_str_family() {
+    let expected_from_v1 = NewIntFamily {
+        label: "svc".to_owned(),
+        weight: 10,
+        active: true,
+    };
+
+    // Tag-first string payload -> buffers tag + remaining fields -> LegacyStrFamily ("v1" -> "v2") -> 3 -> 4
+    let tag_first: Migrated<NewIntFamily> =
+        serde_json::from_str(r#"{"version":"v1","label":"svc"}"#).unwrap();
+    assert!(tag_first.is_untagged(), "mismatched tag should route through `_`");
+    assert!(tag_first.was_migrated(), "mismatched tag should mark migrated");
+    assert_eq!(*tag_first, expected_from_v1);
+
+    // Tag-after-fields string payload -> LegacyStrFamily ("v2") -> 3 -> 4
+    let tag_last: Migrated<NewIntFamily> =
+        serde_json::from_str(r#"{"label":"svc","weight":77,"version":"v2"}"#).unwrap();
+    assert!(
+        tag_last.is_untagged(),
+        "out-of-order mismatched tag should route through `_`"
+    );
+    assert_eq!(
+        *tag_last,
+        NewIntFamily {
+            label: "svc".to_owned(),
+            weight: 77,
+            active: true,
+        }
+    );
+
+    // Matching-type unknown integer version still fails fast (does NOT fall back to `_`)
+    let unknown_int_err =
+        serde_json::from_str::<NewIntFamily>(r#"{"version":99,"label":"svc"}"#).unwrap_err();
+    assert!(
+        unknown_int_err
+            .to_string()
+            .contains("version 99 is newer than supported version 4"),
+        "unexpected error for unknown integer version: {unknown_int_err}"
+    );
+
+    // Multi-format round-trip: CBOR, named MessagePack, YAML
+    let legacy_wire = LegacyStrFamily {
+        label: "multi".to_owned(),
+        weight: 5,
+    };
+    let mut cbor_buf = Vec::new();
+    ciborium::into_writer(&legacy_wire, &mut cbor_buf).unwrap();
+    let dec_cbor: NewIntFamily = ciborium::from_reader(cbor_buf.as_slice()).unwrap();
+    assert_eq!(
+        dec_cbor,
+        NewIntFamily {
+            label: "multi".to_owned(),
+            weight: 5,
+            active: true,
+        }
+    );
+
+    let rmp_bytes = rmp_serde::to_vec_named(&legacy_wire).unwrap();
+    let dec_rmp: NewIntFamily = rmp_serde::from_slice(&rmp_bytes).unwrap();
+    assert_eq!(dec_rmp, dec_cbor);
+
+    // Serializes as new integer version 4
+    let out_json = serde_json::to_string(&dec_cbor).unwrap();
+    assert_eq!(
+        out_json,
+        r#"{"version":4,"label":"multi","weight":5,"active":true}"#
+    );
+}
+
+// 5b. Legacy integer-tagged family (1 -> 2) -> New string-tagged family ("v3" -> "v4")
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntFamilyV1 {
+    pub name: String,
+}
+
+#[backwards_compat(
+    versions(
+        1: IntFamilyV1,
+        2: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct LegacyIntFamily {
+    pub name: String,
+    pub rev: u32,
+}
+
+impl From<IntFamilyV1> for LegacyIntFamily {
+    fn from(v: IntFamilyV1) -> Self {
+        Self { name: v.name, rev: 1 }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrFamilyV3 {
+    pub name: String,
+    pub rev: u32,
+}
+
+impl From<LegacyIntFamily> for StrFamilyV3 {
+    fn from(v: LegacyIntFamily) -> Self {
+        Self {
+            name: v.name,
+            rev: v.rev,
+        }
+    }
+}
+
+#[backwards_compat(
+    versions(
+        _: LegacyIntFamily => "v3",
+        "v3": StrFamilyV3,
+        "v4": Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct NewStrFamily {
+    pub name: String,
+    pub rev: u32,
+    pub verified: bool,
+}
+
+impl From<StrFamilyV3> for NewStrFamily {
+    fn from(v: StrFamilyV3) -> Self {
+        Self {
+            name: v.name,
+            rev: v.rev,
+            verified: true,
+        }
+    }
+}
+
+#[test]
+fn test_mismatched_int_tag_falls_back_to_legacy_int_family() {
+    let from_int_v1: Migrated<NewStrFamily> =
+        serde_json::from_str(r#"{"version":1,"name":"alpha"}"#).unwrap();
+    assert!(
+        from_int_v1.is_untagged(),
+        "integer tag on str model should fall back to `_`"
+    );
+    assert_eq!(
+        *from_int_v1,
+        NewStrFamily {
+            name: "alpha".to_owned(),
+            rev: 1,
+            verified: true,
+        }
+    );
+
+    let from_int_v2_reordered: Migrated<NewStrFamily> =
+        serde_json::from_str(r#"{"rev":9,"name":"beta","version":2}"#).unwrap();
+    assert!(
+        from_int_v2_reordered.is_untagged(),
+        "out-of-order int tag should fall back"
+    );
+    assert_eq!(
+        *from_int_v2_reordered,
+        NewStrFamily {
+            name: "beta".to_owned(),
+            rev: 9,
+            verified: true,
+        }
+    );
+
+    // Matching-type unknown string version still fails fast
+    let unknown_str_err =
+        serde_json::from_str::<NewStrFamily>(r#"{"version":"v99","name":"alpha"}"#).unwrap_err();
+    assert!(
+        unknown_str_err.to_string().contains("unknown version \"v99\""),
+        "unexpected error for unknown string version: {unknown_str_err}"
+    );
+}
+
+// 5c. Adjacently-tagged (`content = "data"`) tag-type transition
+#[backwards_compat(
+    tag = "version",
+    content = "data",
+    versions(
+        "v1": StrFamilyV1,
+        "v2": Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct LegacyAdjStrFamily {
+    pub label: String,
+    pub weight: u32,
+}
+
+impl From<StrFamilyV1> for LegacyAdjStrFamily {
+    fn from(v: StrFamilyV1) -> Self {
+        Self {
+            label: v.label,
+            weight: 10,
+        }
+    }
+}
+
+#[backwards_compat(
+    tag = "version",
+    content = "data",
+    versions(
+        _: LegacyAdjStrFamily => 3,
+        3: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct NewAdjIntFamily {
+    pub label: String,
+    pub weight: u32,
+    pub extra: bool,
+}
+
+impl From<LegacyAdjStrFamily> for NewAdjIntFamily {
+    fn from(v: LegacyAdjStrFamily) -> Self {
+        Self {
+            label: v.label,
+            weight: v.weight,
+            extra: false,
+        }
+    }
+}
+
+#[test]
+fn test_adjacent_mismatched_tag_falls_back_to_legacy_adj_family() {
+    // Tag before content
+    let tag_first: Migrated<NewAdjIntFamily> =
+        serde_json::from_str(r#"{"version":"v1","data":{"label":"adj"}}"#).unwrap();
+    assert!(
+        tag_first.is_untagged(),
+        "adjacent mismatched tag should fall back"
+    );
+    assert_eq!(
+        *tag_first,
+        NewAdjIntFamily {
+            label: "adj".to_owned(),
+            weight: 10,
+            extra: false,
+        }
+    );
+
+    // Content before tag
+    let content_first: Migrated<NewAdjIntFamily> =
+        serde_json::from_str(r#"{"data":{"label":"adj2","weight":22},"version":"v2"}"#).unwrap();
+    assert!(
+        content_first.is_untagged(),
+        "reordered adjacent mismatched tag should fall back"
+    );
+    assert_eq!(
+        *content_first,
+        NewAdjIntFamily {
+            label: "adj2".to_owned(),
+            weight: 22,
+            extra: false,
+        }
+    );
+}
+
+// 5d. Pre-backwards-compat struct that had its own `version: String` field
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct PreCompatWithVersionField {
+    pub version: String,
+    pub host: String,
+}
+
+#[backwards_compat(
+    versions(
+        _: PreCompatWithVersionField => 1,
+        1: Self,
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct MigratedFromCollidingField {
+    pub api_version: String,
+    pub host: String,
+}
+
+impl From<PreCompatWithVersionField> for MigratedFromCollidingField {
+    fn from(v: PreCompatWithVersionField) -> Self {
+        Self {
+            api_version: v.version,
+            host: v.host,
+        }
+    }
+}
+
+#[test]
+fn test_unversioned_struct_with_colliding_version_field() {
+    let legacy: Migrated<MigratedFromCollidingField> =
+        serde_json::from_str(r#"{"version":"1.2.3","host":"localhost"}"#).unwrap();
+    assert!(
+        legacy.is_untagged(),
+        "colliding string version field should fall back to `_`"
+    );
+    assert_eq!(
+        *legacy,
+        MigratedFromCollidingField {
+            api_version: "1.2.3".to_owned(),
+            host: "localhost".to_owned(),
         }
     );
 }

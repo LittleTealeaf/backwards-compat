@@ -58,36 +58,29 @@ pub enum SelfWireMode<'a> {
 enum VersionMode {
     Int,
     Str,
-    Mixed,
 }
 
 impl VersionMode {
     fn from_input(input: &BackwardsCompatInput) -> Self {
-        let mut has_int = false;
-        let mut has_str = false;
-        let mut inspect = |tag: &VersionTag| match tag {
-            VersionTag::Int(_) => has_int = true,
-            VersionTag::String(_) => has_str = true,
-            VersionTag::Untagged => {}
+        let inspect = |tag: &VersionTag| match tag {
+            VersionTag::Int(_) => Some(Self::Int),
+            VersionTag::String(_) => Some(Self::Str),
+            VersionTag::Untagged => None,
         };
         for v in &input.versions {
-            inspect(&v.tag);
+            if let Some(mode) = inspect(&v.tag) {
+                return mode;
+            }
         }
-        inspect(&input.current_version);
-        inspect(&input.serialize_version);
-
-        match (has_int, has_str) {
-            (true, true) => Self::Mixed,
-            (false, true) => Self::Str,
-            _ => Self::Int,
-        }
+        inspect(&input.current_version)
+            .or_else(|| inspect(&input.serialize_version))
+            .unwrap_or(Self::Int)
     }
 
     fn version_ty(self) -> TokenStream {
         match self {
             Self::Int => quote!(u64),
             Self::Str => quote!(&'static str),
-            Self::Mixed => quote!(::backwards_compat::VersionKey),
         }
     }
 
@@ -95,30 +88,167 @@ impl VersionMode {
         match (self, tag) {
             (Self::Int, VersionTag::Int(n)) => quote!(#n),
             (Self::Str, VersionTag::String(s)) => quote!(#s),
-            (Self::Mixed, VersionTag::Int(n)) => quote!(::backwards_compat::VersionKey::Int(#n)),
-            (Self::Mixed, VersionTag::String(s)) => quote!(::backwards_compat::VersionKey::Str(#s)),
             _ => unreachable!("tag_expr called with mismatched or untagged version"),
         }
     }
 
-    fn tag_match_scrutinee(self) -> TokenStream {
+    fn tag_deserialize_ty(self) -> TokenStream {
         match self {
-            Self::Int => quote!(__tag),
-            Self::Str => quote!(__tag.as_str()),
-            Self::Mixed => quote!((__tag.as_u64(), __tag.as_str())),
+            Self::Int => quote!(u64),
+            Self::Str => quote!(::backwards_compat::__private::StrTag<'__de>),
+        }
+    }
+
+    fn tag_param_ty(self) -> TokenStream {
+        match self {
+            Self::Int => quote!(u64),
+            Self::Str => quote!(&str),
+        }
+    }
+
+    fn tag_arg_expr(self, ident: &syn::Ident) -> TokenStream {
+        match self {
+            Self::Int => quote!(#ident),
+            Self::Str => quote!(#ident.as_str()),
         }
     }
 
     fn tag_match_pattern(self, tag: &VersionTag) -> TokenStream {
         match (self, tag) {
-            (Self::Int, VersionTag::Int(n)) => {
-                quote!(::backwards_compat::__private::TagValue::Int(#n))
-            }
-            (Self::Str, VersionTag::String(s)) => quote!(::core::option::Option::Some(#s)),
-            (Self::Mixed, VersionTag::Int(n)) => quote!((::core::option::Option::Some(#n), _)),
-            (Self::Mixed, VersionTag::String(s)) => quote!((_, ::core::option::Option::Some(#s))),
+            (Self::Int, VersionTag::Int(n)) => quote!(#n),
+            (Self::Str, VersionTag::String(s)) => quote!(#s),
             _ => unreachable!("tag_match_pattern called with mismatched or untagged version"),
         }
+    }
+
+    fn tag_or_content_ty(self) -> TokenStream {
+        match self {
+            Self::Int => quote!(::backwards_compat::__private::IntTagOrContent<'__de>),
+            Self::Str => quote!(::backwards_compat::__private::StrTagOrContent<'__de>),
+        }
+    }
+
+    fn tag_or_content_tag_pat(self) -> TokenStream {
+        match self {
+            Self::Int => quote!(::backwards_compat::__private::IntTagOrContent::Tag(__tag)),
+            Self::Str => quote!(::backwards_compat::__private::StrTagOrContent::Tag(__tag)),
+        }
+    }
+
+    fn tag_or_content_other_pat(self) -> TokenStream {
+        match self {
+            Self::Int => quote!(::backwards_compat::__private::IntTagOrContent::Other(__other)),
+            Self::Str => quote!(::backwards_compat::__private::StrTagOrContent::Other(__other)),
+        }
+    }
+}
+
+struct ExtCanonicalVariant<'a> {
+    idx_const: syn::Ident,
+    tag: &'a VersionTag,
+    variant_name: String,
+    cfg: Option<TokenStream>,
+}
+
+fn collect_external_variants<'a>(
+    input: &'a BackwardsCompatInput,
+    dag_plan: &DagPlan,
+    prefix: &str,
+) -> Vec<ExtCanonicalVariant<'a>> {
+    let mut variants = Vec::new();
+    for (i, v) in input.versions.iter().enumerate() {
+        if v.tag.is_untagged() || v.is_alias {
+            continue;
+        }
+        let Some(path) = dag_plan.paths.get(i) else {
+            continue;
+        };
+        let idx_const = format_ident!("{prefix}_IDX_{}", variants.len());
+        variants.push(ExtCanonicalVariant {
+            idx_const,
+            tag: &v.tag,
+            variant_name: v.tag.to_tag_string(),
+            cfg: path.cfg.clone(),
+        });
+    }
+
+    let has_declared_current = input
+        .versions
+        .iter()
+        .any(|v| v.tag.matches(&input.current_version));
+    if dag_plan.target_is_wire && !has_declared_current {
+        let idx_const = format_ident!("{prefix}_IDX_{}", variants.len());
+        variants.push(ExtCanonicalVariant {
+            idx_const,
+            tag: &input.current_version,
+            variant_name: input.current_version.to_tag_string(),
+            cfg: None,
+        });
+    }
+
+    variants
+}
+
+fn emit_ext_variant_indices(
+    variants: &[ExtCanonicalVariant<'_>],
+    prefix: &str,
+    idx_ty: &TokenStream,
+) -> TokenStream {
+    let mut stmts = Vec::with_capacity(1 + variants.len() * 3);
+    let n0 = format_ident!("{prefix}_N_0");
+    stmts.push(quote!(const #n0: #idx_ty = 0;));
+    for (k, var) in variants.iter().enumerate() {
+        let n_cur = format_ident!("{prefix}_N_{k}");
+        let n_next = format_ident!("{prefix}_N_{}", k + 1);
+        let idx_ident = &var.idx_const;
+        if let Some(ref pred) = var.cfg {
+            stmts.push(quote! {
+                #[cfg(#pred)]
+                const #idx_ident: #idx_ty = #n_cur;
+                #[cfg(#pred)]
+                const #n_next: #idx_ty = #n_cur + 1;
+                #[cfg(not(#pred))]
+                const #n_next: #idx_ty = #n_cur;
+            });
+        } else {
+            stmts.push(quote! {
+                const #idx_ident: #idx_ty = #n_cur;
+                const #n_next: #idx_ty = #n_cur + 1;
+            });
+        }
+    }
+    quote!(#(#stmts)*)
+}
+
+fn ext_variant_lookup(variants: &[ExtCanonicalVariant<'_>], tag: &VersionTag) -> (TokenStream, String) {
+    variants
+        .iter()
+        .find(|v| v.canonical_tag_matches(tag))
+        .map_or_else(
+            || (quote!(0u32), tag.to_tag_string()),
+            |var| {
+                let idx_ident = &var.idx_const;
+                let idx_expr = var.cfg.as_ref().map_or_else(
+                    || quote!(#idx_ident),
+                    |pred| {
+                        quote! {
+                            {
+                                #[cfg(#pred)]
+                                { #idx_ident }
+                                #[cfg(not(#pred))]
+                                { 0u32 }
+                            }
+                        }
+                    },
+                );
+                (idx_expr, var.variant_name.clone())
+            },
+        )
+}
+
+impl ExtCanonicalVariant<'_> {
+    fn canonical_tag_matches(&self, tag: &VersionTag) -> bool {
+        self.tag.matches(tag)
     }
 }
 
@@ -218,7 +348,8 @@ pub fn generate_serialize_core(
         VersionTag::Untagged => unreachable!("serialize_version cannot be untagged"),
     };
 
-    let is_internal_unit_shadow = input.content_field.is_none()
+    let is_internal_unit_shadow = !input.external
+        && input.content_field.is_none()
         && dag_plan.serialize_target_is_wire
         && dag_plan.serialize_with_fn.is_none()
         && matches!(wire_mode, SelfWireMode::Shadow(info) if info.is_unit_struct);
@@ -245,7 +376,52 @@ pub fn generate_serialize_core(
         });
     }
 
-    let is_adjacent = input.content_field.is_some();
+    let is_adjacent = !input.external && input.content_field.is_some();
+    let ext_variants = if input.external {
+        collect_external_variants(input, dag_plan, "__BC_EXT_SER")
+    } else {
+        Vec::new()
+    };
+    let ext_idx_defs = if input.external {
+        emit_ext_variant_indices(&ext_variants, "__BC_EXT_SER", &quote!(u32))
+    } else {
+        TokenStream::new()
+    };
+    let (ext_idx_expr, ext_variant_name) = if input.external {
+        ext_variant_lookup(&ext_variants, &input.serialize_version)
+    } else {
+        (TokenStream::new(), String::new())
+    };
+
+    let emit_ser_expr = |wire_ref: TokenStream| -> TokenStream {
+        if input.external {
+            quote! {
+                #ext_idx_defs
+                ::serde::Serializer::serialize_newtype_variant(
+                    __serializer,
+                    #target_name,
+                    #ext_idx_expr,
+                    #ext_variant_name,
+                    #wire_ref,
+                )
+            }
+        } else if is_adjacent {
+            quote! {
+                let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: #wire_ref };
+                ::serde::Serialize::serialize(&helper, __serializer)
+            }
+        } else {
+            quote! {
+                ::backwards_compat::__private::serialize_internally_tagged(
+                    __serializer,
+                    #target_name,
+                    #tag_field,
+                    &#ser_tag_expr,
+                    #wire_ref,
+                )
+            }
+        }
+    };
 
     let (body, latest_wire_ty_in_helper) = if let Some(ref ser_fn) = dag_plan.serialize_with_fn {
         let ser_ty = if dag_plan.serialize_target_is_wire {
@@ -266,23 +442,10 @@ pub fn generate_serialize_core(
             let ty = &dag_plan.serialize_wire_ty;
             quote!(#ty)
         };
-        let s = if is_adjacent {
-            quote! {
-                let latest: #ser_ty = (#ser_fn)(#value_expr);
-                let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
-                ::serde::Serialize::serialize(&helper, __serializer)
-            }
-        } else {
-            quote! {
-                let latest: #ser_ty = (#ser_fn)(#value_expr);
-                ::backwards_compat::__private::serialize_internally_tagged(
-                    __serializer,
-                    #target_name,
-                    #tag_field,
-                    &#ser_tag_expr,
-                    &latest,
-                )
-            }
+        let ser_call = emit_ser_expr(quote!(&latest));
+        let s = quote! {
+            let latest: #ser_ty = (#ser_fn)(#value_expr);
+            #ser_call
         };
         (s, ser_ty)
     } else if dag_plan.serialize_target_is_wire {
@@ -290,43 +453,15 @@ pub fn generate_serialize_core(
             SelfWireMode::Shadow(info) => {
                 let construct_borrowed = &info.construct_borrowed;
                 let ty_in_helper = &info.borrowed_ty_in_helper;
-                let s = if is_adjacent {
-                    quote! {
-                        let latest = #construct_borrowed;
-                        let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
-                        ::serde::Serialize::serialize(&helper, __serializer)
-                    }
-                } else {
-                    quote! {
-                        let latest = #construct_borrowed;
-                        ::backwards_compat::__private::serialize_internally_tagged(
-                            __serializer,
-                            #target_name,
-                            #tag_field,
-                            &#ser_tag_expr,
-                            &latest,
-                        )
-                    }
+                let ser_call = emit_ser_expr(quote!(&latest));
+                let s = quote! {
+                    let latest = #construct_borrowed;
+                    #ser_call
                 };
                 (s, quote!(#ty_in_helper))
             }
             SelfWireMode::Direct => {
-                let s = if is_adjacent {
-                    quote! {
-                        let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: #value_expr };
-                        ::serde::Serialize::serialize(&helper, __serializer)
-                    }
-                } else {
-                    quote! {
-                        ::backwards_compat::__private::serialize_internally_tagged(
-                            __serializer,
-                            #target_name,
-                            #tag_field,
-                            &#ser_tag_expr,
-                            #value_expr,
-                        )
-                    }
-                };
+                let s = emit_ser_expr(quote!(#value_expr));
                 (s, quote!(#target_ty))
             }
             SelfWireMode::Disallowed => {
@@ -338,36 +473,21 @@ pub fn generate_serialize_core(
         }
     } else {
         let ty = &dag_plan.serialize_wire_ty;
-        let s = if is_adjacent {
-            quote! {
-                use ::backwards_compat::__private::{
-                    BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
-                };
+        let ser_call = emit_ser_expr(quote!(&latest));
+        let s = quote! {
+            use ::backwards_compat::__private::{
+                BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
+            };
 
-                let latest: #ty = __WireConvert::<_, #ty>::new(#value_expr).convert_wire();
-                let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: &latest };
-                ::serde::Serialize::serialize(&helper, __serializer)
-            }
-        } else {
-            quote! {
-                use ::backwards_compat::__private::{
-                    BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
-                };
-
-                let latest: #ty = __WireConvert::<_, #ty>::new(#value_expr).convert_wire();
-                ::backwards_compat::__private::serialize_internally_tagged(
-                    __serializer,
-                    #target_name,
-                    #tag_field,
-                    &#ser_tag_expr,
-                    &latest,
-                )
-            }
+            let latest: #ty = __WireConvert::<_, #ty>::new(#value_expr).convert_wire();
+            #ser_call
         };
         (s, quote!(#ty))
     };
 
-    if let Some(content) = input.content_field.as_ref() {
+    if !input.external
+        && let Some(content) = input.content_field.as_ref()
+    {
         let mut ser_helper_generics = input.generics.clone();
         let ser_helper_lifetime: syn::GenericParam = syn::parse_quote!('__a);
         ser_helper_generics.params.insert(0, ser_helper_lifetime);
@@ -418,6 +538,7 @@ pub fn generate_serialize_core(
 
 struct TaggedArm<'a> {
     tag: &'a VersionTag,
+    is_alias: bool,
     de_ty: TokenStream,
     conv_stmts: TokenStream,
     cfg: Option<&'a TokenStream>,
@@ -430,6 +551,13 @@ struct UntaggedArm<'a> {
     conv_stmts: TokenStream,
     cfg: Option<&'a TokenStream>,
     arm_trait: Option<syn::Ident>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmTaggingKind {
+    Internal,
+    Adjacent,
+    External,
 }
 
 pub struct UntaggedDeserializeCore {
@@ -484,7 +612,7 @@ fn emit_tagged_arm_trait(
     target_ty: &syn::Type,
     de_impl_generics: &syn::ImplGenerics<'_>,
     de_orig_where_clause: Option<&syn::WhereClause>,
-    is_adjacent: bool,
+    tagging_kind: ArmTaggingKind,
 ) -> TokenStream {
     let mut arm_wc = de_orig_where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
         where_token: syn::token::Where::default(),
@@ -494,85 +622,118 @@ fn emit_tagged_arm_trait(
         .predicates
         .push(syn::parse_quote!(#de_ty: ::serde::Deserialize<'__de>));
 
-    let adjacent_trait_methods = if is_adjacent {
-        quote! {
-            #[cfg(#pred)]
-            fn __bc_de_adjacent<__M>(
-                __map: &mut __M,
-                __content_field: &'static str,
-            ) -> ::core::result::Result<Self, __M::Error>
-            where
-                __M: ::serde::de::MapAccess<'__de>;
+    let (trait_methods, impl_methods) = match tagging_kind {
+        ArmTaggingKind::Internal => (
+            quote! {
+                #[cfg(#pred)]
+                fn __bc_de<__D>(__d: __D) -> ::core::result::Result<Self, __D::Error>
+                where
+                    __D: ::serde::Deserializer<'__de>;
+            },
+            quote! {
+                fn __bc_de<__D>(__d: __D) -> ::core::result::Result<Self, __D::Error>
+                where
+                    __D: ::serde::Deserializer<'__de>,
+                {
+                    let __val = <#de_ty as ::serde::Deserialize<'__de>>::deserialize(__d)?;
+                    #conv_stmts
+                    ::core::result::Result::Ok(__val)
+                }
+            },
+        ),
+        ArmTaggingKind::Adjacent => (
+            quote! {
+                #[cfg(#pred)]
+                fn __bc_de<__D>(__d: __D) -> ::core::result::Result<Self, __D::Error>
+                where
+                    __D: ::serde::Deserializer<'__de>;
 
-            #[cfg(#pred)]
-            fn __bc_de_seq<__A>(
-                __seq: &mut __A,
-                __exp: &dyn ::serde::de::Expected,
-            ) -> ::core::result::Result<Self, __A::Error>
-            where
-                __A: ::serde::de::SeqAccess<'__de>;
-        }
-    } else {
-        TokenStream::new()
-    };
+                #[cfg(#pred)]
+                fn __bc_de_adjacent<__M>(
+                    __map: &mut __M,
+                    __content_field: &'static str,
+                ) -> ::core::result::Result<Self, __M::Error>
+                where
+                    __M: ::serde::de::MapAccess<'__de>;
 
-    let adjacent_impl_methods = if is_adjacent {
-        quote! {
-            fn __bc_de_adjacent<__M>(
-                __map: &mut __M,
-                __content_field: &'static str,
-            ) -> ::core::result::Result<Self, __M::Error>
-            where
-                __M: ::serde::de::MapAccess<'__de>,
-            {
-                let __val = ::backwards_compat::__private::read_adjacent_content::<__M, #de_ty>(
-                    __map,
-                    __content_field,
-                )?;
-                #conv_stmts
-                ::core::result::Result::Ok(__val)
-            }
+                #[cfg(#pred)]
+                fn __bc_de_seq<__A>(
+                    __seq: &mut __A,
+                    __exp: &dyn ::serde::de::Expected,
+                ) -> ::core::result::Result<Self, __A::Error>
+                where
+                    __A: ::serde::de::SeqAccess<'__de>;
+            },
+            quote! {
+                fn __bc_de<__D>(__d: __D) -> ::core::result::Result<Self, __D::Error>
+                where
+                    __D: ::serde::Deserializer<'__de>,
+                {
+                    let __val = <#de_ty as ::serde::Deserialize<'__de>>::deserialize(__d)?;
+                    #conv_stmts
+                    ::core::result::Result::Ok(__val)
+                }
 
-            fn __bc_de_seq<__A>(
-                __seq: &mut __A,
-                __exp: &dyn ::serde::de::Expected,
-            ) -> ::core::result::Result<Self, __A::Error>
-            where
-                __A: ::serde::de::SeqAccess<'__de>,
-            {
-                let ::core::option::Option::Some(__val) = __seq.next_element::<#de_ty>()? else {
-                    return ::core::result::Result::Err(::serde::de::Error::invalid_length(1, __exp));
-                };
-                #conv_stmts
-                ::core::result::Result::Ok(__val)
-            }
-        }
-    } else {
-        TokenStream::new()
+                fn __bc_de_adjacent<__M>(
+                    __map: &mut __M,
+                    __content_field: &'static str,
+                ) -> ::core::result::Result<Self, __M::Error>
+                where
+                    __M: ::serde::de::MapAccess<'__de>,
+                {
+                    let __val = ::backwards_compat::__private::read_adjacent_content::<__M, #de_ty>(
+                        __map,
+                        __content_field,
+                    )?;
+                    #conv_stmts
+                    ::core::result::Result::Ok(__val)
+                }
+
+                fn __bc_de_seq<__A>(
+                    __seq: &mut __A,
+                    __exp: &dyn ::serde::de::Expected,
+                ) -> ::core::result::Result<Self, __A::Error>
+                where
+                    __A: ::serde::de::SeqAccess<'__de>,
+                {
+                    let ::core::option::Option::Some(__val) = __seq.next_element::<#de_ty>()? else {
+                        return ::core::result::Result::Err(::serde::de::Error::invalid_length(1, __exp));
+                    };
+                    #conv_stmts
+                    ::core::result::Result::Ok(__val)
+                }
+            },
+        ),
+        ArmTaggingKind::External => (
+            quote! {
+                #[cfg(#pred)]
+                fn __bc_de_variant<__V>(__variant: __V) -> ::core::result::Result<Self, __V::Error>
+                where
+                    __V: ::serde::de::VariantAccess<'__de>;
+            },
+            quote! {
+                fn __bc_de_variant<__V>(__variant: __V) -> ::core::result::Result<Self, __V::Error>
+                where
+                    __V: ::serde::de::VariantAccess<'__de>,
+                {
+                    let __val = ::serde::de::VariantAccess::newtype_variant::<#de_ty>(__variant)?;
+                    #conv_stmts
+                    ::core::result::Result::Ok(__val)
+                }
+            },
+        ),
     };
 
     quote! {
         #[doc(hidden)]
         #[allow(non_camel_case_types, dead_code, reason = "internal cfg-gated deserialization helper")]
         trait #arm_trait<'__de>: ::core::marker::Sized {
-            #[cfg(#pred)]
-            fn __bc_de<__D>(__d: __D) -> ::core::result::Result<Self, __D::Error>
-            where
-                __D: ::serde::Deserializer<'__de>;
-            #adjacent_trait_methods
+            #trait_methods
         }
 
         #[cfg(#pred)]
         impl #de_impl_generics #arm_trait<'__de> for #target_ty #arm_wc {
-            fn __bc_de<__D>(__d: __D) -> ::core::result::Result<Self, __D::Error>
-            where
-                __D: ::serde::Deserializer<'__de>,
-            {
-                let __val = <#de_ty as ::serde::Deserialize<'__de>>::deserialize(__d)?;
-                #conv_stmts
-                ::core::result::Result::Ok(__val)
-            }
-            #adjacent_impl_methods
+            #impl_methods
         }
 
         #[cfg(not(#pred))]
@@ -641,26 +802,57 @@ struct VisitorContext<'a> {
     tagged_arms: &'a [TaggedArm<'a>],
     untagged_arms: &'a [UntaggedArm<'a>],
     supported_str_items: &'a [TokenStream],
-    current_int_opt: &'a TokenStream,
+    current_int: u64,
     has_disabled_init: &'a TokenStream,
     track_migrated: bool,
 }
 
-fn emit_visitor_body(
+fn emit_unknown_version_expr(
+    version_mode: VersionMode,
+    tag_expr: &TokenStream,
+    current_int: u64,
+    supported_str_items: &[TokenStream],
+    has_disabled_init: &TokenStream,
+) -> TokenStream {
+    match version_mode {
+        VersionMode::Int => quote! {
+            let __supported: &[&str] = &[#(#supported_str_items,)*];
+            #has_disabled_init
+            ::core::result::Result::Err(
+                ::backwards_compat::__private::unknown_int_version_error(
+                    #tag_expr,
+                    #current_int,
+                    __supported,
+                    __has_disabled,
+                ),
+            )
+        },
+        VersionMode::Str => quote! {
+            let __supported: &[&str] = &[#(#supported_str_items,)*];
+            #has_disabled_init
+            ::core::result::Result::Err(
+                ::backwards_compat::__private::unknown_str_version_error(
+                    #tag_expr,
+                    __supported,
+                    __has_disabled,
+                ),
+            )
+        },
+    }
+}
+
+fn emit_external_visitor_body(
     ctx: &VisitorContext<'_>,
     visitor_where_clause: Option<&syn::WhereClause>,
-    accepts_untagged: bool,
 ) -> TokenStream {
     let target_ty = &ctx.input.target_ty;
-    let tag_field = &ctx.input.tag_field;
-    let content_field_opt = ctx.input.content_field.as_ref();
+    let target_name = target_type_name(target_ty);
     let version_mode = ctx.version_mode;
-    let scrutinee = version_mode.tag_match_scrutinee();
     let de_impl_generics = ctx.de_impl_generics;
     let de_ty_generics = ctx.de_ty_generics;
     let de_orig_where_clause = ctx.de_orig_where_clause;
     let supported_str_items = ctx.supported_str_items;
-    let current_int_opt = ctx.current_int_opt;
+    let current_int = ctx.current_int;
     let has_disabled_init = ctx.has_disabled_init;
 
     let value_ty = if ctx.track_migrated {
@@ -669,18 +861,264 @@ fn emit_visitor_body(
         quote!(#target_ty)
     };
 
+    let mut variant_names = Vec::new();
+    let mut field_enum_variants = Vec::new();
+    let mut str_match_arms = Vec::new();
+    let mut visit_enum_arms = Vec::new();
+
+    // Build dense 0..N canonical indices in u64 for `visit_u64` (zero `as` casts).
+    let mut idx_stmts = vec![quote!(
+        const __BC_EXT_DE_N_0: u64 = 0;
+    )];
+    let mut u64_match_arms = Vec::new();
+    let mut canonical_k = 0usize;
+
+    for (arm_idx, arm) in ctx.tagged_arms.iter().enumerate() {
+        let cfg_tokens = cfg_attr(arm.cfg);
+        let field_ident = format_ident!("__Arm_{arm_idx}");
+        let tag_str = arm.tag.to_tag_string();
+
+        field_enum_variants.push(quote! {
+            #cfg_tokens
+            #field_ident
+        });
+
+        str_match_arms.push(quote! {
+            #cfg_tokens
+            #tag_str => ::core::result::Result::Ok(__BcExtField::#field_ident),
+        });
+
+        if !arm.is_alias {
+            variant_names.push(quote! { #cfg_tokens #tag_str });
+
+            let n_cur = format_ident!("__BC_EXT_DE_N_{canonical_k}");
+            let n_next = format_ident!("__BC_EXT_DE_N_{}", canonical_k + 1);
+            let idx_ident = format_ident!("__BC_EXT_DE_IDX_{canonical_k}");
+            if let Some(pred) = arm.cfg {
+                idx_stmts.push(quote! {
+                    #[cfg(#pred)]
+                    const #idx_ident: u64 = #n_cur;
+                    #[cfg(#pred)]
+                    const #n_next: u64 = #n_cur + 1;
+                    #[cfg(not(#pred))]
+                    const #n_next: u64 = #n_cur;
+                });
+            } else {
+                idx_stmts.push(quote! {
+                    const #idx_ident: u64 = #n_cur;
+                    const #n_next: u64 = #n_cur + 1;
+                });
+            }
+
+            u64_match_arms.push(quote! {
+                #cfg_tokens
+                #idx_ident => ::core::result::Result::Ok(__BcExtField::#field_ident),
+            });
+            canonical_k += 1;
+        }
+
+        let wrap = wrap_tagged_ok(arm.version_expr.as_ref(), ctx.track_migrated);
+        let arm_body = arm.arm_trait.as_ref().map_or_else(
+            || {
+                let de_ty = &arm.de_ty;
+                let conv = &arm.conv_stmts;
+                quote! {
+                    let __val = ::serde::de::VariantAccess::newtype_variant::<#de_ty>(__variant)?;
+                    #conv
+                    #wrap
+                }
+            },
+            |arm_trait| {
+                quote! {
+                    let __val = <#target_ty as #arm_trait<'__de>>::__bc_de_variant(__variant)?;
+                    #wrap
+                }
+            },
+        );
+        visit_enum_arms.push(quote! {
+            #cfg_tokens
+            __BcExtField::#field_ident => {
+                #arm_body
+            }
+        });
+    }
+
+    let str_fallback = match version_mode {
+        VersionMode::Int => quote! {
+            _ => {
+                let __supported: &[&str] = &[#(#supported_str_items,)*];
+                #has_disabled_init
+                if let ::core::result::Result::Ok(__n) = __v.parse::<u64>() {
+                    ::core::result::Result::Err(
+                        ::backwards_compat::__private::unknown_int_version_error(
+                            __n,
+                            #current_int,
+                            __supported,
+                            __has_disabled,
+                        ),
+                    )
+                } else {
+                    ::core::result::Result::Err(
+                        ::backwards_compat::__private::unknown_str_version_error(
+                            __v,
+                            __supported,
+                            __has_disabled,
+                        ),
+                    )
+                }
+            }
+        },
+        VersionMode::Str => quote! {
+            _ => {
+                let __supported: &[&str] = &[#(#supported_str_items,)*];
+                #has_disabled_init
+                ::core::result::Result::Err(
+                    ::backwards_compat::__private::unknown_str_version_error(
+                        __v,
+                        __supported,
+                        __has_disabled,
+                    ),
+                )
+            }
+        },
+    };
+
+    quote! {
+        #[allow(non_camel_case_types, dead_code, reason = "internal external-tagging variant identifier")]
+        enum __BcExtField {
+            #(#field_enum_variants,)*
+        }
+
+        struct __BcExtFieldVisitor;
+
+        impl<'__de> ::serde::de::Visitor<'__de> for __BcExtFieldVisitor {
+            type Value = __BcExtField;
+
+            fn expecting(&self, __formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                __formatter.write_str("variant identifier")
+            }
+
+            fn visit_u64<__E>(self, __v: u64) -> ::core::result::Result<Self::Value, __E>
+            where
+                __E: ::serde::de::Error,
+            {
+                #(#idx_stmts)*
+                match __v {
+                    #(#u64_match_arms)*
+                    _ => ::core::result::Result::Err(::serde::de::Error::invalid_value(
+                        ::serde::de::Unexpected::Unsigned(__v),
+                        &self,
+                    )),
+                }
+            }
+
+            fn visit_str<__E>(self, __v: &str) -> ::core::result::Result<Self::Value, __E>
+            where
+                __E: ::serde::de::Error,
+            {
+                match __v {
+                    #(#str_match_arms)*
+                    #str_fallback
+                }
+            }
+
+            fn visit_bytes<__E>(self, __v: &[u8]) -> ::core::result::Result<Self::Value, __E>
+            where
+                __E: ::serde::de::Error,
+            {
+                match ::core::str::from_utf8(__v) {
+                    ::core::result::Result::Ok(__s) => self.visit_str(__s),
+                    ::core::result::Result::Err(_) => ::core::result::Result::Err(
+                        ::serde::de::Error::invalid_value(::serde::de::Unexpected::Bytes(__v), &self),
+                    ),
+                }
+            }
+        }
+
+        impl<'__de> ::serde::Deserialize<'__de> for __BcExtField {
+            fn deserialize<__D2>(__deserializer: __D2) -> ::core::result::Result<Self, __D2::Error>
+            where
+                __D2: ::serde::Deserializer<'__de>,
+            {
+                __deserializer.deserialize_identifier(__BcExtFieldVisitor)
+            }
+        }
+
+        #[allow(non_camel_case_types, dead_code, reason = "internal external-tagging visitor")]
+        struct __BcVisitor #de_impl_generics (
+            ::core::marker::PhantomData<fn() -> #target_ty>,
+            ::core::marker::PhantomData<&'__de ()>,
+        ) #de_orig_where_clause;
+
+        impl #de_impl_generics ::serde::de::Visitor<'__de> for __BcVisitor #de_ty_generics #visitor_where_clause {
+            type Value = #value_ty;
+
+            fn expecting(&self, __formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                __formatter.write_str("an externally tagged versioned value")
+            }
+
+            fn visit_enum<__A>(self, __data: __A) -> ::core::result::Result<Self::Value, __A::Error>
+            where
+                __A: ::serde::de::EnumAccess<'__de>,
+            {
+                let (__field, __variant) = ::serde::de::EnumAccess::variant::<__BcExtField>(__data)?;
+                match __field {
+                    #(#visit_enum_arms,)*
+                }
+            }
+        }
+
+        const __VARIANTS: &'static [&'static str] = &[#(#variant_names,)*];
+        let __visitor: __BcVisitor #de_ty_generics = __BcVisitor(
+            ::core::marker::PhantomData,
+            ::core::marker::PhantomData,
+        );
+        __deserializer.deserialize_enum(#target_name, __VARIANTS, __visitor)
+    }
+}
+
+fn emit_visitor_body(
+    ctx: &VisitorContext<'_>,
+    visitor_where_clause: Option<&syn::WhereClause>,
+    accepts_untagged: bool,
+) -> TokenStream {
+    if ctx.input.external {
+        return emit_external_visitor_body(ctx, visitor_where_clause);
+    }
+
+    let target_ty = &ctx.input.target_ty;
+    let tag_field = &ctx.input.tag_field;
+    let content_field_opt = ctx.input.content_field.as_ref();
+    let version_mode = ctx.version_mode;
+    let tag_de_ty = version_mode.tag_deserialize_ty();
+    let tag_param_ty = version_mode.tag_param_ty();
+    let tag_ident = format_ident!("__tag");
+    let tag_val_ident = format_ident!("__tag_val");
+    let tag_arg = version_mode.tag_arg_expr(&tag_ident);
+    let tag_val_arg = version_mode.tag_arg_expr(&tag_val_ident);
+    let de_impl_generics = ctx.de_impl_generics;
+    let de_ty_generics = ctx.de_ty_generics;
+    let de_orig_where_clause = ctx.de_orig_where_clause;
+    let supported_str_items = ctx.supported_str_items;
+    let current_int = ctx.current_int;
+    let has_disabled_init = ctx.has_disabled_init;
+
+    let value_ty = if ctx.track_migrated {
+        quote!(::backwards_compat::Migrated<#target_ty>)
+    } else {
+        quote!(#target_ty)
+    };
+
+    let unknown_err_expr = emit_unknown_version_expr(
+        version_mode,
+        &quote!(__tag),
+        current_int,
+        supported_str_items,
+        has_disabled_init,
+    );
     let unknown_version_arm = quote! {
         _ => {
-            let __supported: &[&str] = &[#(#supported_str_items,)*];
-            #has_disabled_init
-            ::core::result::Result::Err(
-                ::backwards_compat::__private::unknown_version_error(
-                    __tag,
-                    #current_int_opt,
-                    __supported,
-                    __has_disabled,
-                ),
-            )
+            #unknown_err_expr
         }
     };
 
@@ -720,13 +1158,13 @@ fn emit_visitor_body(
 
     let dispatch_de_method = quote! {
         fn __bc_dispatch_de<__D2>(
-            __tag: &::backwards_compat::__private::TagValue<'__de>,
+            __tag: #tag_param_ty,
             __d: __D2,
         ) -> ::core::result::Result<#value_ty, __D2::Error>
         where
             __D2: ::serde::Deserializer<'__de>,
         {
-            match #scrutinee {
+            match __tag {
                 #(#dispatch_de_arms,)*
                 #unknown_version_arm
             }
@@ -776,13 +1214,13 @@ fn emit_visitor_body(
 
         quote! {
             fn __bc_dispatch_adjacent_streaming<__M>(
-                __tag: &::backwards_compat::__private::TagValue<'__de>,
+                __tag: #tag_param_ty,
                 __map: &mut __M,
             ) -> ::core::result::Result<#value_ty, __M::Error>
             where
                 __M: ::serde::de::MapAccess<'__de>,
             {
-                match #scrutinee {
+                match __tag {
                     #(#adj_arms,)*
                     #unknown_version_arm
                 }
@@ -813,9 +1251,56 @@ fn emit_visitor_body(
         }
     };
 
+    let tag_or_content_ty = version_mode.tag_or_content_ty();
+    let tag_or_content_tag_pat = version_mode.tag_or_content_tag_pat();
+    let tag_or_content_other_pat = version_mode.tag_or_content_other_pat();
+
     // visit_map implementation.
     let visit_map_method = content_field_opt.map_or_else(
         || {
+            let on_internal_tag = if accepts_untagged {
+                quote! {
+                    match __map.next_value::<#tag_or_content_ty>()? {
+                        #tag_or_content_tag_pat => {
+                            if __prefix.is_empty() {
+                                return Self::__bc_dispatch_de(
+                                    #tag_arg,
+                                    ::backwards_compat::__private::RemainingMapDeserializer::new(__map),
+                                );
+                            }
+                            return Self::__bc_dispatch_de(
+                                #tag_arg,
+                                ::backwards_compat::__private::RemainingMapDeserializer::new(
+                                    ::backwards_compat::__private::ChainedMapAccess::new(__prefix, __map),
+                                ),
+                            );
+                        }
+                        #tag_or_content_other_pat => {
+                            __prefix.push((
+                                ::backwards_compat::__private::Content::Str(#tag_field),
+                                __other,
+                            ));
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    let __tag = __map.next_value::<#tag_de_ty>()?;
+                    if __prefix.is_empty() {
+                        return Self::__bc_dispatch_de(
+                            #tag_arg,
+                            ::backwards_compat::__private::RemainingMapDeserializer::new(__map),
+                        );
+                    }
+                    return Self::__bc_dispatch_de(
+                        #tag_arg,
+                        ::backwards_compat::__private::RemainingMapDeserializer::new(
+                            ::backwards_compat::__private::ChainedMapAccess::new(__prefix, __map),
+                        ),
+                    );
+                }
+            };
+
             quote! {
                 fn visit_map<__A>(self, mut __map: __A) -> ::core::result::Result<Self::Value, __A::Error>
                 where
@@ -831,19 +1316,7 @@ fn emit_visitor_body(
                     )? {
                         match __key {
                             ::backwards_compat::__private::InternalKeyResult::Tag => {
-                                let __tag = __map.next_value::<::backwards_compat::__private::TagValue<'__de>>()?;
-                                if __prefix.is_empty() {
-                                    return Self::__bc_dispatch_de(
-                                        &__tag,
-                                        ::backwards_compat::__private::RemainingMapDeserializer::new(__map),
-                                    );
-                                }
-                                return Self::__bc_dispatch_de(
-                                    &__tag,
-                                    ::backwards_compat::__private::RemainingMapDeserializer::new(
-                                        ::backwards_compat::__private::ChainedMapAccess::new(__prefix, __map),
-                                    ),
-                                );
+                                #on_internal_tag
                             }
                             ::backwards_compat::__private::InternalKeyResult::Other(__k) => {
                                 let __v = __map.next_value::<::backwards_compat::__private::Content<'__de>>()?;
@@ -874,17 +1347,26 @@ fn emit_visitor_body(
                         )? {
                             match __key {
                                 ::backwards_compat::__private::AdjacentKeyResult::Tag => {
-                                    let __tag = __map.next_value::<::backwards_compat::__private::TagValue<'__de>>()?;
-                                    if let ::core::option::Option::Some(__idx) = __buffered_content_idx {
-                                        let (_, __content) = __prefix.swap_remove(__idx);
-                                        let __res = Self::__bc_dispatch_de(
-                                            &__tag,
-                                            ::backwards_compat::__private::ContentDeserializer::new(__content),
-                                        )?;
-                                        ::backwards_compat::__private::drain_map(&mut __map)?;
-                                        return ::core::result::Result::Ok(__res);
+                                    match __map.next_value::<#tag_or_content_ty>()? {
+                                        #tag_or_content_tag_pat => {
+                                            if let ::core::option::Option::Some(__idx) = __buffered_content_idx {
+                                                let (_, __content) = __prefix.swap_remove(__idx);
+                                                let __res = Self::__bc_dispatch_de(
+                                                    #tag_arg,
+                                                    ::backwards_compat::__private::ContentDeserializer::new(__content),
+                                                )?;
+                                                ::backwards_compat::__private::drain_map(&mut __map)?;
+                                                return ::core::result::Result::Ok(__res);
+                                            }
+                                            return Self::__bc_dispatch_adjacent_streaming(#tag_arg, &mut __map);
+                                        }
+                                        #tag_or_content_other_pat => {
+                                            __prefix.push((
+                                                ::backwards_compat::__private::Content::Str(#tag_field),
+                                                __other,
+                                            ));
+                                        }
                                     }
-                                    return Self::__bc_dispatch_adjacent_streaming(&__tag, &mut __map);
                                 }
                                 ::backwards_compat::__private::AdjacentKeyResult::Content => {
                                     let __v = __map.next_value::<::backwards_compat::__private::Content<'__de>>()?;
@@ -924,16 +1406,16 @@ fn emit_visitor_body(
                         )? {
                             match __key {
                                 ::backwards_compat::__private::AdjacentKeyResult::Tag => {
-                                    let __tag = __map.next_value::<::backwards_compat::__private::TagValue<'__de>>()?;
+                                    let __tag = __map.next_value::<#tag_de_ty>()?;
                                     if let ::core::option::Option::Some(__content) = __buffered_content {
                                         let __res = Self::__bc_dispatch_de(
-                                            &__tag,
+                                            #tag_arg,
                                             ::backwards_compat::__private::ContentDeserializer::new(__content),
                                         )?;
                                         ::backwards_compat::__private::drain_map(&mut __map)?;
                                         return ::core::result::Result::Ok(__res);
                                     }
-                                    return Self::__bc_dispatch_adjacent_streaming(&__tag, &mut __map);
+                                    return Self::__bc_dispatch_adjacent_streaming(#tag_arg, &mut __map);
                                 }
                                 ::backwards_compat::__private::AdjacentKeyResult::Content => {
                                     if __buffered_content.is_some() {
@@ -1039,12 +1521,12 @@ fn emit_visitor_body(
                         __A: ::serde::de::SeqAccess<'__de>,
                     {
                         let ::core::option::Option::Some(__tag_val) =
-                            __seq.next_element::<::backwards_compat::__private::TagValue<'__de>>()?
+                            __seq.next_element::<#tag_de_ty>()?
                         else {
                             return ::core::result::Result::Err(::serde::de::Error::invalid_length(0, &self));
                         };
-                        let __tag = &__tag_val;
-                        match #scrutinee {
+                        let __tag = #tag_val_arg;
+                        match __tag {
                             #(#seq_arms,)*
                             #unknown_version_arm
                         }
@@ -1222,7 +1704,13 @@ pub fn generate_deserialize_core(
     let version_mode = VersionMode::from_input(input);
     let (_, ty_generics, _) = input.generics.split_for_impl();
     let is_generic = input.generics.type_params().next().is_some();
-    let is_adjacent = input.content_field.is_some();
+    let tagging_kind = if input.external {
+        ArmTaggingKind::External
+    } else if input.content_field.is_some() {
+        ArmTaggingKind::Adjacent
+    } else {
+        ArmTaggingKind::Internal
+    };
 
     let de_generics = build_de_generics(&input.generics);
     let (de_impl_generics, de_ty_generics, de_orig_where_clause) = de_generics.split_for_impl();
@@ -1268,7 +1756,7 @@ pub fn generate_deserialize_core(
                     target_ty,
                     &de_impl_generics,
                     de_orig_where_clause,
-                    is_adjacent,
+                    tagging_kind,
                 ));
                 base_wc
                     .predicates
@@ -1290,6 +1778,7 @@ pub fn generate_deserialize_core(
 
         tagged_arms.push(TaggedArm {
             tag: &v.tag,
+            is_alias: v.is_alias,
             de_ty,
             conv_stmts,
             cfg: path.cfg.as_ref(),
@@ -1334,6 +1823,7 @@ pub fn generate_deserialize_core(
 
         tagged_arms.push(TaggedArm {
             tag: &input.current_version,
+            is_alias: false,
             de_ty,
             conv_stmts,
             cfg: None,
@@ -1406,9 +1896,9 @@ pub fn generate_deserialize_core(
         });
     }
 
-    let current_int_opt = match input.current_version {
-        VersionTag::Int(n) => quote!(::core::option::Option::Some(#n)),
-        VersionTag::String(_) | VersionTag::Untagged => quote!(::core::option::Option::None),
+    let current_int = match input.current_version {
+        VersionTag::Int(n) => n,
+        VersionTag::String(_) | VersionTag::Untagged => 0,
     };
 
     let has_disabled_init = if has_any_gated_tagged {
@@ -1434,7 +1924,7 @@ pub fn generate_deserialize_core(
         tagged_arms: &tagged_arms,
         untagged_arms: &untagged_arms,
         supported_str_items: &supported_str_items,
-        current_int_opt: &current_int_opt,
+        current_int,
         has_disabled_init: &has_disabled_init,
         track_migrated,
     };
@@ -1483,9 +1973,20 @@ fn generate_backwards_compat_serialize(
     let target_name = target_type_name(target_ty);
     let tag_field = &input.tag_field;
     let content_field_opt = input.content_field.as_ref();
-    let is_adjacent = content_field_opt.is_some();
+    let is_adjacent = !input.external && content_field_opt.is_some();
     let is_generic = input.generics.type_params().next().is_some();
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let ext_variants = if input.external {
+        collect_external_variants(input, dag_plan, "__BC_EXT_AS")
+    } else {
+        Vec::new()
+    };
+    let ext_idx_defs = if input.external {
+        emit_ext_variant_indices(&ext_variants, "__BC_EXT_AS", &quote!(u32))
+    } else {
+        TokenStream::new()
+    };
 
     let mut ser_as_wc = where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
         where_token: syn::token::Where::default(),
@@ -1507,28 +2008,41 @@ fn generate_backwards_compat_serialize(
         };
 
         let emit_ser_call = |wire_ref: TokenStream| -> TokenStream {
-            content_field_opt.map_or_else(
-                || {
-                    quote! {
-                        ::backwards_compat::__private::serialize_internally_tagged(
-                            __serializer,
-                            #target_name,
-                            #tag_field,
-                            &#tag_lit,
-                            #wire_ref,
-                        )
-                    }
-                },
-                |_content_field| {
-                    quote! {
-                        let __helper = __BcAdjSerHelper {
-                            __tag: &#tag_lit,
-                            __content: #wire_ref,
-                        };
-                        ::serde::Serialize::serialize(&__helper, __serializer)
-                    }
-                },
-            )
+            if input.external {
+                let (ext_idx_expr, ext_variant_name) = ext_variant_lookup(&ext_variants, tag);
+                quote! {
+                    ::serde::Serializer::serialize_newtype_variant(
+                        __serializer,
+                        #target_name,
+                        #ext_idx_expr,
+                        #ext_variant_name,
+                        #wire_ref,
+                    )
+                }
+            } else {
+                content_field_opt.map_or_else(
+                    || {
+                        quote! {
+                            ::backwards_compat::__private::serialize_internally_tagged(
+                                __serializer,
+                                #target_name,
+                                #tag_field,
+                                &#tag_lit,
+                                #wire_ref,
+                            )
+                        }
+                    },
+                    |_content_field| {
+                        quote! {
+                            let __helper = __BcAdjSerHelper {
+                                __tag: &#tag_lit,
+                                __content: #wire_ref,
+                            };
+                            ::serde::Serialize::serialize(&__helper, __serializer)
+                        }
+                    },
+                )
+            }
         };
 
         let resolve_owned_wire_ty = |v_ty: &syn::Type| -> syn::Result<TokenStream> {
@@ -1586,7 +2100,7 @@ fn generate_backwards_compat_serialize(
                 } else if ty == target_ty {
                     match wire_mode {
                         SelfWireMode::Shadow(info) => {
-                            if !is_adjacent && info.is_unit_struct {
+                            if !is_adjacent && !input.external && info.is_unit_struct {
                                 (emit_ser_call(quote!(&())), None)
                             } else {
                                 let construct_borrowed = &info.construct_borrowed;
@@ -1762,6 +2276,7 @@ fn generate_backwards_compat_serialize(
 
     Ok(quote! {
         #adj_helper_def
+        #ext_idx_defs
 
         impl #impl_generics ::backwards_compat::BackwardsCompatSerialize for #target_ty #ser_as_where_clause {
             const SERIALIZABLE_VERSIONS: &'static [Self::Version] = &[#(#serializable_version_items,)*];
@@ -1870,6 +2385,15 @@ pub fn generate_json_schema_body(
         };
 
     let build_tagged_expr = |de_ty: &TokenStream, tag: &VersionTag| -> TokenStream {
+        if input.external {
+            let variant_name = tag.to_tag_string();
+            return quote! {
+                ::backwards_compat::__private::schema_externally_tagged(
+                    __gen.subschema_for::<#de_ty>(),
+                    #variant_name,
+                )
+            };
+        }
         let tag_schema_val = match tag {
             VersionTag::Int(n) => quote!(::backwards_compat::__private::TagSchemaValue::Int(#n)),
             VersionTag::String(s) => quote!(::backwards_compat::__private::TagSchemaValue::Str(#s)),
@@ -2091,10 +2615,18 @@ pub fn generate_backwards_compat(
 
     let target_ty = &input.target_ty;
     let tag_field = &input.tag_field;
-    let content_field_expr = input.content_field.as_ref().map_or_else(
-        || quote!(::core::option::Option::None),
-        |content| quote!(::core::option::Option::Some(#content)),
-    );
+    let tagging_expr = if input.external {
+        quote!(::backwards_compat::Tagging::External)
+    } else if let Some(ref content) = input.content_field {
+        quote!(::backwards_compat::Tagging::Adjacent {
+            tag: #tag_field,
+            content: #content,
+        })
+    } else {
+        quote!(::backwards_compat::Tagging::Internal {
+            tag: #tag_field,
+        })
+    };
     let version_mode = VersionMode::from_input(input);
     let (impl_generics, _, where_clause) = input.generics.split_for_impl();
 
@@ -2244,8 +2776,7 @@ pub fn generate_backwards_compat(
                 const SERIALIZE_VERSION: Self::Version = #serialize_version_expr;
                 const SUPPORTED_VERSIONS: &'static [Self::Version] = &[#(#supported_version_items,)*];
                 #accepts_untagged_const
-                const TAG_FIELD: &'static str = #tag_field;
-                const CONTENT_FIELD: ::core::option::Option<&'static str> = #content_field_expr;
+                const TAGGING: ::backwards_compat::Tagging = #tagging_expr;
             }
 
             impl #impl_generics ::serde::Serialize for #target_ty #ser_where_clause {
@@ -2560,13 +3091,9 @@ mod tests {
         let rendered = generated.to_string();
 
         assert!(!rendered.contains("__VersionHelper"));
-        assert!(rendered.contains(
-            "# [cfg (all (feature = \"v1\" , feature = \"v2\"))] :: backwards_compat :: __private :: TagValue :: Int (1u64) =>"
-        ));
-        assert!(rendered.contains(
-            "# [cfg (feature = \"v2\")] :: backwards_compat :: __private :: TagValue :: Int (2u64) =>"
-        ));
-        assert!(rendered.contains(":: backwards_compat :: __private :: TagValue :: Int (3u64) =>"));
+        assert!(rendered.contains("# [cfg (all (feature = \"v1\" , feature = \"v2\"))] 1u64 =>"));
+        assert!(rendered.contains("# [cfg (feature = \"v2\")] 2u64 =>"));
+        assert!(rendered.contains("3u64 =>"));
 
         syn::parse2::<syn::File>(generated).unwrap();
     }
@@ -2663,8 +3190,20 @@ mod tests {
         assert!(!rendered.contains("UntaggedMultiDispatch"));
         assert!(!rendered.contains("fn dispatch_content"));
         assert!(rendered.contains("into_boxed_slice ()"));
+        assert!(rendered.contains("IntTagOrContent"));
         assert!(!rendered.contains(":: std ::"));
         syn::parse2::<syn::File>(generated).unwrap();
+
+        let str_untagged = parse_test_input(quote! {
+            versions = [
+                _: LegacyV0 => "v1",
+                "v1": ModelV1,
+            ]
+        });
+        let str_rendered = generate_for_test(&str_untagged, SelfWireMode::Disallowed, None)
+            .unwrap()
+            .to_string();
+        assert!(str_rendered.contains("StrTagOrContent"));
     }
 
     #[test]
@@ -2699,23 +3238,8 @@ mod tests {
         assert!(str_rendered.contains("type Version = & 'static str ;"));
         assert!(str_rendered.contains("const CURRENT_VERSION : Self :: Version = \"v2\" ;"));
         assert!(str_rendered.contains("const SERIALIZE_VERSION : Self :: Version = \"v2\" ;"));
+        assert!(str_rendered.contains("StrTag < '__de >"));
         syn::parse2::<syn::File>(str_gen).unwrap();
-
-        // Mixed int + str -> VersionKey
-        let mixed_input = parse_test_input(quote! {
-            versions = [
-                1: ModelV1 => "v2",
-                "v2": ModelV2,
-            ]
-        });
-        let mixed_gen = generate_for_test(&mixed_input, SelfWireMode::Disallowed, None).unwrap();
-        let mixed_rendered = mixed_gen.to_string();
-        assert!(mixed_rendered.contains("type Version = :: backwards_compat :: VersionKey ;"));
-        assert!(mixed_rendered.contains(
-            "const CURRENT_VERSION : Self :: Version = :: backwards_compat :: VersionKey :: Str (\"v2\") ;"
-        ));
-        assert!(mixed_rendered.contains(":: backwards_compat :: VersionKey :: Int (1u64)"));
-        syn::parse2::<syn::File>(mixed_gen).unwrap();
     }
 
     #[test]
@@ -3012,17 +3536,19 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_backwards_compat_tag_and_content_field_consts_and_version_matching() {
-        // Int mode
+    fn test_generate_backwards_compat_tagging_consts_and_version_matching() {
+        // Int internal mode
         let int_input = parse_test_input(quote! {
             tag = "v",
             versions = [1: V1, 2: V2]
         });
         let int_gen = generate_for_test(&int_input, SelfWireMode::Disallowed, None).unwrap();
         let int_str = int_gen.to_string();
-        assert!(int_str.contains("const TAG_FIELD : & 'static str = \"v\" ;"));
-        assert!(int_str.contains("const CONTENT_FIELD : :: core :: option :: Option < & 'static str > = :: core :: option :: Option :: None ;"));
-        assert!(int_str.contains("match __tag { :: backwards_compat :: __private :: TagValue :: Int (1u64)"));
+        assert!(int_str.contains(
+            "const TAGGING : :: backwards_compat :: Tagging = :: backwards_compat :: Tagging :: Internal { tag : \"v\" , } ;"
+        ));
+        assert!(int_str.contains("__map . next_value :: < u64 > () ?"));
+        assert!(int_str.contains("match __tag { 1u64 =>"));
 
         // Str mode with adjacent content
         let str_input = parse_test_input(quote! {
@@ -3032,17 +3558,39 @@ mod tests {
         });
         let str_gen = generate_for_test(&str_input, SelfWireMode::Disallowed, None).unwrap();
         let str_str = str_gen.to_string();
-        assert!(str_str.contains("const TAG_FIELD : & 'static str = \"ver\" ;"));
-        assert!(str_str.contains("const CONTENT_FIELD : :: core :: option :: Option < & 'static str > = :: core :: option :: Option :: Some (\"payload\") ;"));
-        assert!(str_str.contains("match __tag . as_str () { :: core :: option :: Option :: Some (\"a\")"));
+        assert!(str_str.contains(
+            "const TAGGING : :: backwards_compat :: Tagging = :: backwards_compat :: Tagging :: Adjacent { tag : \"ver\" , content : \"payload\" , } ;"
+        ));
+        assert!(
+            str_str.contains(
+                "__map . next_value :: < :: backwards_compat :: __private :: StrTag < '__de > > () ?"
+            )
+        );
+        assert!(str_str.contains(
+            "__seq . next_element :: < :: backwards_compat :: __private :: StrTag < '__de > > () ?"
+        ));
+        assert!(str_str.contains("match __tag { \"a\" =>"));
 
-        // Mixed mode
-        let mixed_input = parse_test_input(quote! {
-            versions = [1: V1, "2": V2]
+        // External mode
+        let ext_input = parse_test_input(quote! {
+            external,
+            versions = [
+                #[serializable] 1 | 10: V1 => 3,
+                #[cfg(feature = "v2")] #[serializable] 2: V2 => 3,
+                #[current] 3: V3,
+            ]
         });
-        let mixed_gen = generate_for_test(&mixed_input, SelfWireMode::Disallowed, None).unwrap();
-        let mixed_str = mixed_gen.to_string();
-        assert!(mixed_str.contains("match (__tag . as_u64 () , __tag . as_str ())"));
+        let ext_gen = generate_for_test(&ext_input, SelfWireMode::Disallowed, None).unwrap();
+        let ext_str = ext_gen.to_string();
+        assert!(ext_str.contains(
+            "const TAGGING : :: backwards_compat :: Tagging = :: backwards_compat :: Tagging :: External ;"
+        ));
+        assert!(ext_str.contains("serialize_newtype_variant"));
+        assert!(ext_str.contains("deserialize_enum"));
+        assert!(ext_str.contains("deserialize_identifier"));
+        assert!(!ext_str.contains("deserialize_any"));
+        assert!(ext_str.contains("const __VARIANTS : & 'static [& 'static str] = & [\"1\" , # [cfg (feature = \"v2\")] \"2\" , \"3\" ,] ;"));
+        syn::parse2::<syn::File>(ext_gen).unwrap();
     }
 
     #[test]
@@ -3171,5 +3719,48 @@ mod tests {
         assert!(adj_rendered.contains("schema_adjacently_tagged"));
         assert!(adj_rendered.contains("TagSchemaValue :: Str (\"v1\")"));
         syn::parse2::<syn::File>(adj_gen).unwrap();
+
+        let ext = parse_test_input(quote! {
+            external,
+            versions = [
+                1: ModelV1,
+                2: ModelV2,
+            ]
+        });
+        let ext_plan = resolve_dag(&ext).unwrap();
+        let ext_gen =
+            generate_backwards_compat(&ext, &ext_plan, SelfWireMode::Disallowed, None, true).unwrap();
+        let ext_rendered = ext_gen.to_string();
+        assert!(ext_rendered.contains("schema_externally_tagged"));
+        assert!(ext_rendered.contains("\"1\""));
+        assert!(ext_rendered.contains("\"2\""));
+        syn::parse2::<syn::File>(ext_gen).unwrap();
+    }
+
+    #[test]
+    fn test_generate_backwards_compat_external_generic_cfg_arm_trait() {
+        let args: BackwardsCompatArgs = syn::parse2(quote! {
+            external,
+            versions = [
+                #[cfg(feature = "v1")]
+                #[serializable]
+                "v1": GenericV1<T> => "v2",
+                #[current]
+                "v2": GenericV2<T>,
+            ]
+        })
+        .unwrap();
+        let target_ty: syn::Type = syn::parse_quote!(GenericModel<T>);
+        let vis: syn::Visibility = syn::parse_quote!(pub);
+        let generics: syn::Generics = syn::parse_quote!(<T>);
+        let input = args.into_input(target_ty, vis, generics).unwrap();
+
+        let generated = generate_for_test(&input, SelfWireMode::Disallowed, None).unwrap();
+        let rendered = generated.to_string();
+
+        assert!(rendered.contains("fn __bc_de_variant"));
+        assert!(rendered.contains("trait __BcSerArm_0"));
+        assert!(!rendered.contains("deserialize_any"));
+        syn::parse2::<syn::File>(generated).unwrap();
     }
 }

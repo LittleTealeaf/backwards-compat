@@ -1,8 +1,8 @@
-use backwards_compat::{BackwardsCompat, BackwardsCompatSerialize, Migrated, VersionKey, backwards_compat};
+use backwards_compat::{BackwardsCompat, BackwardsCompatSerialize, Migrated, Tagging, backwards_compat};
 use serde::{Deserialize, Serialize};
 
 // =========================================================================
-// 1. BackwardsCompat metadata trait (u64, &'static str, VersionKey)
+// 1. BackwardsCompat metadata trait (u64, &'static str, Tagging)
 //    + #[cfg]-aware SUPPORTED_VERSIONS and ACCEPTS_UNTAGGED
 // =========================================================================
 
@@ -61,19 +61,20 @@ impl From<MetaV1> for StrMetaModel {
 }
 
 #[backwards_compat(
+    external,
     versions(
-        1: MetaV1 => "v2",
-        "v2": Self,
+        1: MetaV1 => 2,
+        2: Self,
     )
 )]
 #[derive(Debug, PartialEq, Eq)]
-pub struct MixedMetaModel {
+pub struct ExternalMetaModel {
     pub x: i32,
 }
 
-impl From<MetaV1> for MixedMetaModel {
+impl From<MetaV1> for ExternalMetaModel {
     fn from(v: MetaV1) -> Self {
-        Self { x: v.x }
+        Self { x: v.x + 2 }
     }
 }
 
@@ -95,16 +96,13 @@ fn test_backwards_compat_metadata_trait() {
         assert!(!StrMetaModel::ACCEPTS_UNTAGGED);
     }
 
-    // Mixed version mode (`VersionKey`)
-    assert_eq!(MixedMetaModel::CURRENT_VERSION, VersionKey::Str("v2"));
-    assert_eq!(MixedMetaModel::CURRENT_VERSION, "v2");
-    assert_eq!(MixedMetaModel::SERIALIZE_VERSION, "v2");
-    assert_eq!(
-        MixedMetaModel::SUPPORTED_VERSIONS,
-        &[VersionKey::Int(1), VersionKey::Str("v2")]
-    );
+    // External tagging metadata
+    assert_eq!(ExternalMetaModel::CURRENT_VERSION, 2);
+    assert_eq!(ExternalMetaModel::SERIALIZE_VERSION, 2);
+    assert_eq!(ExternalMetaModel::SUPPORTED_VERSIONS, &[1, 2]);
     const {
-        assert!(!MixedMetaModel::ACCEPTS_UNTAGGED);
+        assert!(!ExternalMetaModel::ACCEPTS_UNTAGGED);
+        assert!(matches!(ExternalMetaModel::TAGGING, Tagging::External));
     }
 }
 
@@ -132,14 +130,16 @@ fn test_migrated_wrapper_tracks_source_version() {
     assert!(untagged.was_migrated());
     assert_eq!(untagged.into_inner(), IntMetaModel { x: 10 });
 
-    // Mixed VersionKey tracking
-    let mixed_old: Migrated<MixedMetaModel> = serde_json::from_str(r#"{"version":1,"x":5}"#).unwrap();
-    assert_eq!(mixed_old.source_version, Some(VersionKey::Int(1)));
-    assert!(mixed_old.was_migrated());
+    // External tagging Migrated<T> tracking
+    let ext_old: Migrated<ExternalMetaModel> = serde_json::from_str(r#"{"1":{"x":5}}"#).unwrap();
+    assert_eq!(ext_old.source_version, Some(1));
+    assert!(ext_old.was_migrated());
+    assert_eq!(ext_old.into_inner(), ExternalMetaModel { x: 7 });
 
-    let mixed_cur: Migrated<MixedMetaModel> = serde_json::from_str(r#"{"version":"v2","x":5}"#).unwrap();
-    assert_eq!(mixed_cur.source_version, Some(VersionKey::Str("v2")));
-    assert!(!mixed_cur.was_migrated());
+    let ext_cur: Migrated<ExternalMetaModel> = serde_json::from_str(r#"{"2":{"x":5}}"#).unwrap();
+    assert_eq!(ext_cur.source_version, Some(2));
+    assert!(!ext_cur.was_migrated());
+    assert_eq!(ext_cur.into_inner(), ExternalMetaModel { x: 5 });
 }
 
 // =========================================================================
@@ -321,7 +321,7 @@ fn test_rolling_deployment_serialize_older_version() {
 }
 
 // =========================================================================
-// 4. TAG_FIELD & CONTENT_FIELD constants + Migrated<T> ergonomics
+// 4. TAGGING metadata constant + Migrated<T> ergonomics
 // =========================================================================
 
 #[backwards_compat(
@@ -380,26 +380,32 @@ impl From<MetaV1> for CustomTagAndContentModel {
 }
 
 #[test]
-fn test_tag_and_content_field_constants() {
+fn test_tagging_metadata_constants() {
     const {
-        assert!(matches!(IntMetaModel::TAG_FIELD.as_bytes(), b"version"));
-        assert!(IntMetaModel::CONTENT_FIELD.is_none());
+        assert!(matches!(
+            IntMetaModel::TAGGING,
+            Tagging::Internal { tag } if matches!(tag.as_bytes(), b"version")
+        ));
     }
-    assert_eq!(IntMetaModel::TAG_FIELD, "version");
-    assert_eq!(IntMetaModel::CONTENT_FIELD, None);
-    assert_eq!(StrMetaModel::TAG_FIELD, "version");
-    assert_eq!(StrMetaModel::CONTENT_FIELD, None);
-    assert_eq!(MixedMetaModel::TAG_FIELD, "version");
-    assert_eq!(MixedMetaModel::CONTENT_FIELD, None);
+    assert_eq!(IntMetaModel::TAGGING, Tagging::Internal { tag: "version" });
+    assert_eq!(StrMetaModel::TAGGING, Tagging::Internal { tag: "version" });
+    assert_eq!(ExternalMetaModel::TAGGING, Tagging::External);
 
-    assert_eq!(CustomTagOnlyModel::TAG_FIELD, "schema");
-    assert_eq!(CustomTagOnlyModel::CONTENT_FIELD, None);
-
-    assert_eq!(CustomContentOnlyModel::TAG_FIELD, "version");
-    assert_eq!(CustomContentOnlyModel::CONTENT_FIELD, Some("data"));
-
-    assert_eq!(CustomTagAndContentModel::TAG_FIELD, "v");
-    assert_eq!(CustomTagAndContentModel::CONTENT_FIELD, Some("payload"));
+    assert_eq!(CustomTagOnlyModel::TAGGING, Tagging::Internal { tag: "schema" });
+    assert_eq!(
+        CustomContentOnlyModel::TAGGING,
+        Tagging::Adjacent {
+            tag: "version",
+            content: "data",
+        }
+    );
+    assert_eq!(
+        CustomTagAndContentModel::TAGGING,
+        Tagging::Adjacent {
+            tag: "v",
+            content: "payload",
+        }
+    );
 }
 
 #[test]
@@ -602,8 +608,7 @@ fn test_backwards_compat_serialize_and_via_delegation() {
     assert_eq!(MultiSerModel::SERIALIZABLE_VERSIONS, &[1, 2, 3, 4]);
     assert_eq!(AdjMultiSerModel::SERIALIZABLE_VERSIONS, &[1, 2]);
     assert_eq!(ViaMultiSerDomain::SERIALIZABLE_VERSIONS, &[1, 2, 3, 4]);
-    assert_eq!(ViaMultiSerDomain::TAG_FIELD, MultiSerModel::TAG_FIELD);
-    assert_eq!(ViaMultiSerDomain::CONTENT_FIELD, MultiSerModel::CONTENT_FIELD);
+    assert_eq!(ViaMultiSerDomain::TAGGING, MultiSerModel::TAGGING);
 
     let model = MultiSerModel {
         label: "svc".to_owned(),

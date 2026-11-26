@@ -108,6 +108,23 @@ pub fn schema_adjacently_tagged(
     Schema::from(root)
 }
 
+/// Wraps a version subschema in an externally-tagged `{ "<variant_name>": <subschema> }` object.
+#[must_use]
+pub fn schema_externally_tagged(subschema: Schema, variant_name: &str) -> Schema {
+    let mut properties = Map::new();
+    properties.insert(variant_name.to_owned(), subschema.into());
+
+    let mut root = Map::new();
+    root.insert("type".to_owned(), Value::String("object".to_owned()));
+    root.insert("properties".to_owned(), Value::Object(properties));
+    root.insert(
+        "required".to_owned(),
+        Value::Array(alloc::vec![Value::String(variant_name.to_owned())]),
+    );
+    root.insert("additionalProperties".to_owned(), Value::Bool(false));
+    Schema::from(root)
+}
+
 /// Combines multiple version subschemas into a single schema (`oneOf` when > 1).
 #[must_use]
 pub fn schema_one_of(schemas: Vec<Schema>) -> Schema {

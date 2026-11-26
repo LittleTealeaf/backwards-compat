@@ -28,9 +28,9 @@ In applications with evolving data formats (such as configuration files, databas
 - **Structs & Enums**: Apply `#[backwards_compat]` to named structs, tuple structs, unit structs, or `enum` domain models.
 - **Field-Level Versioning**: Version individual fields of structs or enum variants with `#[backwards_compat(...)]`, either standalone (with bare `#[backwards_compat]` on the container) or combined with outer container versioning—even when multiple fields share the same Rust type with different migration chains.
 - **Unified Proxy Redirection (`#[backwards_compat(via = ...)]`)**: Redirect `Serialize`, `Deserialize`, `BackwardsCompat`, and `BackwardsCompatDeserialize` through a separate versioned proxy type with infallible or fallible (`try_from`, `try_into`, `fallible`) conversions, custom `from` / `to` functions, and zero-clone `&Self` support.
-- **Native Integer & String Tags**: Emits native integer (`"version": 2`) or string (`"version": "2.0"`) tags with strict type matching, plus inline `|` aliases (`1 | "1": ModelV1`) for mixed or legacy tag compatibility.
+- **Native Integer & String Tags**: Emits native integer (`"version": 2`) or string (`"version": "2.0"`) tags with strict type matching, homogeneous inline `|` aliases (`"1" | "v1": ModelV1`, `1 | 10: ModelV1`), and `external` tagging for positional binary formats (`bincode`, `postcard`, `bitcode`).
 - **Zero-Boilerplate & Zero-Copy**: Your target type does not need `#[derive(Serialize, Deserialize)]` or `Clone`—serialization borrows fields directly without cloning.
-- **Metadata & Opt-In Migration Tracking**: Implements `BackwardsCompat` (`CURRENT_VERSION`, `SERIALIZE_VERSION`, `SUPPORTED_VERSIONS`, `ACCEPTS_UNTAGGED`, `TAG_FIELD`, `CONTENT_FIELD`) and `Migrated<T>` (`Deref`, `DerefMut`, `AsRef`, `is_untagged()`, `source_version()`, `map(...)`) to detect and inspect upgraded payloads.
+- **Metadata & Opt-In Migration Tracking**: Implements `BackwardsCompat` (`CURRENT_VERSION`, `SERIALIZE_VERSION`, `SUPPORTED_VERSIONS`, `ACCEPTS_UNTAGGED`, `TAGGING`) and `Migrated<T>` (`Deref`, `DerefMut`, `AsRef`, `is_untagged()`, `source_version()`, `map(...)`) to detect and inspect upgraded payloads.
 - **Rolling Deployments & Runtime Version Selection**: Override the default wire version with `#[serialize]` / `#[serialize(with = ...)]`, or opt older versions into runtime selection with `#[serializable]` / `BackwardsCompatSerialize::as_version(...)`.
 - **`no_std` + `alloc` & Optional `schemars`**: Compiles with `default-features = false` for `no_std` + `alloc` targets, and optionally derives `schemars::JsonSchema` (`features = ["schemars"]`).
 - **Custom Converters (`#[with(fn_path)]`)**: Supply a custom conversion function per step instead of implementing `From` / `TryFrom`.
@@ -456,7 +456,7 @@ assert_eq!(from_v2, AppConfig { val: 4 });
 Every `#[backwards_compat]` type implements `BackwardsCompat` and `BackwardsCompatDeserialize`. Deserialize into `Migrated<T>` to inspect the source version and detect whether a migration occurred, and mark an older version with `#[serialize]` (or `#[serialize(with = fn_path)]`) during rolling deployments:
 
 ```rust
-use backwards_compat::{BackwardsCompat, Migrated, backwards_compat};
+use backwards_compat::{BackwardsCompat, Migrated, Tagging, backwards_compat};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -490,8 +490,7 @@ pub struct Doc {
 // Introspect metadata:
 assert_eq!(Doc::CURRENT_VERSION, 2);
 assert_eq!(Doc::SERIALIZE_VERSION, 1);
-assert_eq!(Doc::TAG_FIELD, "version");
-assert_eq!(Doc::CONTENT_FIELD, None);
+assert_eq!(Doc::TAGGING, Tagging::Internal { tag: "version" });
 
 // Track whether an incoming payload was upgraded:
 let migrated: Migrated<Doc> = serde_json::from_str(r#"{"version": 1, "title": "hi"}"#).unwrap();
@@ -638,7 +637,7 @@ assert!(json.contains("oneOf"));
 
 ### Inline Tag Aliases (`|`) & String Version Keys
 
-Use string keys (`"1.0"`, `"2.0"`) or combine multiple wire tags with `|` (for example, accepting both native integer tags and legacy 1.x stringified integer tags):
+Use string keys (`"1.0"`, `"2.0"`) or combine multiple homogeneous wire tags with `|` (for example, accepting both `"1"` and `"v1"` string tags, or `1` and `10` integer tags):
 
 ```rust
 use backwards_compat::backwards_compat;
@@ -658,8 +657,8 @@ impl From<RecordV1> for Record {
 #[backwards_compat(
     tag = "version",
     versions(
-        1 | "1": RecordV1,
-        2 | "2": Self,
+        "1" | "v1": RecordV1,
+        "2" | "v2": Self,
     )
 )]
 #[derive(Debug, Clone, PartialEq)]
@@ -811,7 +810,7 @@ pub struct Config {
 ## Migrating from 1.x to 2.0
 
 1. **Declare the current version inside `versions(...)`**: Top-level `version = N` was removed. Add `N: Self` (or mark an entry `#[current]`) inside `versions(...)`.
-2. **Native integer tags**: Integer keys like `1` now serialize as native integers (`"version": 1`) instead of strings (`"version": "1"`). To keep accepting 1.x stringified integer payloads during migration, use inline aliases: `1 | "1": ModelV1, 2 | "2": Self`.
+2. **Native integer tags**: Integer keys like `1` now serialize as native integers (`"version": 1`) instead of strings (`"version": "1"`). Use homogeneous integer or string aliases (e.g., `"1" | "v1": ModelV1` or `1 | 10: ModelV1`) when supporting multiple legacy tag values.
 3. **Canonical entry directives**: Use `#[fallible]` (aliases `#[try_from]`, `#[try]`, etc. were removed) and `_` for unversioned entries (`none`/`None`/`untagged` aliases were removed).
 
 ---

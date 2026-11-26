@@ -831,8 +831,8 @@ struct FeatureMatrix<T: Clone> {
         content = "val",
         versions(
             #[cfg(any())] 0: String,
-            #[cfg(test)] #[with(widen_u16_to_u32)] 1 | "1": u16,
-            2 | "2": Self,
+            #[cfg(test)] #[with(widen_u16_to_u32)] 1 | 10: u16,
+            2 | 20: Self,
         )
     )]
     custom_tagged: u32,
@@ -879,10 +879,10 @@ struct FeatureMatrix<T: Clone> {
 
 #[test]
 fn test_field_level_features_and_serde_composition() {
-    // Test aliases ("1"), DAG jump (1 => Self), rolling generic v2 input,
+    // Test aliases (10), DAG jump (1 => Self), rolling generic v2 input,
     // single untagged, multi untagged (LegacyPair), and omitted #[serde(default)] field.
     let input1 = r#"{
-        "custom_tagged": {"v": "1", "val": 15},
+        "custom_tagged": {"v": 10, "val": 15},
         "dag_field": {"version": 1, "data": 3},
         "rolling_generic": {"version": 2, "data": {"inner": "hello", "extra": 7}},
         "single_untagged": 42,
@@ -1183,4 +1183,35 @@ fn test_sibling_serde_with_serialize_deserialize_with_coexistence() {
         combined_out,
         r#"{"schema":1,"tags":"7,8","port":{"version":2,"data":443}}"#
     );
+}
+
+#[backwards_compat]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct FieldExternalConfig {
+    name: String,
+    #[backwards_compat(external, versions(
+        #[with(widen_u16_to_u32)] 1 | 10: u16,
+        2: Self,
+    ))]
+    port: u32,
+}
+
+#[test]
+fn test_field_level_external_tagging() {
+    let v1: FieldExternalConfig = serde_json::from_str(r#"{"name":"web","port":{"1":8080}}"#).unwrap();
+    assert_eq!(
+        v1,
+        FieldExternalConfig {
+            name: "web".to_owned(),
+            port: 8080,
+        }
+    );
+
+    let alias: FieldExternalConfig = serde_json::from_str(r#"{"name":"web","port":{"10":9090}}"#).unwrap();
+    assert_eq!(alias.port, 9090);
+
+    let encoded = serde_json::to_string(&v1).unwrap();
+    assert_eq!(encoded, r#"{"name":"web","port":{"2":8080}}"#);
+    let decoded: FieldExternalConfig = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, v1);
 }
