@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.0](https://github.com/LittleTealeaf/backwards-compat/compare/v3.0.1...v3.1.0) (2026-11-26)
+
+
+### Features
+
+* add no_std, perf optimizations, runtime version serialization, schemars, and benchmarks ([#57](https://github.com/LittleTealeaf/backwards-compat/issues/57)) ([8601d6d](https://github.com/LittleTealeaf/backwards-compat/commit/8601d6d4555afeb0b927bd12f122751720f2075d))
+
 ## [3.0.1](https://github.com/LittleTealeaf/backwards-compat/compare/v3.0.0...v3.0.1) (2026-11-25)
 
 
