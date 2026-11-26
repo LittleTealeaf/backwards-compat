@@ -27,13 +27,35 @@ jobs:
           config-file: .github/release-config.json
           manifest-file: .github/release-manifest.json
 
-  build-and-deploy:
-    name: Build & Deploy Docs
+  build-docs:
+    name: Build Docs
     runs-on: ubuntu-latest
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     permissions:
       contents: read
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build Docs
+        uses: LittleTealeaf/github-actions/cargo-doc-pages@18ab758355cd975760e8a19c4b519a1743aa5b75
+        with:
+          deploy: 'false'
+
+      - name: Setup Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: target/doc
+
+  deploy-docs:
+    name: Deploy Docs
+    runs-on: ubuntu-latest
+    needs: build-docs
+    permissions:
       pages: write
       id-token: write
     concurrency:
@@ -41,11 +63,18 @@ jobs:
       cancel-in-progress: false
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Build & Deploy Docs
+      - name: Deploy to GitHub Pages
         id: deployment
-        uses: LittleTealeaf/github-actions/cargo-doc-pages@18ab758355cd975760e8a19c4b519a1743aa5b75
+        continue-on-error: true
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      - name: Wait before retrying Pages deployment
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 15
+
+      - name: Retry Deploy to GitHub Pages
+        if: steps.deployment.outcome == 'failure'
+        id: deployment_retry
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
