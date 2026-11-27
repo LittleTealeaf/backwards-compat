@@ -1,6 +1,6 @@
 use super::adjacent::drain_map;
 use super::keys::{AdjacentKey, AdjacentKeyResult, InternalKey, InternalKeyResult};
-use super::map_de::{ChainedMapAccess, RemainingMapDeserializer};
+use super::map_de::RemainingMapDeserializer;
 use crate::de::content::{Content, ContentDeserializer};
 use crate::de::tag::{IntTagOrContent, StrTag, StrTagOrContent};
 use alloc::vec::Vec;
@@ -105,7 +105,7 @@ where
                 let tag = map.next_value::<TM::OwnedTag>()?;
                 return H::dispatch_tagged(
                     TM::as_arg(&tag),
-                    RemainingMapDeserializer::new(ChainedMapAccess::new(prefix, map)),
+                    RemainingMapDeserializer::new_chained(prefix, map),
                 );
             }
             InternalKeyResult::Other(k) => {
@@ -138,7 +138,7 @@ where
                 Ok(tag) => {
                     return H::dispatch_tagged(
                         TM::as_arg(&tag),
-                        RemainingMapDeserializer::new(ChainedMapAccess::new(prefix, map)),
+                        RemainingMapDeserializer::new_chained(prefix, map),
                     );
                 }
                 Err(other) => {

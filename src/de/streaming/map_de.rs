@@ -17,12 +17,28 @@ pub struct RemainingMapDeserializer<'de, M> {
     _marker: PhantomData<&'de ()>,
 }
 
-impl<M> RemainingMapDeserializer<'_, M> {
+impl<M> RemainingMapDeserializer<'_, FlatMapAccess<M>> {
     #[inline]
     #[must_use]
     pub const fn new(map: M) -> Self {
         Self {
-            map,
+            map: FlatMapAccess(map),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'de, M> RemainingMapDeserializer<'de, ChainedMapAccess<'de, FlatMapAccess<M>>> {
+    /// Creates a streaming map deserializer over a buffered `prefix` followed by `map`.
+    ///
+    /// Wrapping only the streaming tail in [`FlatMapAccess`] lets buffered prefix keys
+    /// dispatch directly through [`ContentDeserializer::deserialize_identifier`] instead
+    /// of instantiating `ContentDeserializer::deserialize_any` for every struct's `__FieldVisitor`.
+    #[inline]
+    #[must_use]
+    pub fn new_chained(prefix: Vec<(Content<'de>, Content<'de>)>, map: M) -> Self {
+        Self {
+            map: ChainedMapAccess::new(prefix, FlatMapAccess(map)),
             _marker: PhantomData,
         }
     }
@@ -39,7 +55,7 @@ where
     where
         V: Visitor<'de>,
     {
-        visitor.visit_map(FlatMapAccess(self.map))
+        visitor.visit_map(self.map)
     }
 
     #[inline]
@@ -255,7 +271,7 @@ where
     where
         V: Visitor<'de>,
     {
-        visitor.visit_map(FlatMapAccess(self.map))
+        visitor.visit_map(self.map)
     }
 
     #[inline]
@@ -268,7 +284,7 @@ where
     where
         V: Visitor<'de>,
     {
-        visitor.visit_map(FlatMapAccess(self.map))
+        visitor.visit_map(self.map)
     }
 
     #[inline]
@@ -282,7 +298,7 @@ where
         V: Visitor<'de>,
     {
         visitor.visit_enum(MapEnumAccess {
-            map: FlatMapAccess(self.map),
+            map: self.map,
             _marker: PhantomData,
         })
     }
@@ -308,7 +324,7 @@ where
 /// Zero-allocation [`MapAccess`] wrapper that routes key `deserialize_identifier`
 /// calls through `deserialize_any`, matching Serde's `FlatMapDeserializer` so
 /// formats like RON accept quoted map keys produced by `#[serde(flatten)]`.
-struct FlatMapAccess<M>(M);
+pub struct FlatMapAccess<M>(M);
 
 impl<'de, M> MapAccess<'de> for FlatMapAccess<M>
 where
