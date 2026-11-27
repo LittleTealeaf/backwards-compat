@@ -1,10 +1,8 @@
 mod content;
-mod content_ref;
 mod streaming;
 mod tag;
 
-pub use content::{Content, ContentDeserializer};
-pub use content_ref::ContentRefDeserializer;
+pub use content::{Content, ContentDeserializer, ContentRefDeserializer};
 pub use streaming::{
     AdjacentKey, AdjacentKeyResult, AdjacentMapDispatch, ChainedMapAccess, IntTagMode, InternalKey,
     InternalKeyResult, InternalMapDispatch, OptionForwardingDeserializer, RemainingMapDeserializer,
