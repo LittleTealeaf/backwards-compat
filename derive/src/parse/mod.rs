@@ -159,14 +159,60 @@ pub struct VersionEntry {
     pub explicit_next: Option<ExplicitNext>,
 }
 
+/// Parse a boolean attribute option in either `name = true|false` or `name(true|false)` form.
+///
+/// Rejects bare `name` without `=` or `()`, non-boolean values, and trailing tokens inside `(...)`.
+pub fn parse_bool_option(
+    input: ParseStream<'_>,
+    name: &str,
+    ident_span: proc_macro2::Span,
+) -> syn::Result<bool> {
+    if input.peek(Token![=]) {
+        input.parse::<Token![=]>()?;
+        let lit: syn::LitBool = input.parse().map_err(|err| {
+            syn::Error::new(
+                err.span(),
+                format!("expected boolean literal (`true` or `false`) for `{name}`"),
+            )
+        })?;
+        Ok(lit.value)
+    } else if input.peek(syn::token::Paren) {
+        let inner;
+        syn::parenthesized!(inner in input);
+        let lit: syn::LitBool = inner.parse().map_err(|err| {
+            syn::Error::new(
+                err.span(),
+                format!("expected boolean literal (`true` or `false`) for `{name}`"),
+            )
+        })?;
+        if !inner.is_empty() {
+            return Err(syn::Error::new(
+                inner.span(),
+                format!("unexpected trailing tokens in `{name}(...)`"),
+            ));
+        }
+        Ok(lit.value)
+    } else {
+        Err(syn::Error::new(
+            ident_span,
+            format!("expected `= true|false` or `(true|false)` for `{name}`"),
+        ))
+    }
+}
+
 /// Arguments parsed from the `#[backwards_compat(...)]` attribute.
 #[derive(Debug, Clone)]
 #[allow(dead_code, reason = "fields used in macro attribute parsing")]
+#[allow(clippy::struct_excessive_bools, reason = "independent parsed attribute flags")]
 pub struct BackwardsCompatArgs {
     pub tag_field: String,
     pub content_field: Option<String>,
     pub external: bool,
     pub dump: bool,
+    pub serialize: bool,
+    pub deserialize: bool,
+    pub serialize_specified: bool,
+    pub deserialize_specified: bool,
     pub versions: Vec<VersionEntry>,
 }
 
@@ -179,6 +225,10 @@ impl Parse for BackwardsCompatArgs {
         let mut external = false;
         let mut external_span = None;
         let mut dump = false;
+        let mut serialize = true;
+        let mut serialize_span = None;
+        let mut deserialize = true;
+        let mut deserialize_span = None;
         let mut versions = Vec::new();
 
         while !input.is_empty() {
@@ -246,6 +296,24 @@ impl Parse for BackwardsCompatArgs {
                 external_span = Some(ident.span());
             } else if ident_str == "dump" {
                 dump = true;
+            } else if ident_str == "serialize" {
+                if serialize_span.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "duplicate `serialize` attribute argument",
+                    ));
+                }
+                serialize = parse_bool_option(input, "serialize", ident.span())?;
+                serialize_span = Some(ident.span());
+            } else if ident_str == "deserialize" {
+                if deserialize_span.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "duplicate `deserialize` attribute argument",
+                    ));
+                }
+                deserialize = parse_bool_option(input, "deserialize", ident.span())?;
+                deserialize_span = Some(ident.span());
             } else if ident_str == "versions" {
                 let content;
                 if input.peek(syn::token::Paren) {
@@ -540,11 +608,25 @@ impl Parse for BackwardsCompatArgs {
             ));
         }
 
+        if !serialize && !deserialize {
+            let span = serialize_span
+                .or(deserialize_span)
+                .unwrap_or_else(proc_macro2::Span::call_site);
+            return Err(syn::Error::new(
+                span,
+                "cannot disable both `serialize` and `deserialize` in `#[backwards_compat(...)]`; at least one must be enabled",
+            ));
+        }
+
         Ok(Self {
             tag_field,
             content_field,
             external,
             dump,
+            serialize,
+            deserialize,
+            serialize_specified: serialize_span.is_some(),
+            deserialize_specified: deserialize_span.is_some(),
             versions,
         })
     }
@@ -557,6 +639,12 @@ impl BackwardsCompatArgs {
         vis: syn::Visibility,
         generics: syn::Generics,
     ) -> syn::Result<BackwardsCompatInput> {
+        if !self.serialize && !self.deserialize {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "cannot disable both `serialize` and `deserialize` in `#[backwards_compat(...)]`; at least one must be enabled",
+            ));
+        }
         if self.external && self.content_field.is_some() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
@@ -592,6 +680,49 @@ impl BackwardsCompatArgs {
                 && tp.path.is_ident("Self")
             {
                 entry.ty = target_ty.clone();
+            }
+        }
+
+        for entry in &versions {
+            if !self.serialize {
+                if entry.is_serialize {
+                    return Err(syn::Error::new(
+                        entry.tag_span,
+                        "cannot use `#[serialize]` when `serialize = false`",
+                    ));
+                }
+                if entry.serializable.is_some() {
+                    return Err(syn::Error::new(
+                        entry.tag_span,
+                        "cannot use `#[serializable]` when `serialize = false`",
+                    ));
+                }
+            }
+            if !self.deserialize {
+                if entry.tag.is_untagged() {
+                    return Err(syn::Error::new(
+                        entry.tag_span,
+                        "cannot use unversioned `_` when `deserialize = false`",
+                    ));
+                }
+                if entry.fallible {
+                    return Err(syn::Error::new(
+                        entry.tag_span,
+                        "cannot use `#[fallible]` when `deserialize = false`",
+                    ));
+                }
+                if entry.with_fn.is_some() {
+                    return Err(syn::Error::new(
+                        entry.tag_span,
+                        "cannot use `#[with(...)]` when `deserialize = false`",
+                    ));
+                }
+                if entry.explicit_next.is_some() {
+                    return Err(syn::Error::new(
+                        entry.tag_span,
+                        "cannot use explicit migration target `=> ...` when `deserialize = false`",
+                    ));
+                }
             }
         }
 
@@ -724,6 +855,8 @@ impl BackwardsCompatArgs {
             serialize_version_span,
             serialize_with_fn,
             dump: self.dump,
+            serialize: self.serialize,
+            deserialize: self.deserialize,
             versions,
         })
     }
@@ -732,6 +865,7 @@ impl BackwardsCompatArgs {
 /// Represents the resolved input of a `#[backwards_compat(...)]` macro attribute.
 #[derive(Debug, Clone)]
 #[allow(dead_code, reason = "fields used in macro code generation")]
+#[allow(clippy::struct_excessive_bools, reason = "independent parsed attribute flags")]
 pub struct BackwardsCompatInput {
     pub vis: Visibility,
     pub target_ty: Type,
@@ -745,6 +879,8 @@ pub struct BackwardsCompatInput {
     pub serialize_version_span: proc_macro2::Span,
     pub serialize_with_fn: Option<syn::ExprPath>,
     pub dump: bool,
+    pub serialize: bool,
+    pub deserialize: bool,
     pub versions: Vec<VersionEntry>,
 }
 

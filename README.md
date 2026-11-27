@@ -576,6 +576,56 @@ assert_eq!(v2_json, r#"{"version":2,"label":"widget","weight":5}"#);
 
 - `#[serializable]` converts using `From<&Self>` (or `Clone` + `From<Self>`), `#[serializable(with = fn_path)]` calls an infallible `fn(&Self) -> OldType`, and `#[serializable(try_with = fn_path)]` calls a fallible `fn(&Self) -> Result<OldType, E>` where `E: core::fmt::Display`.
 
+### One-Way Serialization or Deserialization (`serialize = false` / `deserialize = false`)
+
+Both `serialize` and `deserialize` default to `true` on struct/enum-level `#[backwards_compat(...)]` (including `via = ...`). Set one to `false` when a type only needs one direction—for example, when fields only implement `Deserialize` or `Serialize`, or when you want to provide a manual or plain `#[derive(Serialize)]` / `#[derive(Deserialize)]` implementation for the disabled direction (disabling both is a compile-time error):
+
+```rust
+use backwards_compat::backwards_compat;
+use serde::{Deserialize, Serialize};
+
+// Deserialize-only field (does not implement Serialize):
+#[derive(Debug, PartialEq, Deserialize)]
+pub struct IncomingToken(String);
+
+#[derive(Deserialize)]
+pub struct RequestV1 {
+    pub token: IncomingToken,
+}
+
+#[backwards_compat(serialize = false, versions(1: RequestV1, 2: Self))]
+#[derive(Debug, PartialEq)]
+pub struct Request {
+    pub token: IncomingToken,
+    pub retries: u8,
+}
+
+impl From<RequestV1> for Request {
+    fn from(v1: RequestV1) -> Self {
+        Self { token: v1.token, retries: 3 }
+    }
+}
+
+// Serialize-only field (does not implement Deserialize):
+#[derive(Debug, PartialEq, Serialize)]
+pub struct OutgoingMetric(u64);
+
+#[backwards_compat(deserialize = false, versions(1: Self))]
+#[derive(Debug, PartialEq)]
+pub struct TelemetryEvent {
+    pub latency_ms: OutgoingMetric,
+}
+
+# fn main() {
+let req: Request = serde_json::from_str(r#"{"version": 1, "token": "abc"}"#).unwrap();
+assert_eq!(req, Request { token: IncomingToken("abc".into()), retries: 3 });
+
+let event = TelemetryEvent { latency_ms: OutgoingMetric(42) };
+let json = serde_json::to_string(&event).unwrap();
+assert_eq!(json, r#"{"version":1,"latency_ms":42}"#);
+# }
+```
+
 ### `no_std` + `alloc` Support
 
 `backwards-compat` supports `#![no_std]` environments that provide `alloc`. Disable the default `std` feature in `Cargo.toml`:
@@ -821,7 +871,9 @@ pub struct Config {
 |-----------|------|---------|-------------|
 | `tag` | string | `"version"` | Tag field name in serialized output (e.g. `tag = "version"` or `tag("version")`). |
 | `content` | string | *none* (type-level) / `"data"` (field-level) | Content field name for adjacent tagging (e.g. `content = "data"`). Field-level `#[backwards_compat(...)]` defaults to `"data"`. |
-| `via` | type path | *none* | Unified proxy redirection mode (`via = ProxyType` or `via(ProxyType)`), mutually exclusive with `tag`, `content`, and `versions`. Supports `try_from`, `try_into`, `fallible`, `from = fn_path`, `to = fn_path`, and `dump`. |
+| `via` | type path | *none* | Unified proxy redirection mode (`via = ProxyType` or `via(ProxyType)`), mutually exclusive with `tag`, `content`, and `versions`. Supports `try_from`, `try_into`, `fallible`, `from = fn_path`, `to = fn_path`, `serialize`, `deserialize`, and `dump`. |
+| `serialize` | bool | `true` | Controls whether `Serialize` and `BackwardsCompatSerialize` (and the borrowed shadow wire type) are generated (`serialize = false` or `serialize(false)`). Struct/enum-level only; cannot be combined with `deserialize = false`. |
+| `deserialize` | bool | `true` | Controls whether `Deserialize` and `BackwardsCompatDeserialize` (and migration chains) are generated (`deserialize = false` or `deserialize(false)`). Struct/enum-level only; cannot be combined with `serialize = false`. |
 | `dump` | flag | *disabled* | Prints the generated Rust token stream to `stderr` during compilation. |
 | `versions` | list / map | *empty* | Version entries supporting `#[current]`, `#[serialize]`, `#[serialize(with = fn)]`, `#[serializable]`, `#[serializable(with = fn)]`, `#[serializable(try_with = fn)]`, `#[fallible]`, `#[with(fn)]`, `#[cfg(...)]`, `\|` aliases, `_`, and `=> target` / `=> TargetType` / `=> Self`. |
 

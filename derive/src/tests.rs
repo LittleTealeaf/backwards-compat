@@ -89,7 +89,7 @@ fn test_clean_derive_attrs() {
         syn::parse_quote!(#[derive(Debug, Serialize, Clone, ::serde::Deserialize)]),
         syn::parse_quote!(#[allow(unused)]),
     ];
-    clean_derive_attrs(&mut attrs);
+    clean_derive_attrs(&mut attrs, true, true);
     assert_eq!(attrs.len(), 2);
     let formatted = quote::quote!(#(#attrs)*).to_string();
     assert!(formatted.contains("Debug"));
@@ -98,7 +98,7 @@ fn test_clean_derive_attrs() {
     assert!(!formatted.contains("Deserialize"));
 
     let mut all_serde_attrs = vec![syn::parse_quote!(#[derive(Serialize, Deserialize, serde::Serialize)])];
-    clean_derive_attrs(&mut all_serde_attrs);
+    clean_derive_attrs(&mut all_serde_attrs, true, true);
     assert_eq!(all_serde_attrs.len(), 0);
 }
 
@@ -118,7 +118,15 @@ fn test_build_enum_shadow_wire_mixed_variants_generics_and_cfg() {
         }
     };
 
-    let built = build_enum_shadow_wire(&item_enum, &[], false);
+    let built = build_enum_shadow_wire(
+        &item_enum,
+        &[],
+        ShadowWireOptions {
+            serialize: true,
+            deserialize: true,
+            derive_json_schema: false,
+        },
+    );
     assert!(!built.is_unit_struct);
 
     let shadow_str = built.shadow_tokens.to_string();
@@ -155,7 +163,15 @@ fn test_build_enum_shadow_wire_all_unit_no_wire_lifetime() {
         }
     };
 
-    let built = build_enum_shadow_wire(&item_enum, &[], false);
+    let built = build_enum_shadow_wire(
+        &item_enum,
+        &[],
+        ShadowWireOptions {
+            serialize: true,
+            deserialize: true,
+            derive_json_schema: false,
+        },
+    );
     assert!(!built.is_unit_struct);
 
     let shadow_str = built.shadow_tokens.to_string();
@@ -175,7 +191,15 @@ fn test_build_enum_shadow_wire_empty_enum() {
         pub enum Never {}
     };
 
-    let built = build_enum_shadow_wire(&item_enum, &[], false);
+    let built = build_enum_shadow_wire(
+        &item_enum,
+        &[],
+        ShadowWireOptions {
+            serialize: true,
+            deserialize: true,
+            derive_json_schema: false,
+        },
+    );
     assert!(!built.is_unit_struct);
 
     let shadow_str = built.shadow_tokens.to_string();
@@ -675,7 +699,7 @@ fn test_schemars_integration_shadow_mode1_and_via() {
         syn::parse_quote!(#[schemars(title = "T")]),
     ];
     assert!(has_json_schema_derive(&attrs));
-    clean_derive_attrs(&mut attrs);
+    clean_derive_attrs(&mut attrs, true, true);
     let cleaned_str = quote::quote!(#(#attrs)*).to_string();
     assert!(cleaned_str.contains("Debug"));
     assert!(!cleaned_str.contains("JsonSchema"));
@@ -733,4 +757,605 @@ fn test_schemars_integration_shadow_mode1_and_via() {
     assert!(!via_str.contains("compile_error !"));
     assert!(via_str.contains("impl :: backwards_compat :: __private :: schemars :: JsonSchema for ViaModel"));
     syn::parse2::<syn::File>(via_ts).unwrap();
+}
+
+#[test]
+fn test_build_struct_shadow_wire_conditional_emission() {
+    let named: syn::ItemStruct = syn::parse_quote! {
+        pub struct NamedModel {
+            #[backwards_compat(versions(1: u32, 2: Self))]
+            pub port: u16,
+            pub host: String,
+        }
+    };
+    let named_specs = field::extract_struct_field_compat(&named).unwrap();
+
+    let tuple: syn::ItemStruct = syn::parse_quote! {
+        pub struct TupleModel(
+            #[backwards_compat(versions(1: u32, 2: Self))] u16
+        );
+    };
+    let tuple_specs = field::extract_struct_field_compat(&tuple).unwrap();
+
+    let unit: syn::ItemStruct = syn::parse_quote! {
+        pub struct UnitModel;
+    };
+
+    // Case A: serialize = false, deserialize = true, derive_json_schema = false
+    let de_only = ShadowWireOptions {
+        serialize: false,
+        deserialize: true,
+        derive_json_schema: false,
+    };
+    for (item, specs, expected_de_with) in [
+        (
+            &named,
+            named_specs.as_slice(),
+            Some("__BcField_NamedModel_port::deserialize"),
+        ),
+        (
+            &tuple,
+            tuple_specs.as_slice(),
+            Some("__BcField_TupleModel_0::deserialize"),
+        ),
+        (&unit, &[][..], None),
+    ] {
+        let built = build_struct_shadow_wire(item, specs, de_only);
+        let shadow_str = built.shadow_tokens.to_string();
+        let name = item.ident.to_string();
+
+        assert!(built.borrowed_ty_in_helper.is_empty());
+        assert!(built.construct_borrowed.is_empty());
+        assert!(!shadow_str.contains(&format!("__{name}BorrowedWire")));
+        assert!(!shadow_str.contains("Serialize"));
+        assert!(!shadow_str.contains("serde (serialize_with"));
+        assert!(!shadow_str.contains("serialize_ref"));
+
+        assert!(shadow_str.contains(&format!("struct __{name}ShadowWire")));
+        assert!(shadow_str.contains("derive (:: serde :: Deserialize)"));
+        assert!(shadow_str.contains(&format!("From < __{name}ShadowWire > for {name}")));
+        if let Some(de_with) = expected_de_with {
+            assert!(shadow_str.contains(&format!("deserialize_with = \"{de_with}\"")));
+        }
+
+        syn::parse2::<syn::File>(built.shadow_tokens).unwrap();
+    }
+
+    // Case B: serialize = true, deserialize = false, derive_json_schema = false
+    let ser_only = ShadowWireOptions {
+        serialize: true,
+        deserialize: false,
+        derive_json_schema: false,
+    };
+    for (item, specs, expected_ser_with) in [
+        (
+            &named,
+            named_specs.as_slice(),
+            Some("__BcField_NamedModel_port::serialize_ref"),
+        ),
+        (
+            &tuple,
+            tuple_specs.as_slice(),
+            Some("__BcField_TupleModel_0::serialize_ref"),
+        ),
+        (&unit, &[][..], None),
+    ] {
+        let built = build_struct_shadow_wire(item, specs, ser_only);
+        let shadow_str = built.shadow_tokens.to_string();
+        let name = item.ident.to_string();
+
+        assert!(!built.borrowed_ty_in_helper.is_empty());
+        assert!(!built.construct_borrowed.is_empty());
+        assert!(!shadow_str.contains(&format!("__{name}ShadowWire")));
+        assert!(!shadow_str.contains("Deserialize"));
+        assert!(!shadow_str.contains("deserialize_with"));
+        assert!(!shadow_str.contains(":: core :: convert :: From"));
+
+        assert!(shadow_str.contains(&format!("struct __{name}BorrowedWire")));
+        assert!(shadow_str.contains("derive (:: serde :: Serialize)"));
+        if let Some(ser_with) = expected_ser_with {
+            assert!(shadow_str.contains(&format!("serialize_with = \"{ser_with}\"")));
+        }
+
+        syn::parse2::<syn::File>(built.shadow_tokens).unwrap();
+        syn::parse2::<syn::Expr>(built.construct_borrowed).unwrap();
+    }
+}
+
+#[test]
+fn test_build_enum_shadow_wire_conditional_emission() {
+    let mixed: syn::ItemEnum = syn::parse_quote! {
+        pub enum MixedEnum {
+            Unit,
+            Tuple(#[backwards_compat(versions(1: u32, 2: Self))] u64),
+            Named {
+                #[backwards_compat(versions(1: u32, 2: Self))]
+                id: u64,
+                label: String,
+            },
+        }
+    };
+    let mixed_specs = field::extract_enum_field_compat(&mixed).unwrap();
+
+    let all_unit: syn::ItemEnum = syn::parse_quote! {
+        pub enum UnitEnum {
+            A,
+            B,
+        }
+    };
+
+    let empty: syn::ItemEnum = syn::parse_quote! {
+        pub enum EmptyEnum {}
+    };
+
+    // Case A: serialize = false, deserialize = true, derive_json_schema = false
+    let de_only = ShadowWireOptions {
+        serialize: false,
+        deserialize: true,
+        derive_json_schema: false,
+    };
+    for (item, specs, has_field_compat) in [
+        (&mixed, mixed_specs.as_slice(), true),
+        (&all_unit, &[][..], false),
+        (&empty, &[][..], false),
+    ] {
+        let built = build_enum_shadow_wire(item, specs, de_only);
+        let shadow_str = built.shadow_tokens.to_string();
+        let name = item.ident.to_string();
+
+        assert!(built.borrowed_ty_in_helper.is_empty());
+        assert!(built.construct_borrowed.is_empty());
+        assert!(!shadow_str.contains(&format!("__{name}BorrowedWire")));
+        assert!(!shadow_str.contains("Serialize"));
+        assert!(!shadow_str.contains("serde (serialize_with"));
+        assert!(!shadow_str.contains("serialize_ref"));
+
+        assert!(shadow_str.contains(&format!("enum __{name}ShadowWire")));
+        assert!(shadow_str.contains("derive (:: serde :: Deserialize)"));
+        assert!(shadow_str.contains(&format!("From < __{name}ShadowWire > for {name}")));
+        if has_field_compat {
+            assert!(shadow_str.contains("deserialize_with = \"__BcField_MixedEnum_Tuple_0::deserialize\""));
+            assert!(shadow_str.contains("deserialize_with = \"__BcField_MixedEnum_Named_id::deserialize\""));
+        }
+
+        syn::parse2::<syn::File>(built.shadow_tokens).unwrap();
+    }
+
+    // Case B: serialize = true, deserialize = false, derive_json_schema = false
+    let ser_only = ShadowWireOptions {
+        serialize: true,
+        deserialize: false,
+        derive_json_schema: false,
+    };
+    for (item, specs, has_field_compat) in [
+        (&mixed, mixed_specs.as_slice(), true),
+        (&all_unit, &[][..], false),
+        (&empty, &[][..], false),
+    ] {
+        let built = build_enum_shadow_wire(item, specs, ser_only);
+        let shadow_str = built.shadow_tokens.to_string();
+        let name = item.ident.to_string();
+
+        assert!(!built.borrowed_ty_in_helper.is_empty());
+        assert!(!built.construct_borrowed.is_empty());
+        assert!(!shadow_str.contains(&format!("__{name}ShadowWire")));
+        assert!(!shadow_str.contains("Deserialize"));
+        assert!(!shadow_str.contains("deserialize_with"));
+        assert!(!shadow_str.contains(":: core :: convert :: From"));
+
+        assert!(shadow_str.contains(&format!("enum __{name}BorrowedWire")));
+        assert!(shadow_str.contains("derive (:: serde :: Serialize)"));
+        if has_field_compat {
+            assert!(shadow_str.contains("serialize_with = \"__BcField_MixedEnum_Tuple_0::serialize_ref\""));
+            assert!(shadow_str.contains("serialize_with = \"__BcField_MixedEnum_Named_id::serialize_ref\""));
+        }
+
+        syn::parse2::<syn::File>(built.shadow_tokens).unwrap();
+        syn::parse2::<syn::Expr>(built.construct_borrowed).unwrap();
+    }
+}
+
+#[cfg(feature = "schemars")]
+#[test]
+fn test_shadow_wire_deserialize_false_with_json_schema() {
+    let opts = ShadowWireOptions {
+        serialize: true,
+        deserialize: false,
+        derive_json_schema: true,
+    };
+
+    // Struct with field-compat field
+    let item_struct: syn::ItemStruct = syn::parse_quote! {
+        pub struct SchemaStruct {
+            #[backwards_compat(versions(1: u32, 2: Self))]
+            pub port: u16,
+            pub name: String,
+        }
+    };
+    let struct_specs = field::extract_struct_field_compat(&item_struct).unwrap();
+    let built_struct = build_struct_shadow_wire(&item_struct, &struct_specs, opts);
+    let s = built_struct.shadow_tokens.to_string();
+
+    assert!(s.contains("struct __SchemaStructShadowWire"));
+    assert!(s.contains("derive (:: backwards_compat :: __private :: schemars :: JsonSchema)"));
+    assert!(!s.contains("Deserialize"));
+    assert!(!s.contains("deserialize_with"));
+    assert!(!s.contains(":: core :: convert :: From"));
+    assert!(s.contains("schemars (with = \"__BcField_SchemaStruct_port_Schema\")"));
+    assert!(s.contains("struct __SchemaStructBorrowedWire"));
+    assert!(s.contains("derive (:: serde :: Serialize)"));
+    assert!(s.contains("serialize_with = \"__BcField_SchemaStruct_port::serialize_ref\""));
+    syn::parse2::<syn::File>(built_struct.shadow_tokens).unwrap();
+
+    // Enum with field-compat field
+    let item_enum: syn::ItemEnum = syn::parse_quote! {
+        pub enum SchemaEnum {
+            Unit,
+            Data(#[backwards_compat(versions(1: u32, 2: Self))] u64),
+        }
+    };
+    let enum_specs = field::extract_enum_field_compat(&item_enum).unwrap();
+    let built_enum = build_enum_shadow_wire(&item_enum, &enum_specs, opts);
+    let e = built_enum.shadow_tokens.to_string();
+
+    assert!(e.contains("enum __SchemaEnumShadowWire"));
+    assert!(e.contains("derive (:: backwards_compat :: __private :: schemars :: JsonSchema)"));
+    assert!(!e.contains("Deserialize"));
+    assert!(!e.contains("deserialize_with"));
+    assert!(!e.contains(":: core :: convert :: From"));
+    assert!(e.contains("schemars (with = \"__BcField_SchemaEnum_Data_0_Schema\")"));
+    assert!(e.contains("enum __SchemaEnumBorrowedWire"));
+    assert!(e.contains("derive (:: serde :: Serialize)"));
+    assert!(e.contains("serialize_with = \"__BcField_SchemaEnum_Data_0::serialize_ref\""));
+    syn::parse2::<syn::File>(built_enum.shadow_tokens).unwrap();
+}
+
+#[test]
+fn test_via_parse_serialize_and_deserialize_options() {
+    let default_args: via::ViaArgs = syn::parse_str("via = Proxy").unwrap();
+    assert!(default_args.serialize);
+    assert!(default_args.deserialize);
+
+    for (input, expected_ser, expected_de) in [
+        ("via = Proxy, serialize = true", true, true),
+        ("via = Proxy, serialize = false", false, true),
+        ("via = Proxy, serialize(true)", true, true),
+        ("via = Proxy, serialize(false)", false, true),
+        ("via = Proxy, deserialize = true", true, true),
+        ("via = Proxy, deserialize = false", true, false),
+        ("via = Proxy, deserialize(true)", true, true),
+        ("via = Proxy, deserialize(false)", true, false),
+        ("via = Proxy, serialize = false, deserialize = true", false, true),
+        ("via = Proxy, serialize(true), deserialize(false)", true, false),
+    ] {
+        let parsed: via::ViaArgs = syn::parse_str(input).unwrap();
+        assert_eq!(parsed.serialize, expected_ser, "input: {input}");
+        assert_eq!(parsed.deserialize, expected_de, "input: {input}");
+    }
+
+    // serialize = false allows `from` and `try_from`
+    let de_only: via::ViaArgs =
+        syn::parse_str("via = Proxy, serialize = false, from = decode_fn, try_from").unwrap();
+    assert!(!de_only.serialize);
+    assert!(de_only.deserialize);
+    assert!(de_only.from_fn.is_some());
+    assert!(de_only.try_from);
+
+    // deserialize = false allows `to` and `try_into`
+    let ser_only: via::ViaArgs =
+        syn::parse_str("via = Proxy, deserialize = false, to = encode_fn, try_into").unwrap();
+    assert!(ser_only.serialize);
+    assert!(!ser_only.deserialize);
+    assert!(ser_only.to_fn.is_some());
+    assert!(ser_only.try_into);
+}
+
+#[test]
+fn test_via_parse_serialize_and_deserialize_errors() {
+    for (input, expected_msg) in [
+        (
+            "via = Proxy, serialize = true, serialize = false",
+            "duplicate `serialize` option in #[backwards_compat(...)]",
+        ),
+        (
+            "via = Proxy, deserialize(true), deserialize(false)",
+            "duplicate `deserialize` option in #[backwards_compat(...)]",
+        ),
+        (
+            "via = Proxy, serialize",
+            "expected `= true|false` or `(true|false)` for `serialize`",
+        ),
+        (
+            "via = Proxy, deserialize",
+            "expected `= true|false` or `(true|false)` for `deserialize`",
+        ),
+        (
+            "via = Proxy, serialize = \"false\"",
+            "expected boolean literal (`true` or `false`) for `serialize`",
+        ),
+        (
+            "via = Proxy, deserialize(1)",
+            "expected boolean literal (`true` or `false`) for `deserialize`",
+        ),
+        (
+            "via = Proxy, serialize()",
+            "expected boolean literal (`true` or `false`) for `serialize`",
+        ),
+        (
+            "via = Proxy, serialize(true, false)",
+            "unexpected trailing tokens in `serialize(...)`",
+        ),
+        (
+            "via = Proxy, serialize = false, deserialize = false",
+            "cannot disable both `serialize` and `deserialize` in `#[backwards_compat(...)]`; at least one must be enabled",
+        ),
+        (
+            "via = Proxy, deserialize(false), serialize(false)",
+            "cannot disable both `serialize` and `deserialize` in `#[backwards_compat(...)]`; at least one must be enabled",
+        ),
+        (
+            "via = Proxy, serialize = false, to = encode_fn",
+            "cannot use `to` when `serialize = false`",
+        ),
+        (
+            "via = Proxy, serialize = false, try_into",
+            "cannot use `try_into` when `serialize = false`",
+        ),
+        (
+            "via = Proxy, serialize = false, fallible",
+            "cannot use `fallible` when `serialize = false`; use `try_from` instead",
+        ),
+        (
+            "via = Proxy, deserialize = false, from = decode_fn",
+            "cannot use `from` when `deserialize = false`",
+        ),
+        (
+            "via = Proxy, deserialize = false, try_from",
+            "cannot use `try_from` when `deserialize = false`",
+        ),
+        (
+            "via = Proxy, deserialize = false, fallible",
+            "cannot use `fallible` when `deserialize = false`; use `try_into` instead",
+        ),
+    ] {
+        let err = syn::parse_str::<via::ViaArgs>(input).unwrap_err();
+        assert_eq!(err.to_string(), expected_msg, "input: {input}");
+    }
+}
+
+#[test]
+fn test_via_generate_conditional_serialize_and_deserialize() {
+    let item: syn::DeriveInput = syn::parse_quote!(
+        struct Domain {
+            val: u32,
+        }
+    );
+
+    // serialize = false
+    let de_args: via::ViaArgs = syn::parse_str("via = Proxy, serialize = false, try_from").unwrap();
+    let de_ts = via::generate_via(&de_args, &item.ident, &item.generics, false);
+    let de_rendered = de_ts.to_string();
+    assert!(!de_rendered.contains("impl :: serde :: Serialize"));
+    assert!(!de_rendered.contains("BackwardsCompatSerialize"));
+    assert!(de_rendered.contains("impl :: backwards_compat :: BackwardsCompat for Domain"));
+    assert!(de_rendered.contains("impl < '__de > :: serde :: Deserialize < '__de > for Domain"));
+    assert!(
+        de_rendered.contains(
+            "impl < '__de > :: backwards_compat :: BackwardsCompatDeserialize < '__de > for Domain"
+        )
+    );
+    syn::parse2::<syn::File>(de_ts).unwrap();
+
+    // deserialize = false
+    let ser_args: via::ViaArgs = syn::parse_str("via = Proxy, deserialize = false, try_into").unwrap();
+    let ser_ts = via::generate_via(&ser_args, &item.ident, &item.generics, false);
+    let ser_rendered = ser_ts.to_string();
+    assert!(!ser_rendered.contains("impl < '__de > :: serde :: Deserialize"));
+    assert!(!ser_rendered.contains("BackwardsCompatDeserialize"));
+    assert!(ser_rendered.contains("impl :: backwards_compat :: BackwardsCompat for Domain"));
+    assert!(ser_rendered.contains("impl :: serde :: Serialize for Domain"));
+    assert!(ser_rendered.contains("impl :: backwards_compat :: BackwardsCompatSerialize for Domain"));
+    syn::parse2::<syn::File>(ser_ts).unwrap();
+}
+
+#[cfg(feature = "schemars")]
+#[test]
+fn test_via_generate_schemars_with_serialize_or_deserialize_false() {
+    let item: syn::DeriveInput = syn::parse_quote!(
+        struct Domain {
+            val: u32,
+        }
+    );
+
+    // serialize = false + JsonSchema
+    let de_args: via::ViaArgs = syn::parse_str("via = Proxy, serialize = false").unwrap();
+    let de_ts = via::generate_via(&de_args, &item.ident, &item.generics, true);
+    let de_rendered = de_ts.to_string();
+    assert!(
+        de_rendered.contains("impl :: backwards_compat :: __private :: schemars :: JsonSchema for Domain")
+    );
+    assert!(!de_rendered.contains("impl :: serde :: Serialize"));
+    assert!(de_rendered.contains("impl < '__de > :: serde :: Deserialize < '__de > for Domain"));
+    syn::parse2::<syn::File>(de_ts).unwrap();
+
+    // deserialize = false + JsonSchema
+    let ser_args: via::ViaArgs = syn::parse_str("via = Proxy, deserialize = false").unwrap();
+    let ser_ts = via::generate_via(&ser_args, &item.ident, &item.generics, true);
+    let ser_rendered = ser_ts.to_string();
+    assert!(
+        ser_rendered.contains("impl :: backwards_compat :: __private :: schemars :: JsonSchema for Domain")
+    );
+    assert!(ser_rendered.contains("impl :: serde :: Serialize for Domain"));
+    assert!(!ser_rendered.contains("impl < '__de > :: serde :: Deserialize"));
+    syn::parse2::<syn::File>(ser_ts).unwrap();
+}
+
+#[test]
+fn test_clean_derive_attrs_selective_and_has_serde_derive() {
+    // (false, true): keeps Serialize, strips Deserialize (and JsonSchema under schemars)
+    #[cfg(feature = "schemars")]
+    let mut keep_ser: Vec<syn::Attribute> =
+        vec![syn::parse_quote!(#[derive(Debug, Serialize, Deserialize, JsonSchema)])];
+    #[cfg(not(feature = "schemars"))]
+    let mut keep_ser: Vec<syn::Attribute> = vec![syn::parse_quote!(#[derive(Debug, Serialize, Deserialize)])];
+
+    clean_derive_attrs(&mut keep_ser, false, true);
+    let keep_ser_str = quote::quote!(#(#keep_ser)*).to_string();
+    assert!(keep_ser_str.contains("Debug"));
+    assert!(keep_ser_str.contains("Serialize"));
+    assert!(!keep_ser_str.contains("Deserialize"));
+    #[cfg(feature = "schemars")]
+    assert!(!keep_ser_str.contains("JsonSchema"));
+    assert!(has_serde_derive(&keep_ser));
+
+    // (true, false): keeps Deserialize, strips Serialize
+    let mut keep_de: Vec<syn::Attribute> =
+        vec![syn::parse_quote!(#[derive(Debug, serde::Serialize, ::serde::Deserialize)])];
+    clean_derive_attrs(&mut keep_de, true, false);
+    let keep_de_str = quote::quote!(#(#keep_de)*).to_string();
+    assert!(keep_de_str.contains("Debug"));
+    assert!(keep_de_str.contains(":: serde :: Deserialize"));
+    assert!(!keep_de_str.contains("Serialize"));
+    assert!(has_serde_derive(&keep_de));
+
+    // has_serde_derive variants
+    assert!(has_serde_derive(&[syn::parse_quote!(#[derive(Serialize)])]));
+    assert!(has_serde_derive(&[
+        syn::parse_quote!(#[derive(serde::Serialize)])
+    ]));
+    assert!(has_serde_derive(&[syn::parse_quote!(#[derive(Deserialize)])]));
+    assert!(has_serde_derive(&[
+        syn::parse_quote!(#[derive(::serde::Deserialize)])
+    ]));
+    assert!(!has_serde_derive(&[syn::parse_quote!(#[derive(Debug, Clone)])]));
+    assert!(!has_serde_derive(&[]));
+}
+
+#[test]
+fn test_backwards_compat_impl_selective_serialize_deserialize_struct_and_enum() {
+    // 1. serialize = false WITH #[derive(Serialize)] keeps Serialize & #[serde(...)] on cleaned struct
+    let ser_false_keep = backwards_compat_impl(
+        quote::quote!(serialize = false, versions(1: V1, 2: Self)),
+        quote::quote! {
+            #[derive(Debug, Serialize, Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            pub struct KeepSerModel {
+                #[serde(rename = "n")]
+                pub name: String,
+            }
+        },
+    );
+    let rendered = ser_false_keep.to_string();
+    assert!(!rendered.contains("compile_error !"));
+    assert!(!rendered.contains("__KeepSerModelBorrowedWire"));
+    assert!(!rendered.contains("impl :: serde :: Serialize"));
+    assert!(rendered.contains("struct __KeepSerModelShadowWire"));
+    assert!(rendered.contains("impl < '__de > :: serde :: Deserialize < '__de > for KeepSerModel"));
+
+    let parsed_file: syn::File = syn::parse2(ser_false_keep).unwrap();
+    let Some(syn::Item::Struct(cleaned_struct)) = parsed_file.items.first() else {
+        panic!("expected struct as first item");
+    };
+    let cleaned_struct_str = quote::quote!(#cleaned_struct).to_string();
+    assert!(cleaned_struct_str.contains("derive (Debug , Serialize)"));
+    assert!(cleaned_struct_str.contains("rename_all = \"camelCase\""));
+    assert!(cleaned_struct_str.contains("rename = \"n\""));
+
+    // 2. serialize = false WITHOUT #[derive(Serialize)] strips #[serde(...)] from cleaned struct
+    let ser_false_strip = backwards_compat_impl(
+        quote::quote!(serialize = false, versions(1: V1, 2: Self)),
+        quote::quote! {
+            #[derive(Debug, Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            pub struct StripSerdeModel {
+                #[serde(rename = "n")]
+                pub name: String,
+            }
+        },
+    );
+    let parsed_strip: syn::File = syn::parse2(ser_false_strip).unwrap();
+    let Some(syn::Item::Struct(stripped_struct)) = parsed_strip.items.first() else {
+        panic!("expected struct as first item");
+    };
+    let stripped_struct_str = quote::quote!(#stripped_struct).to_string();
+    assert!(stripped_struct_str.contains("derive (Debug)"));
+    assert!(!stripped_struct_str.contains("serde"));
+
+    // 3. deserialize = false WITH #[derive(Deserialize)] keeps Deserialize & #[serde(...)] on cleaned enum
+    let de_false_keep = backwards_compat_impl(
+        quote::quote!(deserialize = false, versions(1: V1, 2: Self)),
+        quote::quote! {
+            #[derive(Debug, Serialize, Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            pub enum KeepDeEnum {
+                #[serde(rename = "a")]
+                Alpha(u32),
+            }
+        },
+    );
+    let de_rendered = de_false_keep.to_string();
+    assert!(!de_rendered.contains("compile_error !"));
+    assert!(!de_rendered.contains("__KeepDeEnumShadowWire"));
+    assert!(!de_rendered.contains("impl < '__de > :: serde :: Deserialize"));
+    assert!(de_rendered.contains("enum __KeepDeEnumBorrowedWire"));
+    assert!(de_rendered.contains("impl :: serde :: Serialize for KeepDeEnum"));
+
+    let parsed_enum_file: syn::File = syn::parse2(de_false_keep).unwrap();
+    let Some(syn::Item::Enum(cleaned_enum)) = parsed_enum_file.items.first() else {
+        panic!("expected enum as first item");
+    };
+    let cleaned_enum_str = quote::quote!(#cleaned_enum).to_string();
+    assert!(cleaned_enum_str.contains("derive (Debug , Deserialize)"));
+    assert!(cleaned_enum_str.contains("rename_all = \"camelCase\""));
+    assert!(cleaned_enum_str.contains("rename = \"a\""));
+}
+
+#[test]
+fn test_backwards_compat_via_impl_selective_serialize_deserialize() {
+    let via_ser_false = backwards_compat_via_impl(
+        quote::quote!(via = Proxy, serialize = false),
+        quote::quote! {
+            #[derive(Debug, Serialize, Deserialize)]
+            pub struct ViaDeOnly {
+                pub x: u32,
+            }
+        },
+    );
+    let s1 = via_ser_false.to_string();
+    assert!(!s1.contains("compile_error !"));
+    assert!(!s1.contains("impl :: serde :: Serialize"));
+    assert!(s1.contains("impl < '__de > :: serde :: Deserialize < '__de > for ViaDeOnly"));
+    let f1: syn::File = syn::parse2(via_ser_false).unwrap();
+    let Some(syn::Item::Struct(st1)) = f1.items.first() else {
+        panic!("expected struct");
+    };
+    assert!(
+        quote::quote!(#st1)
+            .to_string()
+            .contains("derive (Debug , Serialize)")
+    );
+
+    let via_de_false = backwards_compat_via_impl(
+        quote::quote!(via = ProxyEnum, deserialize = false),
+        quote::quote! {
+            #[derive(Debug, Serialize, Deserialize)]
+            pub enum ViaSerOnly {
+                A,
+                B(u32),
+            }
+        },
+    );
+    let s2 = via_de_false.to_string();
+    assert!(!s2.contains("compile_error !"));
+    assert!(!s2.contains("impl < '__de > :: serde :: Deserialize"));
+    assert!(s2.contains("impl :: serde :: Serialize for ViaSerOnly"));
+    let f2: syn::File = syn::parse2(via_de_false).unwrap();
+    let Some(syn::Item::Enum(en2)) = f2.items.first() else {
+        panic!("expected enum");
+    };
+    assert!(
+        quote::quote!(#en2)
+            .to_string()
+            .contains("derive (Debug , Deserialize)")
+    );
 }

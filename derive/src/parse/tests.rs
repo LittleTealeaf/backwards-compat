@@ -1483,3 +1483,384 @@ fn test_parse_and_validate_external_flag() {
         "unversioned `_` cannot be used with `external` tagging"
     );
 }
+
+#[test]
+fn test_parse_serialize_deserialize_defaults() {
+    let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        versions(1: V1, 2: Self)
+    })
+    .unwrap();
+    assert!(args.serialize);
+    assert!(args.deserialize);
+    assert!(!args.serialize_specified);
+    assert!(!args.deserialize_specified);
+
+    let input = args
+        .into_input(
+            syn::parse_quote!(TargetModel),
+            syn::Visibility::Inherited,
+            syn::Generics::default(),
+        )
+        .unwrap();
+    assert!(input.serialize);
+    assert!(input.deserialize);
+}
+
+#[test]
+fn test_parse_serialize_option_forms() {
+    for (tokens, expected_serialize) in [
+        (quote::quote!(serialize = true, versions(1: V1, 2: Self)), true),
+        (quote::quote!(serialize = false, versions(1: V1, 2: Self)), false),
+        (quote::quote!(serialize(true), versions(1: V1, 2: Self)), true),
+        (quote::quote!(serialize(false), versions(1: V1, 2: Self)), false),
+    ] {
+        let args: BackwardsCompatArgs = syn::parse2(tokens).unwrap();
+        assert_eq!(args.serialize, expected_serialize);
+        assert!(args.deserialize);
+        assert!(args.serialize_specified);
+        assert!(!args.deserialize_specified);
+
+        let input = args
+            .into_input(
+                syn::parse_quote!(TargetModel),
+                syn::Visibility::Inherited,
+                syn::Generics::default(),
+            )
+            .unwrap();
+        assert_eq!(input.serialize, expected_serialize);
+        assert!(input.deserialize);
+    }
+}
+
+#[test]
+fn test_parse_deserialize_option_forms() {
+    for (tokens, expected_deserialize) in [
+        (quote::quote!(deserialize = true, versions(1: V1, 2: Self)), true),
+        (
+            quote::quote!(deserialize = false, versions(1: V1, 2: Self)),
+            false,
+        ),
+        (quote::quote!(deserialize(true), versions(1: V1, 2: Self)), true),
+        (quote::quote!(deserialize(false), versions(1: V1, 2: Self)), false),
+    ] {
+        let args: BackwardsCompatArgs = syn::parse2(tokens).unwrap();
+        assert!(args.serialize);
+        assert_eq!(args.deserialize, expected_deserialize);
+        assert!(!args.serialize_specified);
+        assert!(args.deserialize_specified);
+
+        let input = args
+            .into_input(
+                syn::parse_quote!(TargetModel),
+                syn::Visibility::Inherited,
+                syn::Generics::default(),
+            )
+            .unwrap();
+        assert!(input.serialize);
+        assert_eq!(input.deserialize, expected_deserialize);
+    }
+}
+
+#[test]
+fn test_parse_serialize_deserialize_combined_valid() {
+    for (tokens, expected_serialize, expected_deserialize) in [
+        (
+            quote::quote!(serialize = true, deserialize = true, versions(1: V1, 2: Self)),
+            true,
+            true,
+        ),
+        (
+            quote::quote!(serialize = false, deserialize = true, versions(1: V1, 2: Self)),
+            false,
+            true,
+        ),
+        (
+            quote::quote!(serialize(true), deserialize(false), versions(1: V1, 2: Self)),
+            true,
+            false,
+        ),
+    ] {
+        let args: BackwardsCompatArgs = syn::parse2(tokens).unwrap();
+        assert_eq!(args.serialize, expected_serialize);
+        assert_eq!(args.deserialize, expected_deserialize);
+        assert!(args.serialize_specified);
+        assert!(args.deserialize_specified);
+
+        let input = args
+            .into_input(
+                syn::parse_quote!(TargetModel),
+                syn::Visibility::Inherited,
+                syn::Generics::default(),
+            )
+            .unwrap();
+        assert_eq!(input.serialize, expected_serialize);
+        assert_eq!(input.deserialize, expected_deserialize);
+    }
+}
+
+#[test]
+fn test_parse_serialize_deserialize_duplicate_errors() {
+    for (tokens, expected_msg) in [
+        (
+            quote::quote!(serialize = true, serialize = false, versions(1: Self)),
+            "duplicate `serialize` attribute argument",
+        ),
+        (
+            quote::quote!(serialize(true), serialize(true), versions(1: Self)),
+            "duplicate `serialize` attribute argument",
+        ),
+        (
+            quote::quote!(deserialize = true, deserialize = false, versions(1: Self)),
+            "duplicate `deserialize` attribute argument",
+        ),
+        (
+            quote::quote!(deserialize(false), deserialize(true), versions(1: Self)),
+            "duplicate `deserialize` attribute argument",
+        ),
+    ] {
+        let err = syn::parse2::<BackwardsCompatArgs>(tokens).unwrap_err();
+        assert_eq!(err.to_string(), expected_msg);
+    }
+}
+
+#[test]
+fn test_parse_serialize_deserialize_invalid_syntax_and_values() {
+    for (tokens, expected_msg) in [
+        (
+            quote::quote!(serialize, versions(1: Self)),
+            "expected `= true|false` or `(true|false)` for `serialize`",
+        ),
+        (
+            quote::quote!(deserialize, versions(1: Self)),
+            "expected `= true|false` or `(true|false)` for `deserialize`",
+        ),
+        (
+            quote::quote!(serialize = "false", versions(1: Self)),
+            "expected boolean literal (`true` or `false`) for `serialize`",
+        ),
+        (
+            quote::quote!(serialize = 0, versions(1: Self)),
+            "expected boolean literal (`true` or `false`) for `serialize`",
+        ),
+        (
+            quote::quote!(deserialize = "true", versions(1: Self)),
+            "expected boolean literal (`true` or `false`) for `deserialize`",
+        ),
+        (
+            quote::quote!(serialize("false"), versions(1: Self)),
+            "expected boolean literal (`true` or `false`) for `serialize`",
+        ),
+        (
+            quote::quote!(deserialize(1), versions(1: Self)),
+            "expected boolean literal (`true` or `false`) for `deserialize`",
+        ),
+        (
+            quote::quote!(serialize(), versions(1: Self)),
+            "expected boolean literal (`true` or `false`) for `serialize`",
+        ),
+        (
+            quote::quote!(deserialize(), versions(1: Self)),
+            "expected boolean literal (`true` or `false`) for `deserialize`",
+        ),
+        (
+            quote::quote!(serialize(true, false), versions(1: Self)),
+            "unexpected trailing tokens in `serialize(...)`",
+        ),
+        (
+            quote::quote!(deserialize(false, true), versions(1: Self)),
+            "unexpected trailing tokens in `deserialize(...)`",
+        ),
+    ] {
+        let err = syn::parse2::<BackwardsCompatArgs>(tokens).unwrap_err();
+        assert_eq!(err.to_string(), expected_msg);
+    }
+}
+
+#[test]
+fn test_reject_both_serialize_and_deserialize_false() {
+    let expected = "cannot disable both `serialize` and `deserialize` in `#[backwards_compat(...)]`; at least one must be enabled";
+
+    // Rejected during Parse
+    for tokens in [
+        quote::quote!(serialize = false, deserialize = false, versions(1: Self)),
+        quote::quote!(deserialize(false), serialize(false), versions(1: Self)),
+    ] {
+        let err = syn::parse2::<BackwardsCompatArgs>(tokens).unwrap_err();
+        assert_eq!(err.to_string(), expected);
+    }
+
+    // Rejected defensively in into_input
+    let manual_args = BackwardsCompatArgs {
+        tag_field: "version".to_owned(),
+        content_field: None,
+        external: false,
+        dump: false,
+        serialize: false,
+        deserialize: false,
+        serialize_specified: true,
+        deserialize_specified: true,
+        versions: Vec::new(),
+    };
+    let err = manual_args
+        .into_input(
+            syn::parse_quote!(TargetModel),
+            syn::Visibility::Inherited,
+            syn::Generics::default(),
+        )
+        .unwrap_err();
+    assert_eq!(err.to_string(), expected);
+}
+
+#[test]
+fn test_serialize_false_rejects_serialize_and_serializable_attrs() {
+    for (tokens, expected_msg) in [
+        (
+            quote::quote!(
+                serialize = false,
+                versions(#[serialize] 1: V1, 2: Self)
+            ),
+            "cannot use `#[serialize]` when `serialize = false`",
+        ),
+        (
+            quote::quote!(
+                serialize = false,
+                versions(#[serialize(with = to_v1)] 1: V1, 2: Self)
+            ),
+            "cannot use `#[serialize]` when `serialize = false`",
+        ),
+        (
+            quote::quote!(
+                serialize = false,
+                versions(#[serializable] 1: V1, 2: Self)
+            ),
+            "cannot use `#[serializable]` when `serialize = false`",
+        ),
+        (
+            quote::quote!(
+                serialize = false,
+                versions(#[serializable(with = to_v1)] 1: V1, 2: Self)
+            ),
+            "cannot use `#[serializable]` when `serialize = false`",
+        ),
+        (
+            quote::quote!(
+                serialize = false,
+                versions(#[serializable(try_with = try_to_v1)] 1: V1, 2: Self)
+            ),
+            "cannot use `#[serializable]` when `serialize = false`",
+        ),
+    ] {
+        let args: BackwardsCompatArgs = syn::parse2(tokens).unwrap();
+        let err = args
+            .into_input(
+                syn::parse_quote!(TargetModel),
+                syn::Visibility::Inherited,
+                syn::Generics::default(),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), expected_msg);
+    }
+
+    // Allows deserialization features when serialize = false
+    let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        serialize = false,
+        versions(
+            _: V0 => 1,
+            #[fallible] 1: V1 => 2,
+            #[with(migrate_v2)] 2: V2 => Self,
+            #[current] 3: Self,
+        )
+    })
+    .unwrap();
+    let input = args
+        .into_input(
+            syn::parse_quote!(TargetModel),
+            syn::Visibility::Inherited,
+            syn::Generics::default(),
+        )
+        .unwrap();
+    assert!(!input.serialize);
+    assert!(input.deserialize);
+    assert_eq!(input.versions.len(), 4);
+}
+
+#[test]
+fn test_deserialize_false_rejects_deserialization_only_features() {
+    for (tokens, expected_msg) in [
+        (
+            quote::quote!(
+                deserialize = false,
+                versions(_: V0, 1: Self)
+            ),
+            "cannot use unversioned `_` when `deserialize = false`",
+        ),
+        (
+            quote::quote!(
+                deserialize = false,
+                versions(#[fallible] 1: V1, 2: Self)
+            ),
+            "cannot use `#[fallible]` when `deserialize = false`",
+        ),
+        (
+            quote::quote!(
+                deserialize = false,
+                versions(#[with(migrate_v1)] 1: V1, 2: Self)
+            ),
+            "cannot use `#[with(...)]` when `deserialize = false`",
+        ),
+        (
+            quote::quote!(
+                deserialize = false,
+                versions(1: V1 => 2, 2: Self)
+            ),
+            "cannot use explicit migration target `=> ...` when `deserialize = false`",
+        ),
+        (
+            quote::quote!(
+                deserialize = false,
+                versions(1: V1 => Self, 2: Self)
+            ),
+            "cannot use explicit migration target `=> ...` when `deserialize = false`",
+        ),
+        (
+            quote::quote!(
+                deserialize = false,
+                versions(1: V1 => V2, 2: Self)
+            ),
+            "cannot use explicit migration target `=> ...` when `deserialize = false`",
+        ),
+    ] {
+        let args: BackwardsCompatArgs = syn::parse2(tokens).unwrap();
+        let err = args
+            .into_input(
+                syn::parse_quote!(TargetModel),
+                syn::Visibility::Inherited,
+                syn::Generics::default(),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), expected_msg);
+    }
+
+    // Allows historical entries and serialization attributes when deserialize = false
+    let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        deserialize = false,
+        versions(
+            #[serializable] 1: ModelV1,
+            #[serialize(with = to_v2)] 2: ModelV2,
+            #[current] 3: Self,
+        )
+    })
+    .unwrap();
+    let input = args
+        .into_input(
+            syn::parse_quote!(TargetModel),
+            syn::Visibility::Inherited,
+            syn::Generics::default(),
+        )
+        .unwrap();
+    assert!(input.serialize);
+    assert!(!input.deserialize);
+    assert_eq!(input.versions.len(), 3);
+    assert_eq!(input.current_version, VersionTag::Int(3));
+    assert_eq!(input.serialize_version, VersionTag::Int(2));
+}

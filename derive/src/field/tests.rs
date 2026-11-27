@@ -220,7 +220,7 @@ fn test_generate_field_helper_valid_syntax() {
         }
     };
     let specs = extract_struct_field_compat(&item).unwrap();
-    let tokens = generate_field_helper(&specs[0], false).unwrap();
+    let tokens = generate_field_helper(&specs[0], false, true, true).unwrap();
     let rendered = tokens.to_string();
 
     assert!(rendered.contains("struct __BcField_Outer_field ;"));
@@ -242,7 +242,7 @@ fn test_generate_field_helper_with_schemars() {
         }
     };
     let specs = extract_struct_field_compat(&item).unwrap();
-    let tokens = generate_field_helper(&specs[0], true).unwrap();
+    let tokens = generate_field_helper(&specs[0], true, true, true).unwrap();
     let rendered = tokens.to_string();
 
     assert!(rendered.contains("struct __BcField_Outer_field_Schema < T >"));
@@ -264,9 +264,104 @@ fn test_field_level_external_does_not_default_content() {
     assert!(specs[0].args.external);
     assert!(specs[0].args.content_field.is_none());
 
-    let tokens = generate_field_helper(&specs[0], false).unwrap();
+    let tokens = generate_field_helper(&specs[0], false, true, true).unwrap();
     let rendered = tokens.to_string();
     assert!(rendered.contains("serialize_newtype_variant"));
     assert!(rendered.contains("deserialize_enum"));
     syn::parse2::<syn::File>(tokens).unwrap();
+}
+
+#[test]
+fn test_field_level_rejects_serialize_and_deserialize_options() {
+    let expected = "`serialize` and `deserialize` options are only supported on struct/enum-level `#[backwards_compat(...)]`, not on field-level attributes";
+
+    for attr_args in [
+        quote!(serialize = false, versions(1: u32, 2: Self)),
+        quote!(deserialize = false, versions(1: u32, 2: Self)),
+        quote!(serialize = true, versions(1: u32, 2: Self)),
+        quote!(deserialize = true, versions(1: u32, 2: Self)),
+        quote!(serialize(false), versions(1: u32, 2: Self)),
+        quote!(deserialize(true), versions(1: u32, 2: Self)),
+    ] {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            pub struct Config {
+                #[backwards_compat(#attr_args)]
+                pub port: u16,
+            }
+        };
+        let err = extract_struct_field_compat(&item).unwrap_err();
+        assert_eq!(err.to_string(), expected);
+    }
+
+    let item_enum: syn::ItemEnum = syn::parse_quote! {
+        pub enum Event {
+            Data(#[backwards_compat(serialize = false, versions(1: u32, 2: Self))] u64),
+        }
+    };
+    let err_enum = extract_enum_field_compat(&item_enum).unwrap_err();
+    assert_eq!(err_enum.to_string(), expected);
+}
+
+#[test]
+fn test_generate_field_helper_conditional_serialize_and_deserialize() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        pub struct Outer<T> {
+            #[backwards_compat(versions(1: OldField<T>, 2: Self))]
+            pub field: NewField<T>,
+        }
+    };
+    let specs = extract_struct_field_compat(&item).unwrap();
+
+    // enable_serialize = false, enable_deserialize = true
+    let de_only = generate_field_helper(&specs[0], false, false, true).unwrap();
+    let de_rendered = de_only.to_string();
+    assert!(!de_rendered.contains("fn serialize "));
+    assert!(!de_rendered.contains("fn serialize <"));
+    assert!(!de_rendered.contains("fn serialize_ref"));
+    assert!(de_rendered.contains("fn deserialize <"));
+    syn::parse2::<syn::File>(de_only).unwrap();
+
+    // enable_serialize = true, enable_deserialize = false
+    let ser_only = generate_field_helper(&specs[0], false, true, false).unwrap();
+    let ser_rendered = ser_only.to_string();
+    assert!(!ser_rendered.contains("fn deserialize"));
+    assert!(ser_rendered.contains("fn serialize <"));
+    assert!(ser_rendered.contains("fn serialize_ref <"));
+    syn::parse2::<syn::File>(ser_only).unwrap();
+}
+
+#[cfg(feature = "schemars")]
+#[test]
+fn test_generate_field_helper_with_schemars_and_disabled_serde() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        pub struct Outer<T> {
+            #[backwards_compat(versions(1: OldField<T>, 2: Self))]
+            pub field: NewField<T>,
+        }
+    };
+    let specs = extract_struct_field_compat(&item).unwrap();
+
+    // derive_json_schema = true, enable_serialize = false, enable_deserialize = true
+    let de_schema = generate_field_helper(&specs[0], true, false, true).unwrap();
+    let de_rendered = de_schema.to_string();
+    assert!(de_rendered.contains("struct __BcField_Outer_field_Schema < T >"));
+    assert!(de_rendered.contains(
+        "impl < T > :: backwards_compat :: __private :: schemars :: JsonSchema for __BcField_Outer_field_Schema < T >"
+    ));
+    assert!(!de_rendered.contains("fn serialize <"));
+    assert!(!de_rendered.contains("fn serialize_ref"));
+    assert!(de_rendered.contains("fn deserialize <"));
+    syn::parse2::<syn::File>(de_schema).unwrap();
+
+    // derive_json_schema = true, enable_serialize = true, enable_deserialize = false
+    let ser_schema = generate_field_helper(&specs[0], true, true, false).unwrap();
+    let ser_rendered = ser_schema.to_string();
+    assert!(ser_rendered.contains("struct __BcField_Outer_field_Schema < T >"));
+    assert!(ser_rendered.contains(
+        "impl < T > :: backwards_compat :: __private :: schemars :: JsonSchema for __BcField_Outer_field_Schema < T >"
+    ));
+    assert!(ser_rendered.contains("fn serialize <"));
+    assert!(ser_rendered.contains("fn serialize_ref <"));
+    assert!(!ser_rendered.contains("fn deserialize"));
+    syn::parse2::<syn::File>(ser_schema).unwrap();
 }

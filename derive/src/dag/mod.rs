@@ -428,16 +428,18 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
                     let Some(next_version) = input.versions.get(next_idx) else {
                         break;
                     };
-                    if v.cfgs.is_empty() && !next_version.cfgs.is_empty() {
-                        return Err(Error::new(
-                            v.tag_span,
-                            format!(
-                                "unconditional version `{}` cannot migrate through conditionally compiled version `{}`; add `#[cfg(...)]` or use an explicit `=>` transition to an unconditional target",
-                                v.tag, next_version.tag
-                            ),
-                        ));
+                    if input.deserialize {
+                        if v.cfgs.is_empty() && !next_version.cfgs.is_empty() {
+                            return Err(Error::new(
+                                v.tag_span,
+                                format!(
+                                    "unconditional version `{}` cannot migrate through conditionally compiled version `{}`; add `#[cfg(...)]` or use an explicit `=>` transition to an unconditional target",
+                                    v.tag, next_version.tag
+                                ),
+                            ));
+                        }
+                        path_cfgs.extend(next_version.cfgs.iter().map(|c| &c.tokens));
                     }
-                    path_cfgs.extend(next_version.cfgs.iter().map(|c| &c.tokens));
                     let next_ty = next_version.ty.clone();
                     if next_ty != curr_ty {
                         let transition_node = transition_sources.get(curr_node).copied().unwrap_or(curr_node);

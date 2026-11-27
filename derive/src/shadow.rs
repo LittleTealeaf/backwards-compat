@@ -3,6 +3,57 @@ use crate::is_forwarded_attr;
 #[cfg(feature = "schemars")]
 use crate::{field_has_schemars_with, schemars_attrs_have_crate};
 
+/// Configuration flags controlling which shadow wire types and derives are emitted.
+#[derive(Debug, Clone, Copy)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent shadow wire generation flags"
+)]
+pub struct ShadowWireOptions {
+    /// Whether to emit the borrowed shadow type (`__<T>BorrowedWire`) for `Serialize`.
+    pub serialize: bool,
+    /// Whether to emit `Deserialize` support and `From` conversion for `__<T>ShadowWire`.
+    pub deserialize: bool,
+    /// Whether to emit `JsonSchema` support on `__<T>ShadowWire` (when the `schemars` feature is enabled).
+    pub derive_json_schema: bool,
+}
+
+fn build_owned_shadow_attrs(
+    opts: ShadowWireOptions,
+    preserved_attrs: &[syn::Attribute],
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    #[cfg(not(feature = "schemars"))]
+    let _ = preserved_attrs;
+
+    let mut derives: Vec<proc_macro2::TokenStream> = Vec::with_capacity(2);
+    if opts.deserialize {
+        derives.push(quote::quote!(::serde::Deserialize));
+    }
+
+    #[cfg(feature = "schemars")]
+    let schemars_crate_attr = if opts.derive_json_schema {
+        derives.push(quote::quote!(::backwards_compat::__private::schemars::JsonSchema));
+        if schemars_attrs_have_crate(preserved_attrs) {
+            proc_macro2::TokenStream::new()
+        } else {
+            quote::quote!(#[schemars(crate = "::backwards_compat::__private::schemars")])
+        }
+    } else {
+        proc_macro2::TokenStream::new()
+    };
+
+    #[cfg(not(feature = "schemars"))]
+    let schemars_crate_attr = proc_macro2::TokenStream::new();
+
+    let derive_attr = if derives.is_empty() {
+        proc_macro2::TokenStream::new()
+    } else {
+        quote::quote!(#[derive(#(#derives),*)])
+    };
+
+    (derive_attr, schemars_crate_attr)
+}
+
 pub struct BuiltShadowWire {
     pub shadow_ident: syn::Ident,
     pub borrowed_ident: syn::Ident,
@@ -94,10 +145,9 @@ pub fn should_mark_transparent(item_struct: &syn::ItemStruct) -> bool {
 pub fn build_struct_shadow_wire(
     item_struct: &syn::ItemStruct,
     field_specs: &[field::FieldCompatSpec],
-    derive_json_schema: bool,
+    opts: ShadowWireOptions,
 ) -> BuiltShadowWire {
-    #[cfg(not(feature = "schemars"))]
-    let _ = derive_json_schema;
+    let emit_owned = opts.deserialize || (cfg!(feature = "schemars") && opts.derive_json_schema);
 
     let call_site_span = proc_macro2::Span::call_site();
     let target_ident = &item_struct.ident;
@@ -126,63 +176,94 @@ pub fn build_struct_shadow_wire(
         proc_macro2::TokenStream::new()
     };
 
-    let mut shadow_fields = item_struct.fields.clone();
-    for (idx, field) in shadow_fields.iter_mut().enumerate() {
-        field.attrs.retain(is_forwarded_attr);
-        if let Some(spec) = find_spec(idx) {
-            let de_with = format!("{}::deserialize", spec.helper_ident);
-            field
-                .attrs
-                .push(syn::parse_quote!(#[serde(deserialize_with = #de_with)]));
-            #[cfg(feature = "schemars")]
-            if derive_json_schema && !field_has_schemars_with(&field.attrs) {
-                let schema_ty_str = spec.schema_helper_ty_str();
-                field
-                    .attrs
-                    .push(syn::parse_quote!(#[schemars(with = #schema_ty_str)]));
+    let (owned_struct_def, from_impls) = if emit_owned {
+        let mut shadow_fields = item_struct.fields.clone();
+        for (idx, field) in shadow_fields.iter_mut().enumerate() {
+            field.attrs.retain(is_forwarded_attr);
+            if let Some(spec) = find_spec(idx) {
+                if opts.deserialize {
+                    let de_with = format!("{}::deserialize", spec.helper_ident);
+                    field
+                        .attrs
+                        .push(syn::parse_quote!(#[serde(deserialize_with = #de_with)]));
+                }
+                #[cfg(feature = "schemars")]
+                if opts.derive_json_schema && !field_has_schemars_with(&field.attrs) {
+                    let schema_ty_str = spec.schema_helper_ty_str();
+                    field
+                        .attrs
+                        .push(syn::parse_quote!(#[schemars(with = #schema_ty_str)]));
+                }
+            }
+            if let Some(ref mut ident) = field.ident {
+                ident.set_span(call_site_span);
             }
         }
-        if let Some(ref mut ident) = field.ident {
-            ident.set_span(call_site_span);
-        }
-    }
 
-    #[cfg(feature = "schemars")]
-    let (shadow_derive_attr, shadow_schemars_crate_attr) = if derive_json_schema {
-        let crate_attr = if schemars_attrs_have_crate(&preserved_attrs) {
-            proc_macro2::TokenStream::new()
-        } else {
-            quote::quote!(#[schemars(crate = "::backwards_compat::__private::schemars")])
+        let (shadow_derive_attr, shadow_schemars_crate_attr) =
+            build_owned_shadow_attrs(opts, &preserved_attrs);
+
+        let owned_def = quote::quote! {
+            #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
+            #[doc(hidden)]
+            #shadow_derive_attr
+            #shadow_schemars_crate_attr
+            #transparent_attr
+            #(#preserved_attrs)*
+            struct #shadow_ident #generics #shadow_fields #semi
         };
-        (
-            quote::quote!(#[derive(::serde::Deserialize, ::backwards_compat::__private::schemars::JsonSchema)]),
-            crate_attr,
-        )
-    } else {
-        (
-            quote::quote!(#[derive(::serde::Deserialize)]),
-            proc_macro2::TokenStream::new(),
-        )
-    };
-    #[cfg(not(feature = "schemars"))]
-    let (shadow_derive_attr, shadow_schemars_crate_attr) = (
-        quote::quote!(#[derive(::serde::Deserialize)]),
-        proc_macro2::TokenStream::new(),
-    );
 
-    let owned_struct_def = quote::quote! {
-        #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
-        #[doc(hidden)]
-        #shadow_derive_attr
-        #shadow_schemars_crate_attr
-        #transparent_attr
-        #(#preserved_attrs)*
-        struct #shadow_ident #generics #shadow_fields #semi
+        let from_impl = if opts.deserialize {
+            match &shadow_fields {
+                syn::Fields::Named(named) => {
+                    let field_idents: Vec<_> =
+                        named.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+                    quote::quote! {
+                        impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
+                            fn from(val: #shadow_ident #ty_generics) -> Self {
+                                Self { #( #field_idents: val.#field_idents ),* }
+                            }
+                        }
+                    }
+                }
+                syn::Fields::Unnamed(unnamed) => {
+                    let indices: Vec<_> = (0..unnamed.unnamed.len()).map(syn::Index::from).collect();
+                    quote::quote! {
+                        impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
+                            fn from(val: #shadow_ident #ty_generics) -> Self {
+                                Self ( #( val.#indices ),* )
+                            }
+                        }
+                    }
+                }
+                syn::Fields::Unit => {
+                    quote::quote! {
+                        impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
+                            fn from(_val: #shadow_ident #ty_generics) -> Self {
+                                Self
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            proc_macro2::TokenStream::new()
+        };
+
+        (owned_def, from_impl)
+    } else {
+        (proc_macro2::TokenStream::new(), proc_macro2::TokenStream::new())
     };
 
     let has_fields = !item_struct.fields.is_empty() && !matches!(item_struct.fields, syn::Fields::Unit);
 
-    let (borrowed_struct_def, construct_borrowed, borrowed_ty_in_helper) = if has_fields {
+    let (borrowed_struct_def, construct_borrowed, borrowed_ty_in_helper) = if !opts.serialize {
+        (
+            proc_macro2::TokenStream::new(),
+            proc_macro2::TokenStream::new(),
+            proc_macro2::TokenStream::new(),
+        )
+    } else if has_fields {
         let (borrowed_generics, ty_in_helper) = build_borrowed_generics(generics, &borrowed_ident);
         let (borrowed_impl_generics, _, borrowed_where_clause) = borrowed_generics.split_for_impl();
 
@@ -268,38 +349,6 @@ pub fn build_struct_shadow_wire(
         (s_def, c_borrowed, ty_in_helper)
     };
 
-    let from_impls = match &shadow_fields {
-        syn::Fields::Named(named) => {
-            let field_idents: Vec<_> = named.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
-            quote::quote! {
-                impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
-                    fn from(val: #shadow_ident #ty_generics) -> Self {
-                        Self { #( #field_idents: val.#field_idents ),* }
-                    }
-                }
-            }
-        }
-        syn::Fields::Unnamed(unnamed) => {
-            let indices: Vec<_> = (0..unnamed.unnamed.len()).map(syn::Index::from).collect();
-            quote::quote! {
-                impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
-                    fn from(val: #shadow_ident #ty_generics) -> Self {
-                        Self ( #( val.#indices ),* )
-                    }
-                }
-            }
-        }
-        syn::Fields::Unit => {
-            quote::quote! {
-                impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
-                    fn from(_val: #shadow_ident #ty_generics) -> Self {
-                        Self
-                    }
-                }
-            }
-        }
-    };
-
     let shadow_tokens = quote::quote! {
         #owned_struct_def
         #borrowed_struct_def
@@ -319,10 +368,9 @@ pub fn build_struct_shadow_wire(
 pub fn build_enum_shadow_wire(
     item_enum: &syn::ItemEnum,
     field_specs: &[field::FieldCompatSpec],
-    derive_json_schema: bool,
+    opts: ShadowWireOptions,
 ) -> BuiltShadowWire {
-    #[cfg(not(feature = "schemars"))]
-    let _ = derive_json_schema;
+    let emit_owned = opts.deserialize || (cfg!(feature = "schemars") && opts.derive_json_schema);
 
     let call_site_span = proc_macro2::Span::call_site();
     let target_ident = &item_enum.ident;
@@ -344,62 +392,48 @@ pub fn build_enum_shadow_wire(
         .cloned()
         .collect();
 
-    let mut owned_variants = item_enum.variants.clone();
-    for (v_idx, variant) in owned_variants.iter_mut().enumerate() {
-        variant.attrs.retain(is_forwarded_attr);
-        for (f_idx, field) in variant.fields.iter_mut().enumerate() {
-            field.attrs.retain(is_forwarded_attr);
-            if let Some(spec) = find_spec(v_idx, f_idx) {
-                let de_with = format!("{}::deserialize", spec.helper_ident);
-                field
-                    .attrs
-                    .push(syn::parse_quote!(#[serde(deserialize_with = #de_with)]));
-                #[cfg(feature = "schemars")]
-                if derive_json_schema && !field_has_schemars_with(&field.attrs) {
-                    let schema_ty_str = spec.schema_helper_ty_str();
-                    field
-                        .attrs
-                        .push(syn::parse_quote!(#[schemars(with = #schema_ty_str)]));
+    let owned_enum_def = if emit_owned {
+        let mut owned_variants = item_enum.variants.clone();
+        for (v_idx, variant) in owned_variants.iter_mut().enumerate() {
+            variant.attrs.retain(is_forwarded_attr);
+            for (f_idx, field) in variant.fields.iter_mut().enumerate() {
+                field.attrs.retain(is_forwarded_attr);
+                if let Some(spec) = find_spec(v_idx, f_idx) {
+                    if opts.deserialize {
+                        let de_with = format!("{}::deserialize", spec.helper_ident);
+                        field
+                            .attrs
+                            .push(syn::parse_quote!(#[serde(deserialize_with = #de_with)]));
+                    }
+                    #[cfg(feature = "schemars")]
+                    if opts.derive_json_schema && !field_has_schemars_with(&field.attrs) {
+                        let schema_ty_str = spec.schema_helper_ty_str();
+                        field
+                            .attrs
+                            .push(syn::parse_quote!(#[schemars(with = #schema_ty_str)]));
+                    }
+                }
+                if let Some(ref mut ident) = field.ident {
+                    ident.set_span(call_site_span);
                 }
             }
-            if let Some(ref mut ident) = field.ident {
-                ident.set_span(call_site_span);
+        }
+
+        let (shadow_derive_attr, shadow_schemars_crate_attr) =
+            build_owned_shadow_attrs(opts, &preserved_attrs);
+
+        quote::quote! {
+            #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
+            #[doc(hidden)]
+            #shadow_derive_attr
+            #shadow_schemars_crate_attr
+            #(#preserved_attrs)*
+            enum #shadow_ident #generics #where_clause {
+                #owned_variants
             }
         }
-    }
-
-    #[cfg(feature = "schemars")]
-    let (shadow_derive_attr, shadow_schemars_crate_attr) = if derive_json_schema {
-        let crate_attr = if schemars_attrs_have_crate(&preserved_attrs) {
-            proc_macro2::TokenStream::new()
-        } else {
-            quote::quote!(#[schemars(crate = "::backwards_compat::__private::schemars")])
-        };
-        (
-            quote::quote!(#[derive(::serde::Deserialize, ::backwards_compat::__private::schemars::JsonSchema)]),
-            crate_attr,
-        )
     } else {
-        (
-            quote::quote!(#[derive(::serde::Deserialize)]),
-            proc_macro2::TokenStream::new(),
-        )
-    };
-    #[cfg(not(feature = "schemars"))]
-    let (shadow_derive_attr, shadow_schemars_crate_attr) = (
-        quote::quote!(#[derive(::serde::Deserialize)]),
-        proc_macro2::TokenStream::new(),
-    );
-
-    let owned_enum_def = quote::quote! {
-        #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
-        #[doc(hidden)]
-        #shadow_derive_attr
-        #shadow_schemars_crate_attr
-        #(#preserved_attrs)*
-        enum #shadow_ident #generics #where_clause {
-            #owned_variants
-        }
+        proc_macro2::TokenStream::new()
     };
 
     let has_fields = item_enum
@@ -411,143 +445,173 @@ pub fn build_enum_shadow_wire(
     let mut construct_borrowed_arms = Vec::new();
     let mut from_shadow_arms = Vec::new();
 
-    for (v_idx, variant) in item_enum.variants.iter().enumerate() {
-        let v_ident = &variant.ident;
-        let v_forwarded_attrs: Vec<_> = variant
-            .attrs
-            .iter()
-            .filter(|a| is_forwarded_attr(a))
-            .cloned()
-            .collect();
-        let v_cfg_attrs: Vec<_> = variant
-            .attrs
-            .iter()
-            .filter(|a| a.path().is_ident("cfg"))
-            .cloned()
-            .collect();
+    if opts.serialize || opts.deserialize {
+        for (v_idx, variant) in item_enum.variants.iter().enumerate() {
+            let v_ident = &variant.ident;
+            let v_forwarded_attrs: Vec<_> = variant
+                .attrs
+                .iter()
+                .filter(|a| is_forwarded_attr(a))
+                .cloned()
+                .collect();
+            let v_cfg_attrs: Vec<_> = variant
+                .attrs
+                .iter()
+                .filter(|a| a.path().is_ident("cfg"))
+                .cloned()
+                .collect();
 
-        match &variant.fields {
-            syn::Fields::Unit => {
-                borrowed_variants.push(quote::quote! {
-                    #(#v_forwarded_attrs)*
-                    #v_ident
-                });
-                construct_borrowed_arms.push(quote::quote! {
-                    #(#v_cfg_attrs)*
-                    Self::#v_ident => #borrowed_ident::#v_ident
-                });
-                from_shadow_arms.push(quote::quote! {
-                    #(#v_cfg_attrs)*
-                    #shadow_ident::#v_ident => Self::#v_ident
-                });
-            }
-            syn::Fields::Unnamed(unnamed) => {
-                let mut borrowed_fields = Vec::new();
-                let mut bindings = Vec::new();
-                for (i, f) in unnamed.unnamed.iter().enumerate() {
-                    let mut f_attrs: Vec<_> =
-                        f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
-                    if let Some(spec) = find_spec(v_idx, i) {
-                        let ser_with = format!("{}::serialize_ref", spec.helper_ident);
-                        f_attrs.push(syn::parse_quote!(#[serde(serialize_with = #ser_with)]));
+            match &variant.fields {
+                syn::Fields::Unit => {
+                    if opts.serialize {
+                        borrowed_variants.push(quote::quote! {
+                            #(#v_forwarded_attrs)*
+                            #v_ident
+                        });
+                        construct_borrowed_arms.push(quote::quote! {
+                            #(#v_cfg_attrs)*
+                            Self::#v_ident => #borrowed_ident::#v_ident
+                        });
                     }
-                    let f_ty = &f.ty;
-                    borrowed_fields.push(quote::quote! {
-                        #(#f_attrs)*
-                        &'__wire #f_ty
-                    });
-                    bindings.push(quote::format_ident!("__f{}", i, span = call_site_span));
-                }
-                borrowed_variants.push(quote::quote! {
-                    #(#v_forwarded_attrs)*
-                    #v_ident(#(#borrowed_fields,)*)
-                });
-                construct_borrowed_arms.push(quote::quote! {
-                    #(#v_cfg_attrs)*
-                    Self::#v_ident(#(#bindings),*) => #borrowed_ident::#v_ident(#(#bindings),*)
-                });
-                from_shadow_arms.push(quote::quote! {
-                    #(#v_cfg_attrs)*
-                    #shadow_ident::#v_ident(#(#bindings),*) => Self::#v_ident(#(#bindings),*)
-                });
-            }
-            syn::Fields::Named(named) => {
-                let mut borrowed_fields = Vec::new();
-                let mut field_idents = Vec::new();
-                for (i, f) in named.named.iter().enumerate() {
-                    let mut f_attrs: Vec<_> =
-                        f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
-                    if let Some(spec) = find_spec(v_idx, i) {
-                        let ser_with = format!("{}::serialize_ref", spec.helper_ident);
-                        f_attrs.push(syn::parse_quote!(#[serde(serialize_with = #ser_with)]));
+                    if opts.deserialize {
+                        from_shadow_arms.push(quote::quote! {
+                            #(#v_cfg_attrs)*
+                            #shadow_ident::#v_ident => Self::#v_ident
+                        });
                     }
-                    let f_ident = f.ident.as_ref().unwrap();
-                    let mut borrowed_f_ident = f_ident.clone();
-                    borrowed_f_ident.set_span(call_site_span);
-                    let f_ty = &f.ty;
-                    borrowed_fields.push(quote::quote! {
-                        #(#f_attrs)*
-                        #borrowed_f_ident: &'__wire #f_ty
-                    });
-                    field_idents.push(borrowed_f_ident);
                 }
-                borrowed_variants.push(quote::quote! {
-                    #(#v_forwarded_attrs)*
-                    #v_ident { #(#borrowed_fields,)* }
-                });
-                construct_borrowed_arms.push(quote::quote! {
-                    #(#v_cfg_attrs)*
-                    Self::#v_ident { #(#field_idents),* } => #borrowed_ident::#v_ident { #(#field_idents),* }
-                });
-                from_shadow_arms.push(quote::quote! {
-                    #(#v_cfg_attrs)*
-                    #shadow_ident::#v_ident { #(#field_idents),* } => Self::#v_ident { #(#field_idents),* }
-                });
+                syn::Fields::Unnamed(unnamed) => {
+                    let mut borrowed_fields = Vec::new();
+                    let mut bindings = Vec::new();
+                    for (i, f) in unnamed.unnamed.iter().enumerate() {
+                        if opts.serialize {
+                            let mut f_attrs: Vec<_> =
+                                f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
+                            if let Some(spec) = find_spec(v_idx, i) {
+                                let ser_with = format!("{}::serialize_ref", spec.helper_ident);
+                                f_attrs.push(syn::parse_quote!(#[serde(serialize_with = #ser_with)]));
+                            }
+                            let f_ty = &f.ty;
+                            borrowed_fields.push(quote::quote! {
+                                #(#f_attrs)*
+                                &'__wire #f_ty
+                            });
+                        }
+                        bindings.push(quote::format_ident!("__f{}", i, span = call_site_span));
+                    }
+                    if opts.serialize {
+                        borrowed_variants.push(quote::quote! {
+                            #(#v_forwarded_attrs)*
+                            #v_ident(#(#borrowed_fields,)*)
+                        });
+                        construct_borrowed_arms.push(quote::quote! {
+                            #(#v_cfg_attrs)*
+                            Self::#v_ident(#(#bindings),*) => #borrowed_ident::#v_ident(#(#bindings),*)
+                        });
+                    }
+                    if opts.deserialize {
+                        from_shadow_arms.push(quote::quote! {
+                            #(#v_cfg_attrs)*
+                            #shadow_ident::#v_ident(#(#bindings),*) => Self::#v_ident(#(#bindings),*)
+                        });
+                    }
+                }
+                syn::Fields::Named(named) => {
+                    let mut borrowed_fields = Vec::new();
+                    let mut field_idents = Vec::new();
+                    for (i, f) in named.named.iter().enumerate() {
+                        let f_ident = f.ident.as_ref().unwrap();
+                        let mut borrowed_f_ident = f_ident.clone();
+                        borrowed_f_ident.set_span(call_site_span);
+                        if opts.serialize {
+                            let mut f_attrs: Vec<_> =
+                                f.attrs.iter().filter(|a| is_forwarded_attr(a)).cloned().collect();
+                            if let Some(spec) = find_spec(v_idx, i) {
+                                let ser_with = format!("{}::serialize_ref", spec.helper_ident);
+                                f_attrs.push(syn::parse_quote!(#[serde(serialize_with = #ser_with)]));
+                            }
+                            let f_ty = &f.ty;
+                            borrowed_fields.push(quote::quote! {
+                                #(#f_attrs)*
+                                #borrowed_f_ident: &'__wire #f_ty
+                            });
+                        }
+                        field_idents.push(borrowed_f_ident);
+                    }
+                    if opts.serialize {
+                        borrowed_variants.push(quote::quote! {
+                            #(#v_forwarded_attrs)*
+                            #v_ident { #(#borrowed_fields,)* }
+                        });
+                        construct_borrowed_arms.push(quote::quote! {
+                            #(#v_cfg_attrs)*
+                            Self::#v_ident { #(#field_idents),* } => #borrowed_ident::#v_ident { #(#field_idents),* }
+                        });
+                    }
+                    if opts.deserialize {
+                        from_shadow_arms.push(quote::quote! {
+                            #(#v_cfg_attrs)*
+                            #shadow_ident::#v_ident { #(#field_idents),* } => Self::#v_ident { #(#field_idents),* }
+                        });
+                    }
+                }
             }
         }
     }
 
-    let (borrowed_enum_def, borrowed_ty_in_helper) = if has_fields {
-        let (borrowed_generics, ty_in_helper) = build_borrowed_generics(generics, &borrowed_ident);
-        let (borrowed_impl_generics, _, borrowed_where_clause) = borrowed_generics.split_for_impl();
-        let def = quote::quote! {
-            #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
-            #[doc(hidden)]
-            #[derive(::serde::Serialize)]
-            #(#preserved_attrs)*
-            enum #borrowed_ident #borrowed_impl_generics #borrowed_where_clause {
-                #(#borrowed_variants,)*
-            }
+    let (borrowed_enum_def, borrowed_ty_in_helper, construct_borrowed) = if opts.serialize {
+        let (def, ty_in_helper) = if has_fields {
+            let (borrowed_generics, ty_in_helper) = build_borrowed_generics(generics, &borrowed_ident);
+            let (borrowed_impl_generics, _, borrowed_where_clause) = borrowed_generics.split_for_impl();
+            let def = quote::quote! {
+                #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
+                #[doc(hidden)]
+                #[derive(::serde::Serialize)]
+                #(#preserved_attrs)*
+                enum #borrowed_ident #borrowed_impl_generics #borrowed_where_clause {
+                    #(#borrowed_variants,)*
+                }
+            };
+            (def, ty_in_helper)
+        } else {
+            let def = quote::quote! {
+                #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
+                #[doc(hidden)]
+                #[derive(::serde::Serialize)]
+                #(#preserved_attrs)*
+                enum #borrowed_ident #generics #where_clause {
+                    #(#borrowed_variants,)*
+                }
+            };
+            let ty_in_helper = quote::quote!(#borrowed_ident #ty_generics);
+            (def, ty_in_helper)
         };
-        (def, ty_in_helper)
+        let construct = if item_enum.variants.is_empty() {
+            quote::quote!(match *self {})
+        } else {
+            quote::quote!(match self { #(#construct_borrowed_arms,)* })
+        };
+        (def, ty_in_helper, construct)
     } else {
-        let def = quote::quote! {
-            #[allow(non_camel_case_types, dead_code, missing_debug_implementations)]
-            #[doc(hidden)]
-            #[derive(::serde::Serialize)]
-            #(#preserved_attrs)*
-            enum #borrowed_ident #generics #where_clause {
-                #(#borrowed_variants,)*
-            }
-        };
-        let ty_in_helper = quote::quote!(#borrowed_ident #ty_generics);
-        (def, ty_in_helper)
+        (
+            proc_macro2::TokenStream::new(),
+            proc_macro2::TokenStream::new(),
+            proc_macro2::TokenStream::new(),
+        )
     };
 
-    let construct_borrowed = if item_enum.variants.is_empty() {
-        quote::quote!(match *self {})
-    } else {
-        quote::quote!(match self { #(#construct_borrowed_arms,)* })
-    };
-
-    let from_impls = quote::quote! {
-        impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
-            fn from(val: #shadow_ident #ty_generics) -> Self {
-                match val {
-                    #(#from_shadow_arms,)*
+    let from_impls = if opts.deserialize {
+        quote::quote! {
+            impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
+                fn from(val: #shadow_ident #ty_generics) -> Self {
+                    match val {
+                        #(#from_shadow_arms,)*
+                    }
                 }
             }
         }
+    } else {
+        proc_macro2::TokenStream::new()
     };
 
     let shadow_tokens = quote::quote! {

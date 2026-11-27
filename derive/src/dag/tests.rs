@@ -1417,3 +1417,89 @@ fn test_dag_explicit_type_untagged_leading_pipe_alias_group() {
         ]
     );
 }
+
+#[test]
+fn test_dag_deserialize_false_allows_unconditional_before_cfg_gated_version() {
+    // When `deserialize = false`, migration paths are not used, so an unconditional
+    // historical entry followed by a `#[cfg(...)]`-gated entry must succeed.
+    let plan = resolve_tokens(
+        quote::quote! {
+            deserialize = false,
+            versions = [
+                #[serializable] 1: V1,
+                #[cfg(feature = "v2")]
+                #[serializable] 2: V2,
+                3: Self,
+            ]
+        },
+        parse_quote!(Target),
+    )
+    .unwrap();
+
+    assert!(plan.target_is_wire);
+    assert!(plan.serialize_target_is_wire);
+    assert_eq!(plan.serialize_wire_ty, parse_quote!(Target));
+    assert!(plan.serialize_with_fn.is_none());
+    assert_eq!(plan.paths.len(), 3);
+    assert!(plan.paths[0].cfg.is_none());
+    assert_eq!(
+        plan.paths[1].cfg.as_ref().unwrap().to_string(),
+        quote::quote!(feature = "v2").to_string()
+    );
+    assert!(plan.paths[2].cfg.is_none());
+
+    // Also verify `#[serialize(with = ...)]` on an unconditional entry before a gated entry.
+    let plan_ser = resolve_tokens(
+        quote::quote! {
+            deserialize = false,
+            versions = [
+                #[serialize(with = to_v1)] 1: V1,
+                #[cfg(feature = "v2")]
+                #[serializable] 2: V2,
+                #[current] 3: Self,
+            ]
+        },
+        parse_quote!(Target),
+    )
+    .unwrap();
+
+    assert!(plan_ser.target_is_wire);
+    assert!(!plan_ser.serialize_target_is_wire);
+    assert_eq!(plan_ser.serialize_wire_ty, parse_quote!(V1));
+    assert_eq!(
+        plan_ser
+            .serialize_with_fn
+            .as_ref()
+            .unwrap()
+            .to_token_stream()
+            .to_string(),
+        "to_v1"
+    );
+
+    // With `deserialize = true` (explicitly or by default), the same layout is rejected.
+    for tokens in [
+        quote::quote! {
+            deserialize = true,
+            versions = [
+                #[serializable] 1: V1,
+                #[cfg(feature = "v2")]
+                #[serializable] 2: V2,
+                3: Self,
+            ]
+        },
+        quote::quote! {
+            versions = [
+                #[serializable] 1: V1,
+                #[cfg(feature = "v2")]
+                #[serializable] 2: V2,
+                3: Self,
+            ]
+        },
+    ] {
+        let err = resolve_tokens(tokens, parse_quote!(Target)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unconditional version `1` cannot migrate through conditionally compiled version `2`; add `#[cfg(...)]` or use an explicit `=>` transition to an unconditional target"
+        );
+    }
+}

@@ -310,20 +310,32 @@ pub fn generate_backwards_compat(
     let version_mode = VersionMode::from_input(input);
     let (impl_generics, _, where_clause) = input.generics.split_for_impl();
 
-    let de_generics = build_de_generics(&input.generics);
-    let (de_impl_generics, _, _) = de_generics.split_for_impl();
-
-    let ser_core = generate_serialize_core(input, dag_plan, wire_mode, &quote!(self))?;
-    let de_core = generate_deserialize_core(input, dag_plan, wire_mode, true)?;
-
     let mut extra_helper_defs = Vec::new();
-    let ser_as_impl = generate_backwards_compat_serialize(
-        input,
-        dag_plan,
-        wire_mode,
-        version_mode,
-        &mut extra_helper_defs,
-    )?;
+    let (serialize_helper_def, serialize_impl, ser_as_impl) = if input.serialize {
+        let ser_core = generate_serialize_core(input, dag_plan, wire_mode, &quote!(self))?;
+        let ser_as_impl = generate_backwards_compat_serialize(
+            input,
+            dag_plan,
+            wire_mode,
+            version_mode,
+            &mut extra_helper_defs,
+        )?;
+        let serialize_stmt = ser_core.body;
+        let ser_where_clause = ser_core.where_clause;
+        let serialize_impl = quote! {
+            impl #impl_generics ::serde::Serialize for #target_ty #ser_where_clause {
+                fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
+                where
+                    __S: ::serde::Serializer,
+                {
+                    #serialize_stmt
+                }
+            }
+        };
+        (ser_core.helper_def, serialize_impl, ser_as_impl)
+    } else {
+        (TokenStream::new(), TokenStream::new(), TokenStream::new())
+    };
 
     #[cfg(feature = "schemars")]
     let json_schema_impl = if derive_json_schema {
@@ -355,75 +367,93 @@ pub fn generate_backwards_compat(
         supported_version_items.push(quote!(#version_expr));
     }
 
-    let emit_de_pair = |cfg_prefix: TokenStream, where_cl: Option<&syn::WhereClause>, body: &TokenStream| {
-        quote! {
-            #cfg_prefix
-            impl #de_impl_generics ::backwards_compat::BackwardsCompatDeserialize<'__de> for #target_ty #where_cl {
-                fn deserialize_migrated<__D>(
-                    __deserializer: __D,
-                ) -> ::core::result::Result<::backwards_compat::Migrated<Self>, __D::Error>
-                where
-                    __D: ::serde::Deserializer<'__de>,
-                {
-                    #body
+    let (de_helper_defs, deserialize_impls, accepts_untagged_const) = if input.deserialize {
+        let de_generics = build_de_generics(&input.generics);
+        let (de_impl_generics, _, _) = de_generics.split_for_impl();
+        let de_core = generate_deserialize_core(input, dag_plan, wire_mode, true)?;
+
+        let emit_de_pair = |cfg_prefix: TokenStream,
+                            where_cl: Option<&syn::WhereClause>,
+                            body: &TokenStream| {
+            quote! {
+                #cfg_prefix
+                impl #de_impl_generics ::backwards_compat::BackwardsCompatDeserialize<'__de> for #target_ty #where_cl {
+                    fn deserialize_migrated<__D>(
+                        __deserializer: __D,
+                    ) -> ::core::result::Result<::backwards_compat::Migrated<Self>, __D::Error>
+                    where
+                        __D: ::serde::Deserializer<'__de>,
+                    {
+                        #body
+                    }
+                }
+
+                #cfg_prefix
+                impl #de_impl_generics ::serde::Deserialize<'__de> for #target_ty #where_cl {
+                    fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
+                    where
+                        __D: ::serde::Deserializer<'__de>,
+                    {
+                        <Self as ::backwards_compat::BackwardsCompatDeserialize<'__de>>::deserialize_migrated(__deserializer)
+                            .map(|__m| __m.value)
+                    }
                 }
             }
+        };
 
-            #cfg_prefix
-            impl #de_impl_generics ::serde::Deserialize<'__de> for #target_ty #where_cl {
-                fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
-                where
-                    __D: ::serde::Deserializer<'__de>,
-                {
-                    <Self as ::backwards_compat::BackwardsCompatDeserialize<'__de>>::deserialize_migrated(__deserializer)
-                        .map(|__m| __m.value)
-                }
-            }
-        }
-    };
-
-    let (deserialize_impls, accepts_untagged_const) = if let Some(ref untagged) = de_core.untagged {
-        untagged.overall_cfg.as_ref().map_or_else(
-            || {
-                (
-                    emit_de_pair(TokenStream::new(), untagged.where_clause.as_ref(), &untagged.body),
-                    quote!(
-                        const ACCEPTS_UNTAGGED: bool = true;
-                    ),
-                )
-            },
-            |pred| {
-                let enabled = emit_de_pair(
-                    quote!(#[cfg(#pred)]),
-                    untagged.where_clause.as_ref(),
-                    &untagged.body,
-                );
-                let disabled = emit_de_pair(
-                    quote!(#[cfg(not(#pred))]),
+        let (de_impls, accepts_untagged) = if let Some(ref untagged) = de_core.untagged {
+            untagged.overall_cfg.as_ref().map_or_else(
+                || {
+                    (
+                        emit_de_pair(TokenStream::new(), untagged.where_clause.as_ref(), &untagged.body),
+                        quote!(
+                            const ACCEPTS_UNTAGGED: bool = true;
+                        ),
+                    )
+                },
+                |pred| {
+                    let enabled = emit_de_pair(
+                        quote!(#[cfg(#pred)]),
+                        untagged.where_clause.as_ref(),
+                        &untagged.body,
+                    );
+                    let disabled = emit_de_pair(
+                        quote!(#[cfg(not(#pred))]),
+                        de_core.base_where_clause.as_ref(),
+                        &de_core.base_body,
+                    );
+                    (
+                        quote! {
+                            #enabled
+                            #disabled
+                        },
+                        quote! {
+                            #[cfg(#pred)]
+                            const ACCEPTS_UNTAGGED: bool = true;
+                            #[cfg(not(#pred))]
+                            const ACCEPTS_UNTAGGED: bool = false;
+                        },
+                    )
+                },
+            )
+        } else {
+            (
+                emit_de_pair(
+                    TokenStream::new(),
                     de_core.base_where_clause.as_ref(),
                     &de_core.base_body,
-                );
-                (
-                    quote! {
-                        #enabled
-                        #disabled
-                    },
-                    quote! {
-                        #[cfg(#pred)]
-                        const ACCEPTS_UNTAGGED: bool = true;
-                        #[cfg(not(#pred))]
-                        const ACCEPTS_UNTAGGED: bool = false;
-                    },
-                )
-            },
-        )
+                ),
+                quote!(
+                    const ACCEPTS_UNTAGGED: bool = false;
+                ),
+            )
+        };
+
+        (de_core.helper_defs, de_impls, accepts_untagged)
     } else {
         (
-            emit_de_pair(
-                TokenStream::new(),
-                de_core.base_where_clause.as_ref(),
-                &de_core.base_body,
-            ),
+            TokenStream::new(),
+            TokenStream::new(),
             quote!(
                 const ACCEPTS_UNTAGGED: bool = false;
             ),
@@ -431,10 +461,6 @@ pub fn generate_backwards_compat(
     };
 
     let extra = extra_items.unwrap_or_default();
-    let serialize_helper_def = ser_core.helper_def;
-    let serialize_stmt = ser_core.body;
-    let ser_where_clause = ser_core.where_clause;
-    let de_helper_defs = de_core.helper_defs;
 
     let version_ty = version_mode.version_ty();
     let current_version_expr = version_mode.tag_expr(&input.current_version);
@@ -459,14 +485,7 @@ pub fn generate_backwards_compat(
                 const TAGGING: ::backwards_compat::Tagging = #tagging_expr;
             }
 
-            impl #impl_generics ::serde::Serialize for #target_ty #ser_where_clause {
-                fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
-                where
-                    __S: ::serde::Serializer,
-                {
-                    #serialize_stmt
-                }
-            }
+            #serialize_impl
 
             #ser_as_impl
 
