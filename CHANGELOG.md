@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.1.0](https://github.com/LittleTealeaf/backwards-compat/compare/v4.0.2...v4.1.0) (2026-11-27)
+
+
+### Features
+
+* add serialize/deserialize toggles and unify conversion attribute syntax ([#78](https://github.com/LittleTealeaf/backwards-compat/issues/78)) ([93457ab](https://github.com/LittleTealeaf/backwards-compat/commit/93457ab691c9c193fac48bf019fde9acd94aaae0))
+
 ## [4.0.2](https://github.com/LittleTealeaf/backwards-compat/compare/v4.0.1...v4.0.2) (2026-11-27)
 
 
