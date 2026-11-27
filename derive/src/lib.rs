@@ -401,6 +401,20 @@ fn respan_to_call_site<T: quote::ToTokens + syn::parse::Parse>(node: &T) -> T {
     syn::parse2(tokens).expect("respanning a parsed syntax node must remain valid syntax")
 }
 
+fn respan_generics_to_call_site(generics: &syn::Generics) -> syn::Generics {
+    if generics.params.is_empty() && generics.where_clause.is_none() {
+        return syn::Generics::default();
+    }
+    // Note: `syn::Generics::to_tokens` omits `where_clause`, so respan it separately.
+    let mut respanned = if generics.params.is_empty() {
+        syn::Generics::default()
+    } else {
+        respan_to_call_site(generics)
+    };
+    respanned.where_clause = generics.where_clause.as_ref().map(respan_to_call_site);
+    respanned
+}
+
 fn check_tag_field_collision(item_struct: &syn::ItemStruct, tag_field: &str) -> syn::Result<()> {
     let syn::Fields::Named(ref named) = item_struct.fields else {
         return Ok(());
@@ -496,15 +510,20 @@ fn backwards_compat_impl(
     attr: proc_macro2::TokenStream,
     item: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    enum PreparedShadowSource {
+        Struct(syn::ItemStruct),
+        Enum(syn::ItemEnum),
+    }
+
     struct PreparedItem {
         cleaned_item_tokens: proc_macro2::TokenStream,
         target_ident: syn::Ident,
         vis: syn::Visibility,
         generics: syn::Generics,
         derive_json_schema: bool,
-        original_struct: Option<syn::ItemStruct>,
+        field_specs: Vec<field::FieldCompatSpec>,
         field_helper_tokens: Vec<proc_macro2::TokenStream>,
-        built_shadow_fn: Box<dyn FnOnce() -> BuiltShadowWire>,
+        shadow_source: PreparedShadowSource,
     }
 
     if contains_via_option(&attr) {
@@ -521,6 +540,7 @@ fn backwards_compat_impl(
         Err(err) => return err.to_compile_error(),
     };
 
+    let call_site = proc_macro2::Span::call_site();
     let prepared = match item {
         syn::Item::Struct(mut item_struct) => {
             #[cfg(feature = "schemars")]
@@ -560,7 +580,6 @@ fn backwards_compat_impl(
                 };
             }
 
-            let original_struct = item_struct.clone();
             let mut cleaned_item_struct = item_struct.clone();
             cleaned_item_struct
                 .attrs
@@ -572,21 +591,19 @@ fn backwards_compat_impl(
                 });
             }
 
-            let shadow_struct = respan_to_call_site(&item_struct);
-            let target_ident = shadow_struct.ident.clone();
-            let vis = shadow_struct.vis.clone();
-            let generics = shadow_struct.generics.clone();
+            let mut target_ident = item_struct.ident.clone();
+            target_ident.set_span(call_site);
+            let vis = item_struct.vis.clone();
+            let generics = respan_generics_to_call_site(&item_struct.generics);
             PreparedItem {
                 cleaned_item_tokens: quote::quote!(#cleaned_item_struct),
                 target_ident,
                 vis,
                 generics,
                 derive_json_schema,
-                original_struct: Some(original_struct),
+                field_specs,
                 field_helper_tokens: helpers,
-                built_shadow_fn: Box::new(move || {
-                    build_struct_shadow_wire(&shadow_struct, &field_specs, derive_json_schema)
-                }),
+                shadow_source: PreparedShadowSource::Struct(item_struct),
             }
         }
         syn::Item::Enum(mut item_enum) => {
@@ -644,21 +661,19 @@ fn backwards_compat_impl(
                 }
             }
 
-            let shadow_enum = respan_to_call_site(&item_enum);
-            let target_ident = shadow_enum.ident.clone();
-            let vis = shadow_enum.vis.clone();
-            let generics = shadow_enum.generics.clone();
+            let mut target_ident = item_enum.ident.clone();
+            target_ident.set_span(call_site);
+            let vis = item_enum.vis.clone();
+            let generics = respan_generics_to_call_site(&item_enum.generics);
             PreparedItem {
                 cleaned_item_tokens: quote::quote!(#cleaned_item_enum),
                 target_ident,
                 vis,
                 generics,
                 derive_json_schema,
-                original_struct: None,
+                field_specs,
                 field_helper_tokens: helpers,
-                built_shadow_fn: Box::new(move || {
-                    build_enum_shadow_wire(&shadow_enum, &field_specs, derive_json_schema)
-                }),
+                shadow_source: PreparedShadowSource::Enum(item_enum),
             }
         }
         other => {
@@ -676,9 +691,9 @@ fn backwards_compat_impl(
         vis,
         generics,
         derive_json_schema,
-        original_struct,
+        field_specs,
         field_helper_tokens,
-        built_shadow_fn,
+        shadow_source,
     } = prepared;
 
     let (_, ty_generics, _) = generics.split_for_impl();
@@ -701,14 +716,23 @@ fn backwards_compat_impl(
     if needs_shadow_wire
         && !input.external
         && input.content_field.is_none()
-        && let Some(ref orig_struct) = original_struct
+        && let PreparedShadowSource::Struct(ref orig_struct) = shadow_source
         && let Err(err) = check_tag_field_collision(orig_struct, &input.tag_field)
     {
         return err.to_compile_error();
     }
 
     if needs_shadow_wire {
-        let built = built_shadow_fn();
+        let built = match shadow_source {
+            PreparedShadowSource::Struct(item_struct) => {
+                let shadow_struct = respan_to_call_site(&item_struct);
+                build_struct_shadow_wire(&shadow_struct, &field_specs, derive_json_schema)
+            }
+            PreparedShadowSource::Enum(item_enum) => {
+                let shadow_enum = respan_to_call_site(&item_enum);
+                build_enum_shadow_wire(&shadow_enum, &field_specs, derive_json_schema)
+            }
+        };
         let shadow_info = codegen::ShadowWireInfo {
             owned_ident: &built.shadow_ident,
             borrowed_ident: &built.borrowed_ident,
@@ -1123,11 +1147,6 @@ fn build_struct_shadow_wire(
         syn::Fields::Named(named) => {
             let field_idents: Vec<_> = named.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
             quote::quote! {
-                impl #impl_generics ::core::convert::From<#target_ident #ty_generics> for #shadow_ident #ty_generics #where_clause {
-                    fn from(val: #target_ident #ty_generics) -> Self {
-                        Self { #( #field_idents: val.#field_idents ),* }
-                    }
-                }
                 impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
                     fn from(val: #shadow_ident #ty_generics) -> Self {
                         Self { #( #field_idents: val.#field_idents ),* }
@@ -1138,11 +1157,6 @@ fn build_struct_shadow_wire(
         syn::Fields::Unnamed(unnamed) => {
             let indices: Vec<_> = (0..unnamed.unnamed.len()).map(syn::Index::from).collect();
             quote::quote! {
-                impl #impl_generics ::core::convert::From<#target_ident #ty_generics> for #shadow_ident #ty_generics #where_clause {
-                    fn from(val: #target_ident #ty_generics) -> Self {
-                        Self ( #( val.#indices ),* )
-                    }
-                }
                 impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
                     fn from(val: #shadow_ident #ty_generics) -> Self {
                         Self ( #( val.#indices ),* )
@@ -1152,11 +1166,6 @@ fn build_struct_shadow_wire(
         }
         syn::Fields::Unit => {
             quote::quote! {
-                impl #impl_generics ::core::convert::From<#target_ident #ty_generics> for #shadow_ident #ty_generics #where_clause {
-                    fn from(_val: #target_ident #ty_generics) -> Self {
-                        Self
-                    }
-                }
                 impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
                     fn from(_val: #shadow_ident #ty_generics) -> Self {
                         Self
@@ -1275,7 +1284,6 @@ fn build_enum_shadow_wire(
 
     let mut borrowed_variants = Vec::new();
     let mut construct_borrowed_arms = Vec::new();
-    let mut to_shadow_arms = Vec::new();
     let mut from_shadow_arms = Vec::new();
 
     for (v_idx, variant) in item_enum.variants.iter().enumerate() {
@@ -1302,10 +1310,6 @@ fn build_enum_shadow_wire(
                 construct_borrowed_arms.push(quote::quote! {
                     #(#v_cfg_attrs)*
                     Self::#v_ident => #borrowed_ident::#v_ident
-                });
-                to_shadow_arms.push(quote::quote! {
-                    #(#v_cfg_attrs)*
-                    #target_ident::#v_ident => Self::#v_ident
                 });
                 from_shadow_arms.push(quote::quote! {
                     #(#v_cfg_attrs)*
@@ -1336,10 +1340,6 @@ fn build_enum_shadow_wire(
                 construct_borrowed_arms.push(quote::quote! {
                     #(#v_cfg_attrs)*
                     Self::#v_ident(#(#bindings),*) => #borrowed_ident::#v_ident(#(#bindings),*)
-                });
-                to_shadow_arms.push(quote::quote! {
-                    #(#v_cfg_attrs)*
-                    #target_ident::#v_ident(#(#bindings),*) => Self::#v_ident(#(#bindings),*)
                 });
                 from_shadow_arms.push(quote::quote! {
                     #(#v_cfg_attrs)*
@@ -1373,10 +1373,6 @@ fn build_enum_shadow_wire(
                 construct_borrowed_arms.push(quote::quote! {
                     #(#v_cfg_attrs)*
                     Self::#v_ident { #(#field_idents),* } => #borrowed_ident::#v_ident { #(#field_idents),* }
-                });
-                to_shadow_arms.push(quote::quote! {
-                    #(#v_cfg_attrs)*
-                    #target_ident::#v_ident { #(#field_idents),* } => Self::#v_ident { #(#field_idents),* }
                 });
                 from_shadow_arms.push(quote::quote! {
                     #(#v_cfg_attrs)*
@@ -1420,13 +1416,6 @@ fn build_enum_shadow_wire(
     };
 
     let from_impls = quote::quote! {
-        impl #impl_generics ::core::convert::From<#target_ident #ty_generics> for #shadow_ident #ty_generics #where_clause {
-            fn from(val: #target_ident #ty_generics) -> Self {
-                match val {
-                    #(#to_shadow_arms,)*
-                }
-            }
-        }
         impl #impl_generics ::core::convert::From<#shadow_ident #ty_generics> for #target_ident #ty_generics #where_clause {
             fn from(val: #shadow_ident #ty_generics) -> Self {
                 match val {
@@ -1590,10 +1579,7 @@ mod tests {
         assert!(shadow_str.contains("& '__wire T"));
         assert!(shadow_str.contains("id : & '__wire u32"));
         assert!(shadow_str.contains("# [cfg (feature = \"extra\")] Extra (& '__wire u64 ,)"));
-        assert!(
-            shadow_str
-                .contains("# [cfg (feature = \"extra\")] MyEnum :: Extra (__f0) => Self :: Extra (__f0)")
-        );
+        assert!(!shadow_str.contains("From < MyEnum < 'a , T > > for __MyEnumShadowWire"));
         assert!(shadow_str.contains(
             "# [cfg (feature = \"extra\")] __MyEnumShadowWire :: Extra (__f0) => Self :: Extra (__f0)"
         ));

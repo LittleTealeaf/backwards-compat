@@ -1,5 +1,5 @@
 use quote::ToTokens as _;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use syn::{Error, Result, Type};
 
 use crate::parse::{BackwardsCompatInput, ExplicitNext, VersionEntry, VersionTag};
@@ -232,10 +232,13 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         });
     }
 
-    let current_idx_opt = input
-        .versions
-        .iter()
-        .position(|v| v.tag.matches(&input.current_version));
+    // Pre-index first occurrence of each version tag in O(N) for O(1) tag lookups.
+    let mut tag_to_first_idx: HashMap<&VersionTag, usize> = HashMap::with_capacity(n);
+    for (idx, v) in input.versions.iter().enumerate() {
+        tag_to_first_idx.entry(&v.tag).or_insert(idx);
+    }
+
+    let current_idx_opt = tag_to_first_idx.get(&input.current_version).copied();
 
     // Determine the next step for each version
     let mut next_targets: Vec<NextTarget> = Vec::with_capacity(n);
@@ -270,9 +273,7 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
                         } else {
                             next_targets.push(NextTarget::TerminalTarget);
                         }
-                    } else if let Some(target_idx) =
-                        input.versions.iter().position(|cand| cand.tag.matches(next_tag))
-                    {
+                    } else if let Some(&target_idx) = tag_to_first_idx.get(next_tag) {
                         next_targets.push(NextTarget::VersionIndex(target_idx));
                     } else {
                         return Err(Error::new(
@@ -300,14 +301,32 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         }
     }
 
+    // Pre-index latest occurrences of each type (explicit/any, unconditional/any) in O(N).
+    let mut last_explicit_any: HashMap<&Type, usize> = HashMap::with_capacity(n);
+    let mut last_explicit_uncond: HashMap<&Type, usize> = HashMap::with_capacity(n);
+    let mut last_any: HashMap<&Type, usize> = HashMap::with_capacity(n);
+    let mut last_uncond: HashMap<&Type, usize> = HashMap::with_capacity(n);
+    for (idx, cand) in input.versions.iter().enumerate() {
+        last_any.insert(&cand.ty, idx);
+        if cand.cfgs.is_empty() {
+            last_uncond.insert(&cand.ty, idx);
+        }
+        if cand.explicit_next.is_some() {
+            last_explicit_any.insert(&cand.ty, idx);
+            if cand.cfgs.is_empty() {
+                last_explicit_uncond.insert(&cand.ty, idx);
+            }
+        }
+    }
+
     let mut transition_sources: Vec<usize> = (0..n).collect();
     for (i, v) in input.versions.iter().enumerate() {
         if v.explicit_next.is_none() && !v.tag.matches(&input.current_version) {
-            let explicit_same_idx = input.versions.iter().rposition(|cand| {
-                cand.ty == v.ty
-                    && cand.explicit_next.is_some()
-                    && (!v.cfgs.is_empty() || cand.cfgs.is_empty())
-            });
+            let explicit_same_idx = if v.cfgs.is_empty() {
+                last_explicit_uncond.get(&v.ty).copied()
+            } else {
+                last_explicit_any.get(&v.ty).copied()
+            };
             if let Some(src_idx) = explicit_same_idx
                 && let Some(target) = next_targets.get(src_idx).copied()
                 && target != NextTarget::VersionIndex(i)
@@ -318,11 +337,11 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
                     *src_slot = src_idx;
                 }
             } else {
-                let last_same_idx = input
-                    .versions
-                    .iter()
-                    .rposition(|cand| cand.ty == v.ty && (!v.cfgs.is_empty() || cand.cfgs.is_empty()))
-                    .unwrap_or(i);
+                let last_same_idx = if v.cfgs.is_empty() {
+                    last_uncond.get(&v.ty).copied().unwrap_or(i)
+                } else {
+                    last_any.get(&v.ty).copied().unwrap_or(i)
+                };
                 if last_same_idx > i
                     && let Some(target) = next_targets.get(last_same_idx).copied()
                     && target != NextTarget::VersionIndex(i)
@@ -337,27 +356,40 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         }
     }
 
-    // Cycle detection & dead-end detection
+    // Cycle detection via O(N) 3-color traversal (0 = unvisited, 1 = visiting, 2 = acyclic).
+    let mut visit_state = vec![0u8; n];
+    let mut path_nodes = Vec::new();
     for (i, v) in input.versions.iter().enumerate() {
-        let mut visited_in_path = HashSet::new();
+        if visit_state.get(i).copied() == Some(2) {
+            continue;
+        }
+        path_nodes.clear();
         let mut curr = i;
-        visited_in_path.insert(curr);
-
-        while let Some(&target) = next_targets.get(curr) {
-            match target {
-                NextTarget::TerminalTarget => break,
-                NextTarget::VersionIndex(next_idx) => {
-                    if !visited_in_path.insert(next_idx) {
-                        return Err(Error::new(
-                            v.tag_span,
-                            format!(
-                                "cycle detected in backwards_compat migration graph starting at version `{}`",
-                                v.tag
-                            ),
-                        ));
-                    }
-                    curr = next_idx;
-                }
+        while let Some(&state) = visit_state.get(curr) {
+            if state == 2 {
+                break;
+            }
+            if state == 1 {
+                return Err(Error::new(
+                    v.tag_span,
+                    format!(
+                        "cycle detected in backwards_compat migration graph starting at version `{}`",
+                        v.tag
+                    ),
+                ));
+            }
+            if let Some(slot) = visit_state.get_mut(curr) {
+                *slot = 1;
+            }
+            path_nodes.push(curr);
+            match next_targets.get(curr).copied() {
+                Some(NextTarget::VersionIndex(next_idx)) => curr = next_idx,
+                Some(NextTarget::TerminalTarget) | None => break,
+            }
+        }
+        for &node in &path_nodes {
+            if let Some(slot) = visit_state.get_mut(node) {
+                *slot = 2;
             }
         }
     }

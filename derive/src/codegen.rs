@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -18,21 +20,192 @@ fn target_type_name(target_ty: &syn::Type) -> String {
     "__SerializeHelper".to_owned()
 }
 
-fn generate_inline_step_expr(step: &MigrationStep) -> TokenStream {
-    let to_ty = &step.to_ty;
-    match (step.with_fn.as_ref(), step.fallible) {
-        (Some(fn_path), true) => quote! {
-            let __cur: #to_ty = (#fn_path)(__cur).map_err(::serde::de::Error::custom)?;
-        },
-        (Some(fn_path), false) => quote! {
-            let __cur: #to_ty = (#fn_path)(__cur);
-        },
-        (None, true) => quote! {
-            let __cur: #to_ty = ::core::convert::TryInto::<#to_ty>::try_into(__cur).map_err(::serde::de::Error::custom)?;
-        },
-        (None, false) => quote! {
-            let __cur: #to_ty = ::core::convert::Into::<#to_ty>::into(__cur);
-        },
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MigrationStepKey {
+    from_ty: syn::Type,
+    to_ty: syn::Type,
+    fallible: bool,
+    with_fn: Option<syn::ExprPath>,
+}
+
+impl MigrationStepKey {
+    fn from_step(step: &MigrationStep) -> Self {
+        Self {
+            from_ty: step.from_ty.clone(),
+            to_ty: step.to_ty.clone(),
+            fallible: step.fallible,
+            with_fn: step.with_fn.clone(),
+        }
+    }
+}
+
+struct MigrationHelper {
+    ident: syn::Ident,
+    step: MigrationStep,
+    next_helper: Option<(usize, bool)>,
+    is_fallible: bool,
+    unconditional: bool,
+    cfgs: Vec<TokenStream>,
+}
+
+/// Deduplicates migration path suffixes into non-generic (with respect to `D: Deserializer`)
+/// tail-chained helper functions, reducing $O(N^2)$ inlined step sequences to $O(N)$ shared helpers.
+struct MigrationHelperPool {
+    suffix_to_id: HashMap<Vec<MigrationStepKey>, usize>,
+    helpers: Vec<MigrationHelper>,
+}
+
+impl MigrationHelperPool {
+    fn new() -> Self {
+        Self {
+            suffix_to_id: HashMap::new(),
+            helpers: Vec::new(),
+        }
+    }
+
+    fn register_path(
+        &mut self,
+        steps: &[MigrationStep],
+        path_cfg: Option<&TokenStream>,
+    ) -> Option<(syn::Ident, bool)> {
+        if steps.is_empty() {
+            return None;
+        }
+        let step_keys: Vec<MigrationStepKey> = steps.iter().map(MigrationStepKey::from_step).collect();
+        let mut child: Option<(usize, bool)> = None;
+
+        for idx in (0..steps.len()).rev() {
+            let Some(suffix_key) = step_keys.get(idx..).map(<[MigrationStepKey]>::to_vec) else {
+                continue;
+            };
+            let id = if let Some(&existing_id) = self.suffix_to_id.get(&suffix_key) {
+                if let Some(helper) = self.helpers.get_mut(existing_id) {
+                    match path_cfg {
+                        None => {
+                            helper.unconditional = true;
+                            helper.cfgs.clear();
+                        }
+                        Some(pred) if !helper.unconditional => {
+                            helper.cfgs.push(pred.clone());
+                        }
+                        Some(_) => {}
+                    }
+                }
+                existing_id
+            } else {
+                let Some(step) = steps.get(idx) else {
+                    continue;
+                };
+                let new_id = self.helpers.len();
+                let ident = format_ident!("__bc_migrate_{new_id}");
+                let is_fallible = step.fallible || child.is_some_and(|(_, child_f)| child_f);
+                let (unconditional, cfgs) =
+                    path_cfg.map_or_else(|| (true, Vec::new()), |pred| (false, vec![pred.clone()]));
+                self.helpers.push(MigrationHelper {
+                    ident,
+                    step: step.clone(),
+                    next_helper: child,
+                    is_fallible,
+                    unconditional,
+                    cfgs,
+                });
+                self.suffix_to_id.insert(suffix_key, new_id);
+                new_id
+            };
+            let is_fallible = self.helpers.get(id).is_some_and(|h| h.is_fallible);
+            child = Some((id, is_fallible));
+        }
+
+        child.and_then(|(root_id, is_fallible)| {
+            self.helpers.get(root_id).map(|h| (h.ident.clone(), is_fallible))
+        })
+    }
+
+    fn emit_helpers(
+        &self,
+        target_ty: &syn::Type,
+        impl_generics: &syn::ImplGenerics<'_>,
+        where_clause: Option<&syn::WhereClause>,
+    ) -> TokenStream {
+        let mut defs = Vec::with_capacity(self.helpers.len());
+        for helper in &self.helpers {
+            let fn_ident = &helper.ident;
+            let from_ty = &helper.step.from_ty;
+            let to_ty = &helper.step.to_ty;
+            let cfg_tokens = if helper.unconditional {
+                TokenStream::new()
+            } else {
+                let combined = combine_cfg_any(helper.cfgs.iter());
+                cfg_attr(combined.as_ref())
+            };
+
+            let ret_ty = if helper.is_fallible {
+                quote!(::core::result::Result<#target_ty, ::backwards_compat::__private::String>)
+            } else {
+                quote!(#target_ty)
+            };
+
+            let step_expr = match (helper.step.with_fn.as_ref(), helper.step.fallible) {
+                (Some(fn_path), true) => quote! {
+                    (#fn_path)(__val).map_err(|__e| ::backwards_compat::__private::format!("{__e}"))?
+                },
+                (Some(fn_path), false) => quote! {
+                    (#fn_path)(__val)
+                },
+                (None, true) => quote! {
+                    ::core::convert::TryInto::<#to_ty>::try_into(__val)
+                        .map_err(|__e| ::backwards_compat::__private::format!("{__e}"))?
+                },
+                (None, false) => quote! {
+                    ::core::convert::Into::<#to_ty>::into(__val)
+                },
+            };
+
+            let body = match helper.next_helper {
+                None => {
+                    if helper.is_fallible {
+                        quote! {
+                            let __next: #to_ty = #step_expr;
+                            ::core::result::Result::Ok(__next)
+                        }
+                    } else {
+                        step_expr
+                    }
+                }
+                Some((child_id, child_fallible)) => {
+                    let child_ident = &self
+                        .helpers
+                        .get(child_id)
+                        .expect("child migration helper index must be valid")
+                        .ident;
+                    if child_fallible {
+                        quote! {
+                            let __next: #to_ty = #step_expr;
+                            #child_ident(__next)
+                        }
+                    } else if helper.is_fallible {
+                        quote! {
+                            let __next: #to_ty = #step_expr;
+                            ::core::result::Result::Ok(#child_ident(__next))
+                        }
+                    } else {
+                        quote! {
+                            let __next: #to_ty = #step_expr;
+                            #child_ident(__next)
+                        }
+                    }
+                }
+            };
+
+            defs.push(quote! {
+                #cfg_tokens
+                #[allow(dead_code, reason = "internal migration helper")]
+                fn #fn_ident #impl_generics (__val: #from_ty) -> #ret_ty #where_clause {
+                    #body
+                }
+            });
+        }
+        quote!(#(#defs)*)
     }
 }
 
@@ -302,6 +475,7 @@ fn generate_arm_conversion_stmts(
     target_ty: &syn::Type,
     path: Option<&ResolvedPath>,
     wire_mode: SelfWireMode<'_>,
+    migration_pool: &mut MigrationHelperPool,
 ) -> TokenStream {
     if ty == target_ty {
         return match wire_mode {
@@ -314,14 +488,17 @@ fn generate_arm_conversion_stmts(
     let Some(p) = path else {
         return TokenStream::new();
     };
-    if p.steps.is_empty() {
+    let Some((fn_ident, is_fallible)) = migration_pool.register_path(&p.steps, p.cfg.as_ref()) else {
         return TokenStream::new();
-    }
-    let step_tokens: Vec<_> = p.steps.iter().map(generate_inline_step_expr).collect();
-    quote! {
-        let __cur = __val;
-        #(#step_tokens)*
-        let __val: #target_ty = __cur;
+    };
+    if is_fallible {
+        quote! {
+            let __val: #target_ty = #fn_ident(__val).map_err(::serde::de::Error::custom)?;
+        }
+    } else {
+        quote! {
+            let __val: #target_ty = #fn_ident(__val);
+        }
     }
 }
 
@@ -1262,12 +1439,6 @@ fn emit_visitor_body(
                 quote! {
                     match __map.next_value::<#tag_or_content_ty>()? {
                         #tag_or_content_tag_pat => {
-                            if __prefix.is_empty() {
-                                return Self::__bc_dispatch_de(
-                                    #tag_arg,
-                                    ::backwards_compat::__private::RemainingMapDeserializer::new(__map),
-                                );
-                            }
                             return Self::__bc_dispatch_de(
                                 #tag_arg,
                                 ::backwards_compat::__private::RemainingMapDeserializer::new(
@@ -1286,12 +1457,6 @@ fn emit_visitor_body(
             } else {
                 quote! {
                     let __tag = __map.next_value::<#tag_de_ty>()?;
-                    if __prefix.is_empty() {
-                        return Self::__bc_dispatch_de(
-                            #tag_arg,
-                            ::backwards_compat::__private::RemainingMapDeserializer::new(__map),
-                        );
-                    }
                     return Self::__bc_dispatch_de(
                         #tag_arg,
                         ::backwards_compat::__private::RemainingMapDeserializer::new(
@@ -1702,7 +1867,7 @@ pub fn generate_deserialize_core(
 ) -> syn::Result<DeserializeCore> {
     let target_ty = &input.target_ty;
     let version_mode = VersionMode::from_input(input);
-    let (_, ty_generics, _) = input.generics.split_for_impl();
+    let (orig_impl_generics, ty_generics, orig_where_clause) = input.generics.split_for_impl();
     let is_generic = input.generics.type_params().next().is_some();
     let tagging_kind = if input.external {
         ArmTaggingKind::External
@@ -1720,12 +1885,13 @@ pub fn generate_deserialize_core(
     let mut disabled_checks = Vec::new();
     let mut has_any_gated_tagged = false;
     let mut helper_defs_list = Vec::new();
+    let mut migration_pool = MigrationHelperPool::new();
 
     let mut base_wc = de_orig_where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
         where_token: syn::token::Where::default(),
         predicates: syn::punctuated::Punctuated::new(),
     });
-    let mut seen_de_tys: Vec<String> = Vec::new();
+    let mut seen_de_tys: HashSet<String> = HashSet::new();
 
     for (i, v) in input.versions.iter().enumerate() {
         if v.tag.is_untagged() {
@@ -1742,7 +1908,8 @@ pub fn generate_deserialize_core(
             wire_mode,
             "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro",
         )?;
-        let conv_stmts = generate_arm_conversion_stmts(&v.ty, target_ty, Some(path), wire_mode);
+        let conv_stmts =
+            generate_arm_conversion_stmts(&v.ty, target_ty, Some(path), wire_mode, &mut migration_pool);
         let version_expr = track_migrated.then(|| version_mode.tag_expr(&v.tag));
 
         let arm_trait = if is_generic {
@@ -1764,8 +1931,7 @@ pub fn generate_deserialize_core(
                 Some(trait_ident)
             } else {
                 let key = de_ty.to_string();
-                if !seen_de_tys.contains(&key) {
-                    seen_de_tys.push(key);
+                if seen_de_tys.insert(key) {
                     base_wc
                         .predicates
                         .push(syn::parse_quote!(#de_ty: ::serde::Deserialize<'__de>));
@@ -1808,13 +1974,13 @@ pub fn generate_deserialize_core(
             wire_mode,
             "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro",
         )?;
-        let conv_stmts = generate_arm_conversion_stmts(target_ty, target_ty, None, wire_mode);
+        let conv_stmts =
+            generate_arm_conversion_stmts(target_ty, target_ty, None, wire_mode, &mut migration_pool);
         let version_expr = track_migrated.then(|| version_mode.tag_expr(&input.current_version));
 
         if is_generic {
             let key = de_ty.to_string();
-            if !seen_de_tys.contains(&key) {
-                seen_de_tys.push(key);
+            if seen_de_tys.insert(key) {
                 base_wc
                     .predicates
                     .push(syn::parse_quote!(#de_ty: ::serde::Deserialize<'__de>));
@@ -1856,7 +2022,8 @@ pub fn generate_deserialize_core(
             wire_mode,
             "using the domain struct as the unversioned wire format is only supported when using the #[backwards_compat] attribute macro",
         )?;
-        let conv_stmts = generate_arm_conversion_stmts(&untagged_v.ty, target_ty, path, wire_mode);
+        let conv_stmts =
+            generate_arm_conversion_stmts(&untagged_v.ty, target_ty, path, wire_mode, &mut migration_pool);
 
         let arm_trait = if is_generic {
             if let Some(pred) = cfg {
@@ -1876,8 +2043,7 @@ pub fn generate_deserialize_core(
                 Some(trait_ident)
             } else {
                 let key = de_ty.to_string();
-                if !seen_untagged_de_tys.contains(&key) {
-                    seen_untagged_de_tys.push(key);
+                if seen_untagged_de_tys.insert(key) {
                     untagged_wc
                         .predicates
                         .push(syn::parse_quote!(#de_ty: ::serde::Deserialize<'__de>));
@@ -1894,6 +2060,11 @@ pub fn generate_deserialize_core(
             cfg,
             arm_trait,
         });
+    }
+
+    let migration_helpers = migration_pool.emit_helpers(target_ty, &orig_impl_generics, orig_where_clause);
+    if !migration_helpers.is_empty() {
+        helper_defs_list.push(migration_helpers);
     }
 
     let current_int = match input.current_version {
@@ -1929,19 +2100,25 @@ pub fn generate_deserialize_core(
         track_migrated,
     };
 
-    let base_body = emit_visitor_body(&visitor_ctx, base_where_clause.as_ref(), false);
-
-    let untagged = if untagged_arms.is_empty() {
-        None
-    } else {
-        let overall_cfg = if untagged_arms.iter().any(|arm| arm.cfg.is_none()) {
+    let untagged_overall_cfg =
+        if untagged_arms.is_empty() || untagged_arms.iter().any(|arm| arm.cfg.is_none()) {
             None
         } else {
             combine_cfg_any(untagged_arms.iter().filter_map(|arm| arm.cfg))
         };
+
+    let base_body = if untagged_arms.is_empty() || untagged_overall_cfg.is_some() {
+        emit_visitor_body(&visitor_ctx, base_where_clause.as_ref(), false)
+    } else {
+        TokenStream::new()
+    };
+
+    let untagged = if untagged_arms.is_empty() {
+        None
+    } else {
         let body = emit_visitor_body(&visitor_ctx, untagged_where_clause.as_ref(), true);
         Some(UntaggedDeserializeCore {
-            overall_cfg,
+            overall_cfg: untagged_overall_cfg,
             where_clause: untagged_where_clause,
             body,
         })
@@ -1992,7 +2169,7 @@ fn generate_backwards_compat_serialize(
         where_token: syn::token::Where::default(),
         predicates: syn::punctuated::Punctuated::new(),
     });
-    let mut seen_bound_tys: Vec<String> = Vec::new();
+    let mut seen_bound_tys: HashSet<String> = HashSet::new();
     let mut arms: Vec<(usize, SerializableArm)> = Vec::new();
 
     let build_arm = |tag: &VersionTag,
@@ -2255,8 +2432,7 @@ fn generate_backwards_compat_serialize(
                 && let Some(ref bty) = arm.bound_ty
             {
                 let key = bty.to_string();
-                if !seen_bound_tys.contains(&key) {
-                    seen_bound_tys.push(key);
+                if seen_bound_tys.insert(key) {
                     ser_as_wc
                         .predicates
                         .push(syn::parse_quote!(for<'__a> #bty: ::serde::Serialize));
@@ -2323,7 +2499,7 @@ pub fn generate_json_schema_body(
     let is_generic = input.generics.type_params().next().is_some();
     let (_, ty_generics, _) = input.generics.split_for_impl();
 
-    let mut seen_schema_tys: Vec<String> = Vec::new();
+    let mut seen_schema_tys: HashSet<String> = HashSet::new();
     let mut push_stmts = Vec::new();
 
     let mut push_arm =
@@ -2370,8 +2546,7 @@ pub fn generate_json_schema_body(
             } else {
                 if is_generic && cfg.is_none() {
                     let key = de_ty.to_string();
-                    if !seen_schema_tys.contains(&key) {
-                        seen_schema_tys.push(key);
+                    if seen_schema_tys.insert(key) {
                         schema_wc.predicates.push(syn::parse_quote!(
                             #de_ty: ::backwards_compat::__private::schemars::JsonSchema
                         ));
@@ -2848,17 +3023,26 @@ mod tests {
         assert!(!rendered.contains("__UntaggedHelper"));
         assert!(!rendered.contains("VariantContentDeserializer"));
 
-        // Uses streaming Visitor + InternalKey + RemainingMapDeserializer + ChainedMapAccess
+        // Uses streaming Visitor + InternalKey + unified RemainingMapDeserializer(ChainedMapAccess)
         assert!(rendered.contains("__deserializer . deserialize_any (__visitor)"));
         assert!(rendered.contains("InternalKey :: new (\"version\")"));
-        assert!(rendered.contains("RemainingMapDeserializer :: new (__map)"));
-        assert!(rendered.contains("ChainedMapAccess :: new (__prefix , __map)"));
-
-        // Direct deserialize + inlined migration chains per arm
-        assert!(rendered.contains("< ModelV1 as :: serde :: Deserialize < '__de >> :: deserialize (__d) ?"));
         assert!(rendered.contains(
-            "let __cur : ModelV2 = :: core :: convert :: Into :: < ModelV2 > :: into (__cur) ; let __cur : ModelV3 = :: core :: convert :: TryInto :: < ModelV3 > :: try_into (__cur) . map_err (:: serde :: de :: Error :: custom) ? ; let __cur : TargetModel = :: core :: convert :: Into :: < TargetModel > :: into (__cur) ;"
+            "RemainingMapDeserializer :: new (:: backwards_compat :: __private :: ChainedMapAccess :: new (__prefix , __map) ,)"
         ));
+        assert!(!rendered.contains("RemainingMapDeserializer :: new (__map)"));
+
+        // Direct deserialize + non-generic tail-chained migration helpers
+        assert!(rendered.contains("< ModelV1 as :: serde :: Deserialize < '__de >> :: deserialize (__d) ?"));
+        assert!(rendered.contains("fn __bc_migrate_0 (__val : ModelV3) -> TargetModel"));
+        assert!(rendered.contains(
+            "fn __bc_migrate_1 (__val : ModelV2) -> :: core :: result :: Result < TargetModel , :: backwards_compat :: __private :: String >"
+        ));
+        assert!(rendered.contains(
+            "fn __bc_migrate_2 (__val : ModelV1) -> :: core :: result :: Result < TargetModel , :: backwards_compat :: __private :: String >"
+        ));
+        assert!(rendered.contains("let __val : TargetModel = __bc_migrate_2 (__val) . map_err (:: serde :: de :: Error :: custom) ? ;"));
+        assert!(rendered.contains("let __val : TargetModel = __bc_migrate_1 (__val) . map_err (:: serde :: de :: Error :: custom) ? ;"));
+        assert!(rendered.contains("let __val : TargetModel = __bc_migrate_0 (__val) ;"));
         assert!(rendered.contains("< ModelV2 as :: serde :: Deserialize < '__de >> :: deserialize (__d) ?"));
         assert!(rendered.contains("< ModelV3 as :: serde :: Deserialize < '__de >> :: deserialize (__d) ?"));
         assert!(!rendered.contains("impl :: core :: convert :: From <"));
@@ -3336,7 +3520,10 @@ mod tests {
         });
         let gen1 = generate_for_test(&infallible_input, SelfWireMode::Shadow(&shadow_info), None).unwrap();
         let rendered1 = gen1.to_string();
-        assert!(rendered1.contains("let __cur : TargetModel = (convert_v1) (__cur) ;"));
+        assert!(
+            rendered1.contains("fn __bc_migrate_0 (__val : ModelV1) -> TargetModel { (convert_v1) (__val) }")
+        );
+        assert!(rendered1.contains("let __val : TargetModel = __bc_migrate_0 (__val) ;"));
         syn::parse2::<syn::File>(gen1).unwrap();
 
         // Fallible 1-step #[fallible] #[with(try_convert_v1)]
@@ -3351,9 +3538,39 @@ mod tests {
         let gen2 = generate_for_test(&fallible_input, SelfWireMode::Shadow(&shadow_info), None).unwrap();
         let rendered2 = gen2.to_string();
         assert!(rendered2.contains(
-            "let __cur : TargetModel = (try_convert_v1) (__cur) . map_err (:: serde :: de :: Error :: custom) ? ;"
+            "fn __bc_migrate_0 (__val : ModelV1) -> :: core :: result :: Result < TargetModel , :: backwards_compat :: __private :: String >"
+        ));
+        assert!(rendered2.contains("(try_convert_v1) (__val) . map_err"));
+        assert!(rendered2.contains(
+            "let __val : TargetModel = __bc_migrate_0 (__val) . map_err (:: serde :: de :: Error :: custom) ? ;"
         ));
         syn::parse2::<syn::File>(gen2).unwrap();
+    }
+
+    #[test]
+    fn test_migration_helpers_tail_share_and_skip_unused_base_body() {
+        let input = parse_test_input(quote! {
+            versions = [
+                _: ModelV1 => 1,
+                1: ModelV1 => 3,
+                2: ModelV2 => 3,
+                3: ModelV3,
+            ]
+        });
+        let dag_plan = resolve_dag(&input).unwrap();
+        let de_core = generate_deserialize_core(&input, &dag_plan, SelfWireMode::Disallowed, true).unwrap();
+
+        // Unconditional untagged skips building unused base_body.
+        assert!(de_core.base_body.is_empty());
+        assert!(de_core.untagged.is_some());
+
+        // Tail-sharing: V1->V3->Target, V2->V3->Target, V3->Target, and untagged V1->V3->Target
+        // emit exactly 3 helpers (__bc_migrate_0 for V3, __bc_migrate_1 for V1, __bc_migrate_2 for V2).
+        let helpers_str = de_core.helper_defs.to_string();
+        assert!(helpers_str.contains("fn __bc_migrate_0 (__val : ModelV3) -> TargetModel"));
+        assert!(helpers_str.contains("fn __bc_migrate_1 (__val : ModelV1) -> TargetModel"));
+        assert!(helpers_str.contains("fn __bc_migrate_2 (__val : ModelV2) -> TargetModel"));
+        assert!(!helpers_str.contains("__bc_migrate_3"));
     }
 
     #[test]
