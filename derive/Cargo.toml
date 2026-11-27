@@ -1,6 +1,6 @@
 [package]
 name = "backwards-compat-derive"
-version = "4.0.0" # x-release-please-version
+version = "4.0.1" # x-release-please-version
 edition = "2024"
 rust-version = "1.88"
 description = "Procedural macro for backwards-compat"
