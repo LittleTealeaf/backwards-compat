@@ -2,6 +2,44 @@ use core::fmt::Display;
 
 use serde::ser::{self, Impossible, Serialize, SerializeMap, SerializeStruct, Serializer};
 
+/// Serializes a unit struct with only a version tag field.
+#[inline]
+pub fn serialize_unit_tagged<S, T>(
+    serializer: S,
+    struct_name: &'static str,
+    tag_field: &'static str,
+    tag: &T,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    T: Serialize + ?Sized,
+{
+    let mut state = serializer.serialize_struct(struct_name, 1)?;
+    state.serialize_field(tag_field, tag)?;
+    state.end()
+}
+
+/// Serializes an adjacently-tagged payload as a 2-field struct (`tag_field`, `content_field`).
+#[inline]
+pub fn serialize_adjacently_tagged<S, T, C>(
+    serializer: S,
+    struct_name: &'static str,
+    tag_field: &'static str,
+    tag: &T,
+    content_field: &'static str,
+    content: &C,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    T: Serialize + ?Sized,
+    C: Serialize + ?Sized,
+{
+    let mut state = serializer.serialize_struct(struct_name, 2)?;
+    state.serialize_field(tag_field, tag)?;
+    state.serialize_field(content_field, content)?;
+    state.end()
+}
+
 /// Serializes an internally-tagged payload as a struct when `content` is a struct or unit.
 ///
 /// Falls back to `serialize_map` only when `content` itself serializes as a map.

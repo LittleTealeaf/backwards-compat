@@ -294,24 +294,10 @@ impl VersionMode {
         }
     }
 
-    fn tag_or_content_ty(self) -> TokenStream {
+    fn tag_mode_ty(self) -> TokenStream {
         match self {
-            Self::Int => quote!(::backwards_compat::__private::IntTagOrContent<'__de>),
-            Self::Str => quote!(::backwards_compat::__private::StrTagOrContent<'__de>),
-        }
-    }
-
-    fn tag_or_content_tag_pat(self) -> TokenStream {
-        match self {
-            Self::Int => quote!(::backwards_compat::__private::IntTagOrContent::Tag(__tag)),
-            Self::Str => quote!(::backwards_compat::__private::StrTagOrContent::Tag(__tag)),
-        }
-    }
-
-    fn tag_or_content_other_pat(self) -> TokenStream {
-        match self {
-            Self::Int => quote!(::backwards_compat::__private::IntTagOrContent::Other(__other)),
-            Self::Str => quote!(::backwards_compat::__private::StrTagOrContent::Other(__other)),
+            Self::Int => quote!(::backwards_compat::__private::IntTagMode),
+            Self::Str => quote!(::backwards_compat::__private::StrTagMode),
         }
     }
 }
@@ -519,9 +505,9 @@ pub fn generate_serialize_core(
     let tag_field = &input.tag_field;
     let (_, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    let (ser_tag_ty, ser_tag_expr) = match &input.serialize_version {
-        VersionTag::Int(n) => (quote!(u64), quote!(#n)),
-        VersionTag::String(s) => (quote!(&'static str), quote!(#s)),
+    let ser_tag_expr = match &input.serialize_version {
+        VersionTag::Int(n) => quote!(#n),
+        VersionTag::String(s) => quote!(#s),
         VersionTag::Untagged => unreachable!("serialize_version cannot be untagged"),
     };
 
@@ -532,28 +518,22 @@ pub fn generate_serialize_core(
         && matches!(wire_mode, SelfWireMode::Shadow(info) if info.is_unit_struct);
 
     if is_internal_unit_shadow {
-        let helper_def = quote! {
-            #[doc(hidden)]
-            #[allow(non_camel_case_types, dead_code, reason = "internal serialization helper")]
-            #[derive(::serde::Serialize)]
-            #[serde(rename = #target_name)]
-            struct __SerializeHelper {
-                #[serde(rename = #tag_field)]
-                __tag: #ser_tag_ty,
-            }
-        };
         let body = quote! {
-            let helper = __SerializeHelper { __tag: #ser_tag_expr };
-            ::serde::Serialize::serialize(&helper, __serializer)
+            ::backwards_compat::__private::serialize_unit_tagged(
+                __serializer,
+                #target_name,
+                #tag_field,
+                &#ser_tag_expr,
+            )
         };
         return Ok(SerializeCore {
-            helper_def,
+            helper_def: TokenStream::new(),
             body,
             where_clause: where_clause.cloned(),
         });
     }
 
-    let is_adjacent = !input.external && input.content_field.is_some();
+    let content_field_opt = input.content_field.as_ref();
     let ext_variants = if input.external {
         collect_external_variants(input, dag_plan, "__BC_EXT_SER")
     } else {
@@ -582,10 +562,16 @@ pub fn generate_serialize_core(
                     #wire_ref,
                 )
             }
-        } else if is_adjacent {
+        } else if let Some(content_field) = content_field_opt {
             quote! {
-                let helper = __SerializeHelper { __tag: #ser_tag_expr, __content: #wire_ref };
-                ::serde::Serialize::serialize(&helper, __serializer)
+                ::backwards_compat::__private::serialize_adjacently_tagged(
+                    __serializer,
+                    #target_name,
+                    #tag_field,
+                    &#ser_tag_expr,
+                    #content_field,
+                    #wire_ref,
+                )
             }
         } else {
             quote! {
@@ -662,55 +648,19 @@ pub fn generate_serialize_core(
         (s, quote!(#ty))
     };
 
-    if !input.external
-        && let Some(content) = input.content_field.as_ref()
-    {
-        let mut ser_helper_generics = input.generics.clone();
-        let ser_helper_lifetime: syn::GenericParam = syn::parse_quote!('__a);
-        ser_helper_generics.params.insert(0, ser_helper_lifetime);
-        let (_, ser_helper_ty_generics, _) = ser_helper_generics.split_for_impl();
+    let mut ser_wc = where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
+        where_token: syn::token::Where::default(),
+        predicates: syn::punctuated::Punctuated::new(),
+    });
+    ser_wc.predicates.push(syn::parse_quote!(
+        for<'__a> #latest_wire_ty_in_helper: ::serde::Serialize
+    ));
 
-        let helper_def = quote! {
-            #[doc(hidden)]
-            #[allow(non_camel_case_types, dead_code, reason = "internal serialization helper")]
-            #[derive(::serde::Serialize)]
-            #[serde(rename = #target_name)]
-            struct __SerializeHelper #ser_helper_generics #where_clause {
-                #[serde(rename = #tag_field)]
-                __tag: #ser_tag_ty,
-                #[serde(rename = #content)]
-                __content: &'__a #latest_wire_ty_in_helper,
-            }
-        };
-
-        let mut ser_wc = where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
-            where_token: syn::token::Where::default(),
-            predicates: syn::punctuated::Punctuated::new(),
-        });
-        ser_wc.predicates.push(syn::parse_quote!(
-            for<'__a> __SerializeHelper #ser_helper_ty_generics: ::serde::Serialize
-        ));
-
-        Ok(SerializeCore {
-            helper_def,
-            body,
-            where_clause: Some(ser_wc),
-        })
-    } else {
-        let mut ser_wc = where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
-            where_token: syn::token::Where::default(),
-            predicates: syn::punctuated::Punctuated::new(),
-        });
-        ser_wc.predicates.push(syn::parse_quote!(
-            for<'__a> #latest_wire_ty_in_helper: ::serde::Serialize
-        ));
-
-        Ok(SerializeCore {
-            helper_def: TokenStream::new(),
-            body,
-            where_clause: Some(ser_wc),
-        })
-    }
+    Ok(SerializeCore {
+        helper_def: TokenStream::new(),
+        body,
+        where_clause: Some(ser_wc),
+    })
 }
 
 struct TaggedArm<'a> {
@@ -1269,9 +1219,8 @@ fn emit_visitor_body(
     let version_mode = ctx.version_mode;
     let tag_de_ty = version_mode.tag_deserialize_ty();
     let tag_param_ty = version_mode.tag_param_ty();
-    let tag_ident = format_ident!("__tag");
+    let tag_mode_ty = version_mode.tag_mode_ty();
     let tag_val_ident = format_ident!("__tag_val");
-    let tag_arg = version_mode.tag_arg_expr(&tag_ident);
     let tag_val_arg = version_mode.tag_arg_expr(&tag_val_ident);
     let de_impl_generics = ctx.de_impl_generics;
     let de_ty_generics = ctx.de_ty_generics;
@@ -1333,23 +1282,29 @@ fn emit_visitor_body(
         })
         .collect();
 
-    let dispatch_de_method = quote! {
-        fn __bc_dispatch_de<__D2>(
-            __tag: #tag_param_ty,
-            __d: __D2,
-        ) -> ::core::result::Result<#value_ty, __D2::Error>
-        where
-            __D2: ::serde::Deserializer<'__de>,
+    let internal_dispatch_impl = quote! {
+        impl #de_impl_generics ::backwards_compat::__private::InternalMapDispatch<'__de, #tag_mode_ty>
+            for __BcVisitor #de_ty_generics #visitor_where_clause
         {
-            match __tag {
-                #(#dispatch_de_arms,)*
-                #unknown_version_arm
+            type Value = #value_ty;
+
+            fn dispatch_tagged<__D2>(
+                __tag: #tag_param_ty,
+                __d: __D2,
+            ) -> ::core::result::Result<Self::Value, __D2::Error>
+            where
+                __D2: ::serde::Deserializer<'__de>,
+            {
+                match __tag {
+                    #(#dispatch_de_arms,)*
+                    #unknown_version_arm
+                }
             }
         }
     };
 
-    // Adjacent-tagging streaming helper (__bc_dispatch_adjacent_streaming).
-    let dispatch_adjacent_method = content_field_opt.map_or_else(TokenStream::new, |content_field| {
+    // Adjacent-tagging streaming helper (AdjacentMapDispatch impl).
+    let adjacent_dispatch_impl = content_field_opt.map_or_else(TokenStream::new, |content_field| {
         let adj_arms: Vec<TokenStream> = ctx
             .tagged_arms
             .iter()
@@ -1390,16 +1345,20 @@ fn emit_visitor_body(
             .collect();
 
         quote! {
-            fn __bc_dispatch_adjacent_streaming<__M>(
-                __tag: #tag_param_ty,
-                __map: &mut __M,
-            ) -> ::core::result::Result<#value_ty, __M::Error>
-            where
-                __M: ::serde::de::MapAccess<'__de>,
+            impl #de_impl_generics ::backwards_compat::__private::AdjacentMapDispatch<'__de, #tag_mode_ty>
+                for __BcVisitor #de_ty_generics #visitor_where_clause
             {
-                match __tag {
-                    #(#adj_arms,)*
-                    #unknown_version_arm
+                fn dispatch_adjacent_streaming<__M>(
+                    __tag: #tag_param_ty,
+                    __map: &mut __M,
+                ) -> ::core::result::Result<Self::Value, __M::Error>
+                where
+                    __M: ::serde::de::MapAccess<'__de>,
+                {
+                    match __tag {
+                        #(#adj_arms,)*
+                        #unknown_version_arm
+                    }
                 }
             }
         }
@@ -1410,196 +1369,81 @@ fn emit_visitor_body(
         && ctx.untagged_arms.len() == 1
         && ctx.untagged_arms.first().is_some_and(|arm| arm.cfg.is_none());
 
-    let untagged_map_fallback = if !accepts_untagged {
-        quote!(::core::result::Result::Err(::serde::de::Error::missing_field(#tag_field)))
-    } else if is_single_unconditional_untagged {
+    let untagged_fallback_closure = if is_single_unconditional_untagged {
         quote! {
-            <Self as ::backwards_compat::__private::UntaggedSingleDispatch<'__de>>::dispatch_de(
-                ::backwards_compat::__private::ContentDeserializer::new(
-                    ::backwards_compat::__private::Content::Map(__prefix.into_boxed_slice()),
-                ),
-            )
+            |__content| {
+                <Self as ::backwards_compat::__private::UntaggedSingleDispatch<'__de>>::dispatch_de(
+                    ::backwards_compat::__private::ContentDeserializer::new(__content),
+                )
+            }
         }
     } else {
         quote! {
-            <Self as ::backwards_compat::__private::UntaggedMultiDispatch<'__de>>::dispatch_content(
-                ::backwards_compat::__private::Content::Map(__prefix.into_boxed_slice()),
-            )
+            |__content| {
+                <Self as ::backwards_compat::__private::UntaggedMultiDispatch<'__de>>::dispatch_content(
+                    __content,
+                )
+            }
         }
     };
 
-    let tag_or_content_ty = version_mode.tag_or_content_ty();
-    let tag_or_content_tag_pat = version_mode.tag_or_content_tag_pat();
-    let tag_or_content_other_pat = version_mode.tag_or_content_other_pat();
-
-    // visit_map implementation.
+    // visit_map implementation delegating to shared crate-level map scanners.
     let visit_map_method = content_field_opt.map_or_else(
         || {
-            let on_internal_tag = if accepts_untagged {
+            if accepts_untagged {
                 quote! {
-                    match __map.next_value::<#tag_or_content_ty>()? {
-                        #tag_or_content_tag_pat => {
-                            return Self::__bc_dispatch_de(
-                                #tag_arg,
-                                ::backwards_compat::__private::RemainingMapDeserializer::new(
-                                    ::backwards_compat::__private::ChainedMapAccess::new(__prefix, __map),
-                                ),
-                            );
-                        }
-                        #tag_or_content_other_pat => {
-                            __prefix.push((
-                                ::backwards_compat::__private::Content::Str(#tag_field),
-                                __other,
-                            ));
-                        }
+                    fn visit_map<__A>(self, __map: __A) -> ::core::result::Result<Self::Value, __A::Error>
+                    where
+                        __A: ::serde::de::MapAccess<'__de>,
+                    {
+                        ::backwards_compat::__private::visit_internal_map_untagged::<
+                            #tag_mode_ty,
+                            Self,
+                            __A,
+                            _,
+                        >(__map, #tag_field, #untagged_fallback_closure)
                     }
                 }
             } else {
                 quote! {
-                    let __tag = __map.next_value::<#tag_de_ty>()?;
-                    return Self::__bc_dispatch_de(
-                        #tag_arg,
-                        ::backwards_compat::__private::RemainingMapDeserializer::new(
-                            ::backwards_compat::__private::ChainedMapAccess::new(__prefix, __map),
-                        ),
-                    );
-                }
-            };
-
-            quote! {
-                fn visit_map<__A>(self, mut __map: __A) -> ::core::result::Result<Self::Value, __A::Error>
-                where
-                    __A: ::serde::de::MapAccess<'__de>,
-                {
-                    let mut __prefix: ::backwards_compat::__private::Vec<(
-                        ::backwards_compat::__private::Content<'__de>,
-                        ::backwards_compat::__private::Content<'__de>,
-                    )> = ::backwards_compat::__private::Vec::new();
-
-                    while let ::core::option::Option::Some(__key) = __map.next_key_seed(
-                        ::backwards_compat::__private::InternalKey::new(#tag_field),
-                    )? {
-                        match __key {
-                            ::backwards_compat::__private::InternalKeyResult::Tag => {
-                                #on_internal_tag
-                            }
-                            ::backwards_compat::__private::InternalKeyResult::Other(__k) => {
-                                let __v = __map.next_value::<::backwards_compat::__private::Content<'__de>>()?;
-                                __prefix.push((__k, __v));
-                            }
-                        }
+                    fn visit_map<__A>(self, __map: __A) -> ::core::result::Result<Self::Value, __A::Error>
+                    where
+                        __A: ::serde::de::MapAccess<'__de>,
+                    {
+                        ::backwards_compat::__private::visit_internal_map::<#tag_mode_ty, Self, __A>(
+                            __map,
+                            #tag_field,
+                        )
                     }
-
-                    #untagged_map_fallback
                 }
             }
         },
         |content_field| {
             if accepts_untagged {
                 quote! {
-                    fn visit_map<__A>(self, mut __map: __A) -> ::core::result::Result<Self::Value, __A::Error>
+                    fn visit_map<__A>(self, __map: __A) -> ::core::result::Result<Self::Value, __A::Error>
                     where
                         __A: ::serde::de::MapAccess<'__de>,
                     {
-                        let mut __prefix: ::backwards_compat::__private::Vec<(
-                            ::backwards_compat::__private::Content<'__de>,
-                            ::backwards_compat::__private::Content<'__de>,
-                        )> = ::backwards_compat::__private::Vec::new();
-                        let mut __buffered_content_idx: ::core::option::Option<usize> = ::core::option::Option::None;
-
-                        while let ::core::option::Option::Some(__key) = __map.next_key_seed(
-                            ::backwards_compat::__private::AdjacentKey::new(#tag_field, #content_field, true),
-                        )? {
-                            match __key {
-                                ::backwards_compat::__private::AdjacentKeyResult::Tag => {
-                                    match __map.next_value::<#tag_or_content_ty>()? {
-                                        #tag_or_content_tag_pat => {
-                                            if let ::core::option::Option::Some(__idx) = __buffered_content_idx {
-                                                let (_, __content) = __prefix.swap_remove(__idx);
-                                                let __res = Self::__bc_dispatch_de(
-                                                    #tag_arg,
-                                                    ::backwards_compat::__private::ContentDeserializer::new(__content),
-                                                )?;
-                                                ::backwards_compat::__private::drain_map(&mut __map)?;
-                                                return ::core::result::Result::Ok(__res);
-                                            }
-                                            return Self::__bc_dispatch_adjacent_streaming(#tag_arg, &mut __map);
-                                        }
-                                        #tag_or_content_other_pat => {
-                                            __prefix.push((
-                                                ::backwards_compat::__private::Content::Str(#tag_field),
-                                                __other,
-                                            ));
-                                        }
-                                    }
-                                }
-                                ::backwards_compat::__private::AdjacentKeyResult::Content => {
-                                    let __v = __map.next_value::<::backwards_compat::__private::Content<'__de>>()?;
-                                    if __buffered_content_idx.is_none() {
-                                        __buffered_content_idx = ::core::option::Option::Some(__prefix.len());
-                                    }
-                                    __prefix.push((
-                                        ::backwards_compat::__private::Content::Str(#content_field),
-                                        __v,
-                                    ));
-                                }
-                                ::backwards_compat::__private::AdjacentKeyResult::Other(__k) => {
-                                    let __v = __map.next_value::<::backwards_compat::__private::Content<'__de>>()?;
-                                    __prefix.push((__k, __v));
-                                }
-                                ::backwards_compat::__private::AdjacentKeyResult::Ignored => {
-                                    let _ = __map.next_value::<::serde::de::IgnoredAny>()?;
-                                }
-                            }
-                        }
-
-                        #untagged_map_fallback
+                        ::backwards_compat::__private::visit_adjacent_map_untagged::<
+                            #tag_mode_ty,
+                            Self,
+                            __A,
+                            _,
+                        >(__map, #tag_field, #content_field, #untagged_fallback_closure)
                     }
                 }
             } else {
                 quote! {
-                    fn visit_map<__A>(self, mut __map: __A) -> ::core::result::Result<Self::Value, __A::Error>
+                    fn visit_map<__A>(self, __map: __A) -> ::core::result::Result<Self::Value, __A::Error>
                     where
                         __A: ::serde::de::MapAccess<'__de>,
                     {
-                        let mut __buffered_content: ::core::option::Option<
-                            ::backwards_compat::__private::Content<'__de>,
-                        > = ::core::option::Option::None;
-
-                        while let ::core::option::Option::Some(__key) = __map.next_key_seed(
-                            ::backwards_compat::__private::AdjacentKey::new(#tag_field, #content_field, false),
-                        )? {
-                            match __key {
-                                ::backwards_compat::__private::AdjacentKeyResult::Tag => {
-                                    let __tag = __map.next_value::<#tag_de_ty>()?;
-                                    if let ::core::option::Option::Some(__content) = __buffered_content {
-                                        let __res = Self::__bc_dispatch_de(
-                                            #tag_arg,
-                                            ::backwards_compat::__private::ContentDeserializer::new(__content),
-                                        )?;
-                                        ::backwards_compat::__private::drain_map(&mut __map)?;
-                                        return ::core::result::Result::Ok(__res);
-                                    }
-                                    return Self::__bc_dispatch_adjacent_streaming(#tag_arg, &mut __map);
-                                }
-                                ::backwards_compat::__private::AdjacentKeyResult::Content => {
-                                    if __buffered_content.is_some() {
-                                        return ::core::result::Result::Err(
-                                            ::serde::de::Error::duplicate_field(#content_field),
-                                        );
-                                    }
-                                    __buffered_content = ::core::option::Option::Some(
-                                        __map.next_value::<::backwards_compat::__private::Content<'__de>>()?,
-                                    );
-                                }
-                                ::backwards_compat::__private::AdjacentKeyResult::Ignored
-                                | ::backwards_compat::__private::AdjacentKeyResult::Other(_) => {
-                                    let _ = __map.next_value::<::serde::de::IgnoredAny>()?;
-                                }
-                            }
-                        }
-
-                        ::core::result::Result::Err(::serde::de::Error::missing_field(#tag_field))
+                        ::backwards_compat::__private::visit_adjacent_map::<#tag_mode_ty, Self, __A>(
+                            __map,
+                            #tag_field,
+                            #content_field,
+                        )
                     }
                 }
             }
@@ -1844,10 +1688,8 @@ fn emit_visitor_body(
             ::core::marker::PhantomData<&'__de ()>,
         ) #de_orig_where_clause;
 
-        impl #de_impl_generics __BcVisitor #de_ty_generics #visitor_where_clause {
-            #dispatch_de_method
-            #dispatch_adjacent_method
-        }
+        #internal_dispatch_impl
+        #adjacent_dispatch_impl
 
         #trait_impl
 
@@ -2209,13 +2051,16 @@ fn generate_backwards_compat_serialize(
                             )
                         }
                     },
-                    |_content_field| {
+                    |content_field| {
                         quote! {
-                            let __helper = __BcAdjSerHelper {
-                                __tag: &#tag_lit,
-                                __content: #wire_ref,
-                            };
-                            ::serde::Serialize::serialize(&__helper, __serializer)
+                            ::backwards_compat::__private::serialize_adjacently_tagged(
+                                __serializer,
+                                #target_name,
+                                #tag_field,
+                                &#tag_lit,
+                                #content_field,
+                                #wire_ref,
+                            )
                         }
                     },
                 )
@@ -2356,21 +2201,6 @@ fn generate_backwards_compat_serialize(
         ));
     }
 
-    let adj_helper_def = content_field_opt.map_or_else(TokenStream::new, |content_field| {
-        quote! {
-            #[doc(hidden)]
-            #[allow(non_camel_case_types, dead_code, reason = "internal adjacent runtime-version serialization helper")]
-            #[derive(::serde::Serialize)]
-            #[serde(rename = #target_name)]
-            struct __BcAdjSerHelper<'__a, __Tag: ?::core::marker::Sized, __Content: ?::core::marker::Sized> {
-                #[serde(rename = #tag_field)]
-                __tag: &'__a __Tag,
-                #[serde(rename = #content_field)]
-                __content: &'__a __Content,
-            }
-        }
-    });
-
     let mut serializable_version_items = Vec::new();
     let mut match_arms = Vec::new();
 
@@ -2451,7 +2281,6 @@ fn generate_backwards_compat_serialize(
     let ser_as_where_clause = non_empty_where_clause(ser_as_wc);
 
     Ok(quote! {
-        #adj_helper_def
         #ext_idx_defs
 
         impl #impl_generics ::backwards_compat::BackwardsCompatSerialize for #target_ty #ser_as_where_clause {
@@ -3023,11 +2852,10 @@ mod tests {
         assert!(!rendered.contains("__UntaggedHelper"));
         assert!(!rendered.contains("VariantContentDeserializer"));
 
-        // Uses streaming Visitor + InternalKey + unified RemainingMapDeserializer(ChainedMapAccess)
+        // Uses streaming Visitor + generalized visit_internal_map
         assert!(rendered.contains("__deserializer . deserialize_any (__visitor)"));
-        assert!(rendered.contains("InternalKey :: new (\"version\")"));
         assert!(rendered.contains(
-            "RemainingMapDeserializer :: new (:: backwards_compat :: __private :: ChainedMapAccess :: new (__prefix , __map) ,)"
+            "visit_internal_map :: < :: backwards_compat :: __private :: IntTagMode , Self , __A > (__map , \"version\" ,)"
         ));
         assert!(!rendered.contains("RemainingMapDeserializer :: new (__map)"));
 
@@ -3227,12 +3055,14 @@ mod tests {
             rendered
                 .contains("__deserializer . deserialize_struct (\"\" , & [\"type\" , \"data\"] , __visitor)")
         );
-        assert!(rendered.contains("AdjacentKey :: new (\"type\" , \"data\" , false)"));
+        assert!(rendered.contains(
+            "visit_adjacent_map :: < :: backwards_compat :: __private :: IntTagMode , Self , __A > (__map , \"type\" , \"data\" ,)"
+        ));
         assert!(rendered.contains("read_adjacent_content :: < __M , ModelV1 >"));
         assert!(rendered.contains("fn visit_seq < __A >"));
-        assert!(rendered.contains(
-            "# [serde (rename = \"TargetModel\")] struct __SerializeHelper < '__a > { # [serde (rename = \"type\")] __tag : u64 , # [serde (rename = \"data\")] __content : & '__a ModelV2 , }"
-        ));
+        assert!(rendered.contains("serialize_adjacently_tagged"));
+        assert!(!rendered.contains("struct __SerializeHelper"));
+        assert!(!rendered.contains("struct __BcAdjSerHelper"));
         syn::parse2::<syn::File>(generated).unwrap();
     }
 
@@ -3373,8 +3203,8 @@ mod tests {
         assert!(rendered.contains("fn dispatch_de"));
         assert!(!rendered.contains("UntaggedMultiDispatch"));
         assert!(!rendered.contains("fn dispatch_content"));
-        assert!(rendered.contains("into_boxed_slice ()"));
-        assert!(rendered.contains("IntTagOrContent"));
+        assert!(rendered.contains("visit_internal_map_untagged"));
+        assert!(rendered.contains("IntTagMode"));
         assert!(!rendered.contains(":: std ::"));
         syn::parse2::<syn::File>(generated).unwrap();
 
@@ -3387,7 +3217,8 @@ mod tests {
         let str_rendered = generate_for_test(&str_untagged, SelfWireMode::Disallowed, None)
             .unwrap()
             .to_string();
-        assert!(str_rendered.contains("StrTagOrContent"));
+        assert!(str_rendered.contains("visit_internal_map_untagged"));
+        assert!(str_rendered.contains("StrTagMode"));
     }
 
     #[test]
@@ -3422,13 +3253,13 @@ mod tests {
         assert!(str_rendered.contains("type Version = & 'static str ;"));
         assert!(str_rendered.contains("const CURRENT_VERSION : Self :: Version = \"v2\" ;"));
         assert!(str_rendered.contains("const SERIALIZE_VERSION : Self :: Version = \"v2\" ;"));
-        assert!(str_rendered.contains("StrTag < '__de >"));
+        assert!(str_rendered.contains("StrTagMode"));
         syn::parse2::<syn::File>(str_gen).unwrap();
     }
 
     #[test]
     fn test_generate_backwards_compat_serialize_helper_variants() {
-        // Internal unit struct (no __content, no '__a)
+        // Internal unit struct uses serialize_unit_tagged without generating __SerializeHelper
         let unit_input = parse_test_input(quote! {
             versions = [
                 1: Self,
@@ -3445,14 +3276,12 @@ mod tests {
         };
         let unit_gen = generate_for_test(&unit_input, SelfWireMode::Shadow(&unit_shadow), None).unwrap();
         let unit_rendered = unit_gen.to_string();
-        assert!(
-            unit_rendered
-                .contains("# [serde (rename = \"TargetModel\")] struct __SerializeHelper { # [serde (rename = \"version\")] __tag : u64 , }")
-        );
+        assert!(unit_rendered.contains("serialize_unit_tagged"));
+        assert!(!unit_rendered.contains("struct __SerializeHelper"));
         assert!(!unit_rendered.contains("__content :"));
         syn::parse2::<syn::File>(unit_gen).unwrap();
 
-        // Adjacent tagging
+        // Adjacent tagging uses serialize_adjacently_tagged without generating __SerializeHelper
         let adj_input = parse_test_input(quote! {
             tag = "ver",
             content = "data",
@@ -3463,7 +3292,10 @@ mod tests {
         });
         let adj_gen = generate_for_test(&adj_input, SelfWireMode::Disallowed, None).unwrap();
         let adj_rendered = adj_gen.to_string();
-        assert!(adj_rendered.contains("# [serde (rename = \"data\")] __content : & '__a ModelV2"));
+        assert!(adj_rendered.contains("serialize_adjacently_tagged"));
+        assert!(adj_rendered.contains("\"data\""));
+        assert!(!adj_rendered.contains("struct __SerializeHelper"));
+        assert!(!adj_rendered.contains("struct __BcAdjSerHelper"));
         syn::parse2::<syn::File>(adj_gen).unwrap();
 
         // #[serialize] on older version
@@ -3764,7 +3596,9 @@ mod tests {
         assert!(int_str.contains(
             "const TAGGING : :: backwards_compat :: Tagging = :: backwards_compat :: Tagging :: Internal { tag : \"v\" , } ;"
         ));
-        assert!(int_str.contains("__map . next_value :: < u64 > () ?"));
+        assert!(int_str.contains(
+            "visit_internal_map :: < :: backwards_compat :: __private :: IntTagMode , Self , __A > (__map , \"v\" ,)"
+        ));
         assert!(int_str.contains("match __tag { 1u64 =>"));
 
         // Str mode with adjacent content
@@ -3778,11 +3612,9 @@ mod tests {
         assert!(str_str.contains(
             "const TAGGING : :: backwards_compat :: Tagging = :: backwards_compat :: Tagging :: Adjacent { tag : \"ver\" , content : \"payload\" , } ;"
         ));
-        assert!(
-            str_str.contains(
-                "__map . next_value :: < :: backwards_compat :: __private :: StrTag < '__de > > () ?"
-            )
-        );
+        assert!(str_str.contains(
+            "visit_adjacent_map :: < :: backwards_compat :: __private :: StrTagMode , Self , __A > (__map , \"ver\" , \"payload\" ,)"
+        ));
         assert!(str_str.contains(
             "__seq . next_element :: < :: backwards_compat :: __private :: StrTag < '__de > > () ?"
         ));
