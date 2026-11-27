@@ -18,8 +18,9 @@ pub use untagged::{
     UntaggedMultiDispatch, UntaggedMultiVisitor, UntaggedSingleDispatch, UntaggedSingleVisitor,
 };
 
-/// Caps pre-allocation from untrusted [`SeqAccess::size_hint`] / [`MapAccess::size_hint`]
-/// values at 1 MiB worth of `T` elements so a crafted hint cannot trigger an OOM panic.
+/// Caps pre-allocation from untrusted [`serde::de::SeqAccess::size_hint`] /
+/// [`serde::de::MapAccess::size_hint`] values at 1 MiB worth of `T` elements so a crafted hint
+/// cannot trigger an OOM panic.
 #[inline]
 #[must_use]
 pub const fn cautious_size_hint<T>(hint: Option<usize>) -> usize {
