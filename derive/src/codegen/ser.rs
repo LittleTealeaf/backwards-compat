@@ -320,41 +320,54 @@ pub(super) fn generate_backwards_compat_serialize(
                 )
             }
             Some(SerializableMode::Infallible) | None => {
-                if is_ser_ver && let Some(ref ser_fn) = input.serialize_with_fn {
-                    let wire_ty = resolve_owned_wire_ty(ty)?;
-                    let ser_call = emit_ser_call(quote!(&__wire_val));
-                    (
-                        quote! {
-                            let __wire_val: #wire_ty = (#ser_fn)(self);
-                            #ser_call
-                        },
-                        Some(wire_ty),
-                    )
+                let bound_ty = if is_ser_ver && input.serialize_with_fn.is_some() {
+                    Some(resolve_owned_wire_ty(ty)?)
                 } else if ty == target_ty {
                     match wire_mode {
                         SelfWireMode::Shadow(info) => {
                             if !is_adjacent && !input.external && info.is_unit_struct {
-                                (emit_ser_call(quote!(&())), None)
+                                None
                             } else {
-                                let construct_borrowed = &info.construct_borrowed;
                                 let ty_in_helper = &info.borrowed_ty_in_helper;
-                                let ser_call = emit_ser_call(quote!(&__wire_val));
-                                (
-                                    quote! {
-                                        let __wire_val = #construct_borrowed;
-                                        #ser_call
-                                    },
-                                    Some(quote!(#ty_in_helper)),
-                                )
+                                Some(quote!(#ty_in_helper))
                             }
                         }
-                        SelfWireMode::Direct => (emit_ser_call(quote!(self)), Some(quote!(#target_ty))),
+                        SelfWireMode::Direct => Some(quote!(#target_ty)),
                         SelfWireMode::Disallowed => {
                             return Err(syn::Error::new_spanned(
                                 &input.target_ty,
                                 "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro",
                             ));
                         }
+                    }
+                } else {
+                    Some(quote!(#ty))
+                };
+
+                if is_ser_ver {
+                    (
+                        quote!(<Self as ::serde::Serialize>::serialize(self, __serializer)),
+                        bound_ty,
+                    )
+                } else if ty == target_ty {
+                    match wire_mode {
+                        SelfWireMode::Shadow(info) => {
+                            if !is_adjacent && !input.external && info.is_unit_struct {
+                                (emit_ser_call(quote!(&())), bound_ty)
+                            } else {
+                                let construct_borrowed = &info.construct_borrowed;
+                                let ser_call = emit_ser_call(quote!(&__wire_val));
+                                (
+                                    quote! {
+                                        let __wire_val = #construct_borrowed;
+                                        #ser_call
+                                    },
+                                    bound_ty,
+                                )
+                            }
+                        }
+                        SelfWireMode::Direct => (emit_ser_call(quote!(self)), bound_ty),
+                        SelfWireMode::Disallowed => unreachable!("handled above"),
                     }
                 } else {
                     let wire_ty = quote!(#ty);
@@ -370,7 +383,7 @@ pub(super) fn generate_backwards_compat_serialize(
                             let __wire_val: #wire_ty = __WireConvert::<_, #wire_ty>::new(self).convert_wire();
                             #ser_call
                         },
-                        Some(wire_ty),
+                        bound_ty,
                     )
                 }
             }
@@ -507,11 +520,9 @@ pub(super) fn generate_backwards_compat_serialize(
             {
                 match __version {
                     #(#match_arms)*
-                    _ => ::core::result::Result::Err(::serde::ser::Error::custom(
-                        ::backwards_compat::__private::format!(
-                            "version {__version} is not supported for serialization"
-                        ),
-                    )),
+                    _ => ::core::result::Result::Err(
+                        ::backwards_compat::__private::unsupported_serialize_version_error(__version),
+                    ),
                 }
             }
         }

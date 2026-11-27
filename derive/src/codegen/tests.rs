@@ -821,7 +821,8 @@ fn test_generate_backwards_compat_tagging_consts_and_version_matching() {
     ));
     assert!(ext_str.contains("serialize_newtype_variant"));
     assert!(ext_str.contains("deserialize_enum"));
-    assert!(ext_str.contains("deserialize_identifier"));
+    assert!(ext_str.contains("ExtField for __BcExtField"));
+    assert!(ext_str.contains("ExtFieldDeserialize"));
     assert!(!ext_str.contains("deserialize_any"));
     assert!(ext_str.contains("const __VARIANTS : & 'static [& 'static str] = & [\"1\" , # [cfg (feature = \"v2\")] \"2\" , \"3\" ,] ;"));
     syn::parse2::<syn::File>(ext_gen).unwrap();
@@ -861,7 +862,8 @@ fn test_generate_backwards_compat_serialize_and_serializable_arms() {
     assert!(rendered.contains(
         "let __wire_val : ModelV3 = (try_to_v3) (self) . map_err (:: serde :: ser :: Error :: custom) ? ;"
     ));
-    assert!(rendered.contains("is not supported for serialization"));
+    assert!(rendered.contains("< Self as :: serde :: Serialize > :: serialize (self , __serializer)"));
+    assert!(rendered.contains("unsupported_serialize_version_error (__version)"));
     syn::parse2::<syn::File>(generated).unwrap();
 }
 

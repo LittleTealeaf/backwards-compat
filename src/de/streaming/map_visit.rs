@@ -4,7 +4,9 @@ use super::map_de::{ChainedMapAccess, RemainingMapDeserializer};
 use crate::de::content::{Content, ContentDeserializer};
 use crate::de::tag::{IntTagOrContent, StrTag, StrTagOrContent};
 use alloc::vec::Vec;
-use serde::de::{self, Deserialize, Deserializer, IgnoredAny, MapAccess};
+use core::fmt;
+use core::marker::PhantomData;
+use serde::de::{self, Deserialize, Deserializer, IgnoredAny, MapAccess, Unexpected, Visitor};
 
 /// Strategy trait abstracting integer (`u64`) vs string (`&str`) version tags
 /// for shared map-scanning helpers.
@@ -243,4 +245,70 @@ where
     }
 
     fallback(Content::Map(prefix.into_boxed_slice()))
+}
+
+// ---------------------------------------------------------------------------
+// Shared external-tagging variant identifier deserializer
+// ---------------------------------------------------------------------------
+
+/// Dispatch trait for externally-tagged version variant identifier enums.
+pub trait ExtField: Sized {
+    /// Resolves a positional `u64` variant index.
+    fn from_u64<E: de::Error>(v: u64, expected: &dyn de::Expected) -> Result<Self, E>;
+
+    /// Resolves a string variant identifier.
+    fn from_str<E: de::Error>(v: &str) -> Result<Self, E>;
+}
+
+/// Wrapper implementing [`Deserialize`] for any [`ExtField`] via a shared
+/// [`Visitor`] (handling `expecting`, `visit_u64`, `visit_str`, and `visit_bytes`).
+pub struct ExtFieldDeserialize<F>(pub F);
+
+struct ExtFieldVisitor<F>(PhantomData<F>);
+
+impl<F: ExtField> Visitor<'_> for ExtFieldVisitor<F> {
+    type Value = F;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("variant identifier")
+    }
+
+    #[inline]
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        F::from_u64(v, &self)
+    }
+
+    #[inline]
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        F::from_str(v)
+    }
+
+    #[inline]
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        core::str::from_utf8(v).map_or_else(
+            |_| Err(de::Error::invalid_value(Unexpected::Bytes(v), &self)),
+            F::from_str,
+        )
+    }
+}
+
+impl<'de, F: ExtField> Deserialize<'de> for ExtFieldDeserialize<F> {
+    #[inline]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer
+            .deserialize_identifier(ExtFieldVisitor(PhantomData))
+            .map(Self)
+    }
 }

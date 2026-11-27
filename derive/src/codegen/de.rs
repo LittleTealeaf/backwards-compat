@@ -464,16 +464,11 @@ fn emit_external_visitor_body(
             #(#field_enum_variants,)*
         }
 
-        struct __BcExtFieldVisitor;
-
-        impl<'__de> ::serde::de::Visitor<'__de> for __BcExtFieldVisitor {
-            type Value = __BcExtField;
-
-            fn expecting(&self, __formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                __formatter.write_str("variant identifier")
-            }
-
-            fn visit_u64<__E>(self, __v: u64) -> ::core::result::Result<Self::Value, __E>
+        impl ::backwards_compat::__private::ExtField for __BcExtField {
+            fn from_u64<__E>(
+                __v: u64,
+                __expected: &dyn ::serde::de::Expected,
+            ) -> ::core::result::Result<Self, __E>
             where
                 __E: ::serde::de::Error,
             {
@@ -482,12 +477,12 @@ fn emit_external_visitor_body(
                     #(#u64_match_arms)*
                     _ => ::core::result::Result::Err(::serde::de::Error::invalid_value(
                         ::serde::de::Unexpected::Unsigned(__v),
-                        &self,
+                        __expected,
                     )),
                 }
             }
 
-            fn visit_str<__E>(self, __v: &str) -> ::core::result::Result<Self::Value, __E>
+            fn from_str<__E>(__v: &str) -> ::core::result::Result<Self, __E>
             where
                 __E: ::serde::de::Error,
             {
@@ -495,27 +490,6 @@ fn emit_external_visitor_body(
                     #(#str_match_arms)*
                     #str_fallback
                 }
-            }
-
-            fn visit_bytes<__E>(self, __v: &[u8]) -> ::core::result::Result<Self::Value, __E>
-            where
-                __E: ::serde::de::Error,
-            {
-                match ::core::str::from_utf8(__v) {
-                    ::core::result::Result::Ok(__s) => self.visit_str(__s),
-                    ::core::result::Result::Err(_) => ::core::result::Result::Err(
-                        ::serde::de::Error::invalid_value(::serde::de::Unexpected::Bytes(__v), &self),
-                    ),
-                }
-            }
-        }
-
-        impl<'__de> ::serde::Deserialize<'__de> for __BcExtField {
-            fn deserialize<__D2>(__deserializer: __D2) -> ::core::result::Result<Self, __D2::Error>
-            where
-                __D2: ::serde::Deserializer<'__de>,
-            {
-                __deserializer.deserialize_identifier(__BcExtFieldVisitor)
             }
         }
 
@@ -536,7 +510,10 @@ fn emit_external_visitor_body(
             where
                 __A: ::serde::de::EnumAccess<'__de>,
             {
-                let (__field, __variant) = ::serde::de::EnumAccess::variant::<__BcExtField>(__data)?;
+                let (::backwards_compat::__private::ExtFieldDeserialize(__field), __variant) =
+                    ::serde::de::EnumAccess::variant::<
+                        ::backwards_compat::__private::ExtFieldDeserialize<__BcExtField>,
+                    >(__data)?;
                 match __field {
                     #(#visit_enum_arms,)*
                 }

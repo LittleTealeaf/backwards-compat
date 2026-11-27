@@ -11,8 +11,8 @@ pub use adjacent::{OptionForwardingDeserializer, drain_map, read_adjacent_conten
 pub use keys::{AdjacentKey, AdjacentKeyResult, InternalKey, InternalKeyResult};
 pub use map_de::{ChainedMapAccess, RemainingMapDeserializer};
 pub use map_visit::{
-    AdjacentMapDispatch, IntTagMode, InternalMapDispatch, StrTagMode, TagMode, visit_adjacent_map,
-    visit_adjacent_map_untagged, visit_internal_map, visit_internal_map_untagged,
+    AdjacentMapDispatch, ExtField, ExtFieldDeserialize, IntTagMode, InternalMapDispatch, StrTagMode, TagMode,
+    visit_adjacent_map, visit_adjacent_map_untagged, visit_internal_map, visit_internal_map_untagged,
 };
 pub use untagged::{
     UntaggedMultiDispatch, UntaggedMultiVisitor, UntaggedSingleDispatch, UntaggedSingleVisitor,

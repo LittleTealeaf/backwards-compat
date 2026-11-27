@@ -177,10 +177,10 @@ pub mod __private {
 
     pub use crate::de::{
         AdjacentKey, AdjacentKeyResult, AdjacentMapDispatch, ChainedMapAccess, Content, ContentDeserializer,
-        ContentRefDeserializer, IntTagMode, IntTagOrContent, InternalKey, InternalKeyResult,
-        InternalMapDispatch, OptionForwardingDeserializer, RemainingMapDeserializer, StrTag, StrTagMode,
-        StrTagOrContent, TagMode, UntaggedMultiDispatch, UntaggedMultiVisitor, UntaggedSingleDispatch,
-        UntaggedSingleVisitor, cautious_size_hint, drain_map, read_adjacent_content,
+        ContentRefDeserializer, ExtField, ExtFieldDeserialize, IntTagMode, IntTagOrContent, InternalKey,
+        InternalKeyResult, InternalMapDispatch, OptionForwardingDeserializer, RemainingMapDeserializer,
+        StrTag, StrTagMode, StrTagOrContent, TagMode, UntaggedMultiDispatch, UntaggedMultiVisitor,
+        UntaggedSingleDispatch, UntaggedSingleVisitor, cautious_size_hint, drain_map, read_adjacent_content,
         unknown_int_version_error, unknown_str_version_error, visit_adjacent_map,
         visit_adjacent_map_untagged, visit_internal_map, visit_internal_map_untagged,
     };
@@ -189,7 +189,10 @@ pub mod __private {
         TagSchemaValue, schema_adjacently_tagged, schema_externally_tagged, schema_internally_tagged,
         schema_one_of,
     };
-    pub use crate::ser::{serialize_adjacently_tagged, serialize_internally_tagged, serialize_unit_tagged};
+    pub use crate::ser::{
+        serialize_adjacently_tagged, serialize_internally_tagged, serialize_unit_tagged,
+        unsupported_serialize_version_error,
+    };
     #[cfg(feature = "schemars")]
     pub use schemars;
 

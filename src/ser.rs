@@ -2,6 +2,15 @@ use core::fmt::Display;
 
 use serde::ser::{self, Impossible, Serialize, SerializeMap, SerializeStruct, Serializer};
 
+/// Formats a cold-path error for an unsupported runtime serialization version.
+#[cold]
+#[must_use]
+pub fn unsupported_serialize_version_error<E: ser::Error, V: Display>(version: V) -> E {
+    ser::Error::custom(alloc::format!(
+        "version {version} is not supported for serialization"
+    ))
+}
+
 /// Serializes a unit struct with only a version tag field.
 #[inline]
 pub fn serialize_unit_tagged<S, T>(
