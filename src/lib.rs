@@ -176,19 +176,23 @@ pub mod __private {
     pub use alloc::{borrow::ToOwned, boxed::Box, format, string::String, vec::Vec};
 
     pub use crate::de::{
-        AdjacentKey, AdjacentKeyResult, ChainedMapAccess, Content, ContentDeserializer,
-        ContentRefDeserializer, IntTagOrContent, InternalKey, InternalKeyResult,
-        OptionForwardingDeserializer, RemainingMapDeserializer, StrTag, StrTagOrContent,
-        UntaggedMultiDispatch, UntaggedMultiVisitor, UntaggedSingleDispatch, UntaggedSingleVisitor,
-        cautious_size_hint, drain_map, read_adjacent_content, unknown_int_version_error,
-        unknown_str_version_error,
+        AdjacentKey, AdjacentKeyResult, AdjacentMapDispatch, ChainedMapAccess, Content, ContentDeserializer,
+        ContentRefDeserializer, ExtField, ExtFieldDeserialize, IntTagMode, IntTagOrContent, InternalKey,
+        InternalKeyResult, InternalMapDispatch, OptionForwardingDeserializer, RemainingMapDeserializer,
+        StrTag, StrTagMode, StrTagOrContent, TagMode, UntaggedMultiDispatch, UntaggedMultiVisitor,
+        UntaggedSingleDispatch, UntaggedSingleVisitor, cautious_size_hint, drain_map, read_adjacent_content,
+        unknown_int_version_error, unknown_str_version_error, visit_adjacent_map,
+        visit_adjacent_map_untagged, visit_internal_map, visit_internal_map_untagged,
     };
     #[cfg(feature = "schemars")]
     pub use crate::schema::{
         TagSchemaValue, schema_adjacently_tagged, schema_externally_tagged, schema_internally_tagged,
         schema_one_of,
     };
-    pub use crate::ser::serialize_internally_tagged;
+    pub use crate::ser::{
+        serialize_adjacently_tagged, serialize_internally_tagged, serialize_unit_tagged,
+        unsupported_serialize_version_error,
+    };
     #[cfg(feature = "schemars")]
     pub use schemars;
 

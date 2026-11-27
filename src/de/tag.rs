@@ -1,5 +1,5 @@
 use super::content::Content;
-use alloc::borrow::ToOwned as _;
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use core::fmt;
@@ -13,16 +13,16 @@ pub enum StrTag<'de> {
     /// Borrowed directly from the input buffer without allocation.
     Borrowed(&'de str),
     /// Owned string when the deserializer had to unescape or allocate.
-    Owned(String),
+    Owned(Box<str>),
 }
 
 impl StrTag<'_> {
     /// Returns the string slice for this tag.
     #[must_use]
-    pub const fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Borrowed(s) => s,
-            Self::Owned(s) => s.as_str(),
+            Self::Owned(s) => s,
         }
     }
 }
@@ -53,11 +53,11 @@ impl<'de> Visitor<'de> for StrTagVisitor<'de> {
     where
         E: de::Error,
     {
-        Ok(StrTag::Owned(v.to_owned()))
+        Ok(StrTag::Owned(Box::from(v)))
     }
 
     fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
-        Ok(StrTag::Owned(v))
+        Ok(StrTag::Owned(v.into_boxed_str()))
     }
 }
 
@@ -111,7 +111,7 @@ impl<'de> Deserialize<'de> for StrTagOrContent<'de> {
     {
         match Content::deserialize(deserializer)? {
             Content::Str(s) => Ok(Self::Tag(StrTag::Borrowed(s))),
-            Content::String(s) => Ok(Self::Tag(StrTag::Owned(String::from(s)))),
+            Content::String(s) => Ok(Self::Tag(StrTag::Owned(s))),
             other => Ok(Self::Other(other)),
         }
     }
@@ -181,12 +181,13 @@ mod tests {
             Box::from("v2"),
         )))
         .unwrap();
-        assert_eq!(owned, StrTag::Owned("v2".to_owned()));
+        assert_eq!(owned, StrTag::Owned(Box::from("v2")));
         assert_eq!(owned.as_str(), "v2");
 
         let via_visit_str = StrTagVisitor(PhantomData).visit_str::<ValueError>("v3").unwrap();
-        assert_eq!(via_visit_str, StrTag::Owned("v3".to_owned()));
+        assert_eq!(via_visit_str, StrTag::Owned(Box::from("v3")));
         assert_eq!(via_visit_str.as_str(), "v3");
+        assert!(core::mem::size_of::<StrTag<'_>>() <= 24);
     }
 
     #[test]
@@ -197,7 +198,7 @@ mod tests {
 
         let raw_escaped = String::from("\"v1\\n2\"");
         let tag_escaped: StrTag<'_> = serde_json::from_str(&raw_escaped).unwrap();
-        assert_eq!(tag_escaped, StrTag::Owned("v1\n2".to_owned()));
+        assert_eq!(tag_escaped, StrTag::Owned(Box::from("v1\n2")));
 
         let err = serde_json::from_str::<StrTag<'_>>("42").unwrap_err();
         assert!(err.to_string().contains("expected a string version tag"));
@@ -285,13 +286,13 @@ mod tests {
             Box::from("v2"),
         )))
         .unwrap();
-        assert!(matches!(owned, StrTagOrContent::Tag(StrTag::Owned(ref s)) if s == "v2"));
+        assert!(matches!(owned, StrTagOrContent::Tag(StrTag::Owned(ref s)) if s.as_ref() == "v2"));
 
         let escaped = String::from("\"v1\\n2\"");
         let json_escaped: StrTagOrContent<'_> = serde_json::from_str(&escaped).unwrap();
         assert!(matches!(
             json_escaped,
-            StrTagOrContent::Tag(StrTag::Owned(ref s)) if s == "v1\n2"
+            StrTagOrContent::Tag(StrTag::Owned(ref s)) if s.as_ref() == "v1\n2"
         ));
 
         for mismatched in [Content::U64(1), Content::I64(-1), Content::Bool(false)] {
