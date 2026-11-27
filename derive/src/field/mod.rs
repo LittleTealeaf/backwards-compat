@@ -19,6 +19,7 @@ pub struct FieldCompatSpec {
     pub field_ty: syn::Type,
     pub filtered_generics: syn::Generics,
     pub cfgs: Vec<syn::Attribute>,
+    pub allow_attrs: Vec<syn::Attribute>,
     pub args: BackwardsCompatArgs,
 }
 
@@ -154,6 +155,12 @@ fn parse_field_bc_attr(attr: &syn::Attribute) -> syn::Result<BackwardsCompatArgs
             ));
         }
     };
+    if args.serialize_specified || args.deserialize_specified {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "`serialize` and `deserialize` options are only supported on struct/enum-level `#[backwards_compat(...)]`, not on field-level attributes",
+        ));
+    }
     if !args.external && args.content_field.is_none() {
         args.content_field = Some("data".to_owned());
     }
@@ -572,14 +579,19 @@ fn filter_generics(
     }
 }
 
+struct FieldExtractContext<'a> {
+    outer_generics: &'a syn::Generics,
+    outer: &'a OuterParams,
+    extra_cfgs: &'a [syn::Attribute],
+    extra_allows: &'a [syn::Attribute],
+}
+
 fn extract_single_field(
     field: &syn::Field,
     variant_idx: Option<usize>,
     field_idx: usize,
     helper_ident: syn::Ident,
-    outer_generics: &syn::Generics,
-    outer: &OuterParams,
-    extra_cfgs: &[syn::Attribute],
+    ctx: &FieldExtractContext<'_>,
 ) -> syn::Result<Option<FieldCompatSpec>> {
     let mut bc_attrs = field
         .attrs
@@ -599,12 +611,14 @@ fn extract_single_field(
     check_serde_attr_conflicts(&field.attrs)?;
     let args = parse_field_bc_attr(first_bc)?;
 
-    let field_used = collect_used_in_type(&field.ty, outer);
-    validate_historical_version_generics(outer_generics, outer, &field_used, &args)?;
-    let filtered_generics = filter_generics(outer_generics, outer, &field_used);
+    let field_used = collect_used_in_type(&field.ty, ctx.outer);
+    validate_historical_version_generics(ctx.outer_generics, ctx.outer, &field_used, &args)?;
+    let filtered_generics = filter_generics(ctx.outer_generics, ctx.outer, &field_used);
 
-    let mut cfgs: Vec<syn::Attribute> = extra_cfgs.to_vec();
+    let mut cfgs: Vec<syn::Attribute> = ctx.extra_cfgs.to_vec();
     cfgs.extend(field.attrs.iter().filter(|a| a.path().is_ident("cfg")).cloned());
+    let mut allow_attrs: Vec<syn::Attribute> = ctx.extra_allows.to_vec();
+    allow_attrs.extend(field.attrs.iter().filter(|a| a.path().is_ident("allow")).cloned());
     let schema_helper_ident = format_ident!("{}_Schema", helper_ident, span = Span::call_site());
 
     Ok(Some(FieldCompatSpec {
@@ -615,6 +629,7 @@ fn extract_single_field(
         field_ty: field.ty.clone(),
         filtered_generics,
         cfgs,
+        allow_attrs,
         args,
     }))
 }
@@ -624,6 +639,18 @@ pub fn extract_struct_field_compat(item_struct: &syn::ItemStruct) -> syn::Result
     let outer = OuterParams::from_generics(&item_struct.generics);
     let type_name = strip_raw_prefix(&item_struct.ident);
     let call_site = Span::call_site();
+    let outer_allows: Vec<syn::Attribute> = item_struct
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("allow"))
+        .cloned()
+        .collect();
+    let ctx = FieldExtractContext {
+        outer_generics: &item_struct.generics,
+        outer: &outer,
+        extra_cfgs: &[],
+        extra_allows: &outer_allows,
+    };
     let mut specs = Vec::new();
 
     for (field_idx, field) in item_struct.fields.iter().enumerate() {
@@ -638,15 +665,7 @@ pub fn extract_struct_field_compat(item_struct: &syn::ItemStruct) -> syn::Result
                 )
             },
         );
-        if let Some(spec) = extract_single_field(
-            field,
-            None,
-            field_idx,
-            helper_ident,
-            &item_struct.generics,
-            &outer,
-            &[],
-        )? {
+        if let Some(spec) = extract_single_field(field, None, field_idx, helper_ident, &ctx)? {
             specs.push(spec);
         }
     }
@@ -659,6 +678,12 @@ pub fn extract_enum_field_compat(item_enum: &syn::ItemEnum) -> syn::Result<Vec<F
     let outer = OuterParams::from_generics(&item_enum.generics);
     let enum_name = strip_raw_prefix(&item_enum.ident);
     let call_site = Span::call_site();
+    let outer_allows: Vec<syn::Attribute> = item_enum
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("allow"))
+        .cloned()
+        .collect();
     let mut specs = Vec::new();
 
     for (variant_idx, variant) in item_enum.variants.iter().enumerate() {
@@ -669,6 +694,20 @@ pub fn extract_enum_field_compat(item_enum: &syn::ItemEnum) -> syn::Result<Vec<F
             .filter(|a| a.path().is_ident("cfg"))
             .cloned()
             .collect();
+        let mut variant_allows = outer_allows.clone();
+        variant_allows.extend(
+            variant
+                .attrs
+                .iter()
+                .filter(|a| a.path().is_ident("allow"))
+                .cloned(),
+        );
+        let ctx = FieldExtractContext {
+            outer_generics: &item_enum.generics,
+            outer: &outer,
+            extra_cfgs: &variant_cfgs,
+            extra_allows: &variant_allows,
+        };
 
         for (field_idx, field) in variant.fields.iter().enumerate() {
             let helper_ident = field.ident.as_ref().map_or_else(
@@ -691,15 +730,8 @@ pub fn extract_enum_field_compat(item_enum: &syn::ItemEnum) -> syn::Result<Vec<F
                     )
                 },
             );
-            if let Some(spec) = extract_single_field(
-                field,
-                Some(variant_idx),
-                field_idx,
-                helper_ident,
-                &item_enum.generics,
-                &outer,
-                &variant_cfgs,
-            )? {
+            if let Some(spec) = extract_single_field(field, Some(variant_idx), field_idx, helper_ident, &ctx)?
+            {
                 specs.push(spec);
             }
         }
@@ -719,7 +751,12 @@ fn with_bound(where_clause: Option<&syn::WhereClause>, extra: syn::WherePredicat
 
 /// Generates the `__BcField_...` helper struct and its `serialize` / `serialize_ref` / `deserialize` methods
 /// (and optionally a `__BcField_..._Schema` `JsonSchema` helper when `derive_json_schema` is true).
-pub fn generate_field_helper(spec: &FieldCompatSpec, derive_json_schema: bool) -> syn::Result<TokenStream> {
+pub fn generate_field_helper(
+    spec: &FieldCompatSpec,
+    derive_json_schema: bool,
+    enable_serialize: bool,
+    enable_deserialize: bool,
+) -> syn::Result<TokenStream> {
     #[cfg(not(feature = "schemars"))]
     let _ = derive_json_schema;
 
@@ -729,10 +766,6 @@ pub fn generate_field_helper(spec: &FieldCompatSpec, derive_json_schema: bool) -
         spec.filtered_generics.clone(),
     )?;
     let dag_plan = dag::resolve_dag(&input)?;
-
-    let ser_core =
-        codegen::generate_serialize_core(&input, &dag_plan, SelfWireMode::Direct, &quote!(__value))?;
-    let de_core = codegen::generate_deserialize_core(&input, &dag_plan, SelfWireMode::Direct, false)?;
 
     let helper_ident = &spec.helper_ident;
     let field_ty = &spec.field_ty;
@@ -804,62 +837,97 @@ pub fn generate_field_helper(spec: &FieldCompatSpec, derive_json_schema: bool) -
     #[cfg(not(feature = "schemars"))]
     let (schema_struct_def, schema_impl_items) = (TokenStream::new(), TokenStream::new());
 
-    let mut ser_fn_generics = input.generics.clone();
-    ser_fn_generics.params.push(syn::parse_quote!(__S));
-    let (ser_fn_impl_generics, _, _) = ser_fn_generics.split_for_impl();
-    let ser_wc = with_bound(
-        ser_core.where_clause.as_ref(),
-        syn::parse_quote!(__S: ::serde::Serializer),
-    );
-    let ser_helper_def = ser_core.helper_def;
-    let ser_body = ser_core.body;
-
-    let mut de_fn_generics = codegen::build_de_generics(&input.generics);
-    de_fn_generics.params.push(syn::parse_quote!(__D));
-    let (de_fn_impl_generics, _, _) = de_fn_generics.split_for_impl();
-    let de_helper_defs = de_core.helper_defs;
-
-    let emit_de_fn = |cfg_prefix: TokenStream, where_cl: Option<&syn::WhereClause>, body: &TokenStream| {
-        let de_wc = with_bound(where_cl, syn::parse_quote!(__D: ::serde::Deserializer<'__de>));
-        quote! {
-            #cfg_prefix
-            fn deserialize #de_fn_impl_generics (
-                __deserializer: __D,
-            ) -> ::core::result::Result<#field_ty, __D::Error>
-            #de_wc
+    let (ser_helper_def, serialize_fns) = if enable_serialize {
+        let ser_core =
+            codegen::generate_serialize_core(&input, &dag_plan, SelfWireMode::Direct, &quote!(__value))?;
+        let mut ser_fn_generics = input.generics.clone();
+        ser_fn_generics.params.push(syn::parse_quote!(__S));
+        let (ser_fn_impl_generics, _, _) = ser_fn_generics.split_for_impl();
+        let ser_wc = with_bound(
+            ser_core.where_clause.as_ref(),
+            syn::parse_quote!(__S: ::serde::Serializer),
+        );
+        let ser_body = ser_core.body;
+        let fns = quote! {
+            fn serialize #ser_fn_impl_generics (
+                __value: &#field_ty,
+                __serializer: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error>
+            #ser_wc
             {
-                #body
+                #ser_body
             }
-        }
+
+            fn serialize_ref #ser_fn_impl_generics (
+                __value: &&#field_ty,
+                __serializer: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error>
+            #ser_wc
+            {
+                Self::serialize(*__value, __serializer)
+            }
+        };
+        (ser_core.helper_def, fns)
+    } else {
+        (TokenStream::new(), TokenStream::new())
     };
 
-    let deserialize_fns = if let Some(ref untagged) = de_core.untagged {
-        untagged.overall_cfg.as_ref().map_or_else(
-            || emit_de_fn(TokenStream::new(), untagged.where_clause.as_ref(), &untagged.body),
-            |pred| {
-                let enabled = emit_de_fn(
-                    quote!(#[cfg(#pred)]),
-                    untagged.where_clause.as_ref(),
-                    &untagged.body,
-                );
-                let disabled = emit_de_fn(
-                    quote!(#[cfg(not(#pred))]),
-                    de_core.base_where_clause.as_ref(),
-                    &de_core.base_body,
-                );
+    let (de_helper_defs, deserialize_fns) = if enable_deserialize {
+        let de_core = codegen::generate_deserialize_core(&input, &dag_plan, SelfWireMode::Direct, false)?;
+        let mut de_fn_generics = codegen::build_de_generics(&input.generics);
+        de_fn_generics.params.push(syn::parse_quote!(__D));
+        let (de_fn_impl_generics, _, _) = de_fn_generics.split_for_impl();
+
+        let emit_de_fn =
+            |cfg_prefix: TokenStream, where_cl: Option<&syn::WhereClause>, body: &TokenStream| {
+                let de_wc = with_bound(where_cl, syn::parse_quote!(__D: ::serde::Deserializer<'__de>));
                 quote! {
-                    #enabled
-                    #disabled
+                    #cfg_prefix
+                    fn deserialize #de_fn_impl_generics (
+                        __deserializer: __D,
+                    ) -> ::core::result::Result<#field_ty, __D::Error>
+                    #de_wc
+                    {
+                        #body
+                    }
                 }
-            },
-        )
+            };
+
+        let fns = if let Some(ref untagged) = de_core.untagged {
+            untagged.overall_cfg.as_ref().map_or_else(
+                || emit_de_fn(TokenStream::new(), untagged.where_clause.as_ref(), &untagged.body),
+                |pred| {
+                    let enabled = emit_de_fn(
+                        quote!(#[cfg(#pred)]),
+                        untagged.where_clause.as_ref(),
+                        &untagged.body,
+                    );
+                    let disabled = emit_de_fn(
+                        quote!(#[cfg(not(#pred))]),
+                        de_core.base_where_clause.as_ref(),
+                        &de_core.base_body,
+                    );
+                    quote! {
+                        #enabled
+                        #disabled
+                    }
+                },
+            )
+        } else {
+            emit_de_fn(
+                TokenStream::new(),
+                de_core.base_where_clause.as_ref(),
+                &de_core.base_body,
+            )
+        };
+
+        (de_core.helper_defs, fns)
     } else {
-        emit_de_fn(
-            TokenStream::new(),
-            de_core.base_where_clause.as_ref(),
-            &de_core.base_body,
-        )
+        (TokenStream::new(), TokenStream::new())
     };
+
+    let legacy_deprecation_warnings =
+        codegen::emit_legacy_deprecation_warnings(&input.legacy_warnings, &spec.allow_attrs);
 
     let code = quote! {
         #(#cfgs)*
@@ -871,29 +939,14 @@ pub fn generate_field_helper(spec: &FieldCompatSpec, derive_json_schema: bool) -
 
         #(#cfgs)*
         const _: () = {
+            #legacy_deprecation_warnings
             #ser_helper_def
             #de_helper_defs
             #schema_impl_items
 
             #[allow(dead_code, reason = "internal field-level backwards_compat helper methods")]
             impl #helper_ident {
-                fn serialize #ser_fn_impl_generics (
-                    __value: &#field_ty,
-                    __serializer: __S,
-                ) -> ::core::result::Result<__S::Ok, __S::Error>
-                #ser_wc
-                {
-                    #ser_body
-                }
-
-                fn serialize_ref #ser_fn_impl_generics (
-                    __value: &&#field_ty,
-                    __serializer: __S,
-                ) -> ::core::result::Result<__S::Ok, __S::Error>
-                #ser_wc
-                {
-                    Self::serialize(*__value, __serializer)
-                }
+                #serialize_fns
 
                 #deserialize_fns
             }

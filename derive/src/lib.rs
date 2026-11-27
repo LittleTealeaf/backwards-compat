@@ -113,15 +113,35 @@ pub(crate) fn is_forwarded_attr(attr: &syn::Attribute) -> bool {
     FORWARDED_ATTRS.iter().any(|&name| attr.path().is_ident(name))
 }
 
-fn is_stripped_domain_attr(attr: &syn::Attribute) -> bool {
+fn is_stripped_domain_attr(attr: &syn::Attribute, keep_serde_attrs: bool) -> bool {
     #[cfg(feature = "schemars")]
     if attr.path().is_ident("schemars") {
         return true;
     }
-    attr.path().is_ident("serde")
+    !keep_serde_attrs && attr.path().is_ident("serde")
 }
 
-fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
+fn has_serde_derive(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let Ok(nested) =
+            attr.parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+        else {
+            continue;
+        };
+        if nested
+            .iter()
+            .any(|path| is_serde_derive(path, "Serialize") || is_serde_derive(path, "Deserialize"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>, strip_serialize: bool, strip_deserialize: bool) {
     attrs.retain_mut(|attr| {
         if !attr.path().is_ident("derive") {
             return true;
@@ -135,12 +155,13 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
         let retained: Vec<syn::Path> = nested
             .into_iter()
             .filter(|path| {
-                let is_serde = is_serde_derive(path, "Serialize") || is_serde_derive(path, "Deserialize");
+                let is_ser = strip_serialize && is_serde_derive(path, "Serialize");
+                let is_de = strip_deserialize && is_serde_derive(path, "Deserialize");
                 #[cfg(feature = "schemars")]
                 let is_schema = is_json_schema_derive(path);
                 #[cfg(not(feature = "schemars"))]
                 let is_schema = false;
-                !is_serde && !is_schema
+                !is_ser && !is_de && !is_schema
             })
             .collect();
 
@@ -169,15 +190,29 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 ///   Configures adjacent tagging (`{"tag": ..., "content": ...}`).
 ///   Essential for tuple structs, scalar types, newtypes, and enums that cannot be flattened into a map.
 ///   Field-level `#[backwards_compat(...)]` automatically defaults to `content = "data"`.
+/// - **`serialize = true | false` / `serialize(true | false)`** *(default: `true`; struct/enum level only)*:
+///   Controls whether `serde::Serialize` and `backwards_compat::BackwardsCompatSerialize` (plus the
+///   borrowed shadow wire type) are generated. Setting `serialize = false` allows fields that do not
+///   implement `Serialize` or lets you provide a manual or plain `#[derive(Serialize)]` impl.
+///   Cannot be combined with `deserialize = false` or with field-level `#[backwards_compat(...)]`.
+/// - **`deserialize = true | false` / `deserialize(true | false)`** *(default: `true`; struct/enum level only)*:
+///   Controls whether `serde::Deserialize` and `backwards_compat::BackwardsCompatDeserialize` (plus
+///   the deserializing shadow wire derive and migration chains) are generated. Setting
+///   `deserialize = false` allows fields that do not implement `Deserialize` or lets you provide a
+///   manual or plain `#[derive(Deserialize)]` impl. Cannot be combined with `serialize = false` or
+///   with field-level `#[backwards_compat(...)]`.
 /// - **`dump`** *(optional)*:
 ///   Prints the macro's generated token stream to `stderr` during compilation for inspection.
 /// - **`versions(...)` / `versions = [...]` / `versions = { ... }`**:
 ///   Declares the list of schema versions and transition paths. The active current version is the
 ///   entry marked `#[current]`, or defaults to the last non-untagged primary entry (or `1` if empty).
 /// - **`via = ProxyType` / `via(ProxyType)`** *(proxy redirection mode; mutually exclusive with `tag`, `content`, `versions`, and field-level `#[backwards_compat]`)*:
-///   Delegates `Serialize`, `Deserialize`, `BackwardsCompat`, and `BackwardsCompatDeserialize`
-///   through a separate versioned proxy type. Supports `try_from`, `try_into`, `fallible`,
-///   `from = fn_path` / `from(fn_path)`, `to = fn_path` / `to(fn_path)`, and `dump`.
+///   Delegates `Serialize`, `Deserialize`, `BackwardsCompat`, `BackwardsCompatDeserialize`, and
+///   `BackwardsCompatSerialize` through a separate versioned proxy type. Supports `try_from`,
+///   `try_into`, `fallible`, `from = fn_path` / `from(fn_path)`, `to = fn_path` / `to(fn_path)`,
+///   `try_from = fn_path` / `try_from(fn_path)`, `try_into = fn_path` / `try_into(fn_path)`,
+///   `serialize = true | false` / `serialize(true | false)`, `deserialize = true | false` /
+///   `deserialize(true | false)`, and `dump`.
 ///
 /// # Field-Level Versioning
 ///
@@ -188,8 +223,9 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 ///   container with field-level `#[backwards_compat(...)]` on its fields (preserving zero-clone
 ///   serialization via `serialize_ref`).
 /// - Each annotated field gets a private same-scope helper with `content = "data"` by default,
-///   supporting primitives, foreign types (`#[with(...)]`), `Option<T>`, `Vec<T>`, generics,
-///   lifetimes, const generics, and multiple fields of the same type with independent chains.
+///   supporting primitives, foreign types (`#[migrate(with = ...)]` / `#[migrate(try_with = ...)]`),
+///   `Option<T>`, `Vec<T>`, generics, lifetimes, const generics, and multiple fields of the same
+///   type with independent chains.
 ///
 /// # Version Entry Directives
 ///
@@ -209,15 +245,24 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 ///   automatically inherit its explicit `=>` transition regardless of declaration order.
 /// - **`#[current]`**: Explicitly designates the active current schema version (required only when
 ///   it is not the last primary entry in `versions`).
-/// - **`#[serialize]` / `#[serialize(with = fn_path)]`**: Overrides which version is emitted during
-///   serialization (useful for rolling deployments). Defaults to the current version.
-/// - **`#[serializable]` / `#[serializable(with = fn_path)]` / `#[serializable(try_with = fn_path)]`**:
+/// - **`#[migrate(from)]` / `#[migrate(try_from)]` / `#[migrate(with = fn_path)]` / `#[migrate(try_with = fn_path)]`**:
+///   Configures how a version entry converts to the next step during deserialization.
+///   `#[migrate(from)]` (the default when omitted) uses `From`; `#[migrate(try_from)]` uses
+///   `TryFrom`; `#[migrate(with = fn_path)]` calls `fn(FromTy) -> ToTy`; and
+///   `#[migrate(try_with = fn_path)]` calls `fn(FromTy) -> Result<ToTy, E>` where
+///   `E: core::fmt::Display`. Legacy `#[fallible]` and `#[with(fn_path)]` remain accepted as
+///   deprecated aliases (emitting a compiler warning) and will be removed in the next major version.
+/// - **`#[serialize]` / `#[serialize(into)]` / `#[serialize(try_into)]` / `#[serialize(with = fn_path)]` / `#[serialize(try_with = fn_path)]`**:
+///   Overrides which version is emitted during default serialization (useful for rolling
+///   deployments). Bare `#[serialize]` and `#[serialize(into)]` convert via `From<&Self>` (or
+///   `Clone` + `From<Self>`); `#[serialize(try_into)]` converts via `TryFrom<&Self>` (or `Clone` +
+///   `TryFrom<Self>`); `#[serialize(with = fn_path)]` calls `fn(&Self) -> WireTy`; and
+///   `#[serialize(try_with = fn_path)]` calls `fn(&Self) -> Result<WireTy, E>`. Defaults to the
+///   current version.
+/// - **`#[serializable]` / `#[serializable(into)]` / `#[serializable(try_into)]` / `#[serializable(with = fn_path)]` / `#[serializable(try_with = fn_path)]`**:
 ///   Marks a historical version entry as a valid runtime target for `BackwardsCompatSerialize::serialize_as_version`
-///   and includes it in `BackwardsCompatSerialize::SERIALIZABLE_VERSIONS`.
-/// - **`#[fallible]`**: Marks a transition as fallible, using `TryFrom` (or a `Result`-returning
-///   `#[with]` function). Error types only need to implement `core::fmt::Display`.
-/// - **`#[with(fn_path)]`**: Uses a custom conversion function `fn(FromTy) -> ToTy` (or
-///   `fn(FromTy) -> Result<ToTy, E>` with `#[fallible]`) instead of `From` / `TryFrom`.
+///   and includes it in `BackwardsCompatSerialize::SERIALIZABLE_VERSIONS`. Supports the same four
+///   conversion modes as `#[serialize(...)]`.
 /// - **`#[cfg(...)]`**: Conditionally compiles a historical or unversioned (`_`) version entry,
 ///   including its deserialization arm and inlined migration chain. Multiple
 ///   `#[cfg(...)]` attributes on an entry or along a path are combined with `all(...)`. Neither the
@@ -284,20 +329,20 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>) {
 ///     pub name: String,
 ///     // Adjacent tagging defaults to tag = "version", content = "data":
 ///     #[backwards_compat(versions(
-///         #[fallible] #[with(parse_port)] 1: String,
+///         #[migrate(try_with = parse_port)] 1: String,
 ///         2: Self,
 ///     ))]
 ///     pub port: u16,
 /// }
 /// ```
 ///
-/// ### 3. Fallible Migrations with `#[with]`
+/// ### 3. Fallible Migrations with `#[migrate(try_with = ...)]`
 ///
 /// ```rust,ignore
 /// #[backwards_compat(
 ///     tag = "ver",
 ///     versions(
-///         #[fallible] #[with(parse_v1)] 1: ServerV1,
+///         #[migrate(try_with = parse_v1)] 1: ServerV1,
 ///         2: Self,
 ///     )
 /// )]
@@ -558,7 +603,8 @@ fn backwards_compat_impl(
             };
             let mut helpers = Vec::with_capacity(field_specs.len());
             for spec in &field_specs {
-                match field::generate_field_helper(spec, derive_json_schema) {
+                match field::generate_field_helper(spec, derive_json_schema, args.serialize, args.deserialize)
+                {
                     Ok(ts) => helpers.push(ts),
                     Err(err) => return err.to_compile_error(),
                 }
@@ -585,13 +631,15 @@ fn backwards_compat_impl(
             }
 
             let mut cleaned_item_struct = item_struct.clone();
+            clean_derive_attrs(&mut cleaned_item_struct.attrs, args.serialize, args.deserialize);
+            let keep_serde_attrs = has_serde_derive(&cleaned_item_struct.attrs);
             cleaned_item_struct
                 .attrs
-                .retain(|attr| !is_stripped_domain_attr(attr));
-            clean_derive_attrs(&mut cleaned_item_struct.attrs);
+                .retain(|attr| !is_stripped_domain_attr(attr, keep_serde_attrs));
             for field in &mut cleaned_item_struct.fields {
                 field.attrs.retain(|attr| {
-                    !is_stripped_domain_attr(attr) && !attr.path().is_ident("backwards_compat")
+                    !is_stripped_domain_attr(attr, keep_serde_attrs)
+                        && !attr.path().is_ident("backwards_compat")
                 });
             }
 
@@ -622,7 +670,8 @@ fn backwards_compat_impl(
             };
             let mut helpers = Vec::with_capacity(field_specs.len());
             for spec in &field_specs {
-                match field::generate_field_helper(spec, derive_json_schema) {
+                match field::generate_field_helper(spec, derive_json_schema, args.serialize, args.deserialize)
+                {
                     Ok(ts) => helpers.push(ts),
                     Err(err) => return err.to_compile_error(),
                 }
@@ -652,15 +701,19 @@ fn backwards_compat_impl(
             }
 
             let mut cleaned_item_enum = item_enum.clone();
+            clean_derive_attrs(&mut cleaned_item_enum.attrs, args.serialize, args.deserialize);
+            let keep_serde_attrs = has_serde_derive(&cleaned_item_enum.attrs);
             cleaned_item_enum
                 .attrs
-                .retain(|attr| !is_stripped_domain_attr(attr));
-            clean_derive_attrs(&mut cleaned_item_enum.attrs);
+                .retain(|attr| !is_stripped_domain_attr(attr, keep_serde_attrs));
             for variant in &mut cleaned_item_enum.variants {
-                variant.attrs.retain(|attr| !is_stripped_domain_attr(attr));
+                variant
+                    .attrs
+                    .retain(|attr| !is_stripped_domain_attr(attr, keep_serde_attrs));
                 for field in &mut variant.fields {
                     field.attrs.retain(|attr| {
-                        !is_stripped_domain_attr(attr) && !attr.path().is_ident("backwards_compat")
+                        !is_stripped_domain_attr(attr, keep_serde_attrs)
+                            && !attr.path().is_ident("backwards_compat")
                     });
                 }
             }
@@ -703,9 +756,23 @@ fn backwards_compat_impl(
     let (_, ty_generics, _) = generics.split_for_impl();
     let target_ty: syn::Type = syn::parse_quote!(#target_ident #ty_generics);
 
-    let input = match args.into_input(target_ty, vis, generics) {
+    let mut input = match args.into_input(target_ty, vis, generics) {
         Ok(i) => i,
         Err(err) => return err.to_compile_error(),
+    };
+    input.allow_attrs = match &shadow_source {
+        PreparedShadowSource::Struct(s) => s
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("allow"))
+            .cloned()
+            .collect(),
+        PreparedShadowSource::Enum(e) => e
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("allow"))
+            .cloned()
+            .collect(),
     };
 
     let dag_plan = match dag::resolve_dag(&input) {
@@ -727,14 +794,19 @@ fn backwards_compat_impl(
     }
 
     if needs_shadow_wire {
+        let shadow_opts = shadow::ShadowWireOptions {
+            serialize: input.serialize,
+            deserialize: input.deserialize,
+            derive_json_schema,
+        };
         let built = match shadow_source {
             PreparedShadowSource::Struct(item_struct) => {
                 let shadow_struct = respan_to_call_site(&item_struct);
-                shadow::build_struct_shadow_wire(&shadow_struct, &field_specs, derive_json_schema)
+                shadow::build_struct_shadow_wire(&shadow_struct, &field_specs, shadow_opts)
             }
             PreparedShadowSource::Enum(item_enum) => {
                 let shadow_enum = respan_to_call_site(&item_enum);
-                shadow::build_enum_shadow_wire(&shadow_enum, &field_specs, derive_json_schema)
+                shadow::build_enum_shadow_wire(&shadow_enum, &field_specs, shadow_opts)
             }
         };
         let shadow_info = codegen::ShadowWireInfo {
@@ -827,7 +899,7 @@ fn backwards_compat_via_impl(
                     f.attrs.retain(|a| !a.path().is_ident("schemars"));
                 }
             }
-            clean_derive_attrs(&mut item_struct.attrs);
+            clean_derive_attrs(&mut item_struct.attrs, args.serialize, args.deserialize);
             let codegen_struct = respan_to_call_site(&item_struct);
             let codegen_tokens = via::generate_via(
                 &args,
@@ -861,7 +933,7 @@ fn backwards_compat_via_impl(
                     }
                 }
             }
-            clean_derive_attrs(&mut item_enum.attrs);
+            clean_derive_attrs(&mut item_enum.attrs, args.serialize, args.deserialize);
             let codegen_enum = respan_to_call_site(&item_enum);
             let codegen_tokens = via::generate_via(
                 &args,

@@ -92,14 +92,14 @@ impl From<NestedV1> for Nested {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ServiceConfig {
     #[backwards_compat(versions(
-        #[fallible] #[with(parse_port_str)] 1: String,
-        #[fallible] #[with(narrow_port)] 2: u32,
+        #[migrate(try_with = parse_port_str)] 1: String,
+        #[migrate(try_with = narrow_port)] 2: u32,
         3: Self,
     ))]
     port: u16,
 
     #[backwards_compat(versions(
-        #[with(bool_from_flag)] 1: u8,
+        #[migrate(with = bool_from_flag)] 1: u8,
         2: Self,
     ))]
     enabled: bool,
@@ -111,20 +111,20 @@ struct ServiceConfig {
     upstream: Nested,
 
     #[backwards_compat(versions(
-        #[with(tags_from_csv)] 1: String,
+        #[migrate(with = tags_from_csv)] 1: String,
         2: Self,
     ))]
     tags: Vec<String>,
 
     #[backwards_compat(versions(
-        #[with(opt_label_from_str)] 1: String,
+        #[migrate(with = opt_label_from_str)] 1: String,
         2: Self,
     ))]
     note: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[backwards_compat(versions(
-        #[with(opt_label_from_str)] 1: String,
+        #[migrate(with = opt_label_from_str)] 1: String,
         2: Self,
     ))]
     optional_banner: Option<String>,
@@ -225,14 +225,14 @@ fn https_endpoint_from_tuple((host, port): (String, u16)) -> Endpoint {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct DualEndpoints {
     #[backwards_compat(versions(
-        #[with(http_endpoint_from_host)] 1: String,
+        #[migrate(with = http_endpoint_from_host)] 1: String,
         2: Self,
     ))]
     http: Endpoint,
 
     #[backwards_compat(versions(
-        #[with(https_endpoint_from_host)] 1: String => Self,
-        #[with(https_endpoint_from_tuple)] 2: (String, u16) => Self,
+        #[migrate(with = https_endpoint_from_host)] 1: String => Self,
+        #[migrate(with = https_endpoint_from_tuple)] 2: (String, u16) => Self,
         3: Self,
     ))]
     https: Endpoint,
@@ -341,7 +341,7 @@ where
     payload: BorrowedPair<'a, T>,
 
     #[backwards_compat(versions(
-        #[fallible] #[with(port_from_u32)] 1: u32,
+        #[migrate(try_with = port_from_u32)] 1: u32,
         2: Self,
     ))]
     port: u16,
@@ -397,8 +397,8 @@ fn serialize_fixed_bytes_v2<const N: usize>(arr: &[u8; N]) -> Vec<u8> {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FixedFrame<const N: usize> {
     #[backwards_compat(versions(
-        #[fallible] #[with(fixed_bytes_from_vec::<N>)] 1: Vec<u8>,
-        #[serialize(with = serialize_fixed_bytes_v2::<N>)] #[fallible] #[with(fixed_bytes_from_vec::<N>)] #[current] 2: Vec<u8>,
+        #[migrate(try_with = fixed_bytes_from_vec::<N>)] 1: Vec<u8>,
+        #[serialize(with = serialize_fixed_bytes_v2::<N>)] #[migrate(try_with = fixed_bytes_from_vec::<N>)] #[current] 2: Vec<u8>,
     ))]
     bytes: [u8; N],
 }
@@ -433,7 +433,7 @@ enum Action {
     Idle,
     Move(
         #[backwards_compat(versions(
-            #[with(widen_u16_to_u32)] 1: u16,
+            #[migrate(with = widen_u16_to_u32)] 1: u16,
             2: Self,
         ))]
         u32,
@@ -441,7 +441,7 @@ enum Action {
     ),
     Resize {
         #[backwards_compat(versions(
-            #[with(widen_u16_to_u32)] 1: u16,
+            #[migrate(with = widen_u16_to_u32)] 1: u16,
             2: Self,
         ))]
         width: u32,
@@ -508,7 +508,7 @@ fn test_enum_named_unnamed_and_cfg_variants() {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct SingleTuple(
     #[backwards_compat(versions(
-        #[with(widen_u16_to_u32)] 1: u16,
+        #[migrate(with = widen_u16_to_u32)] 1: u16,
         2: Self,
     ))]
     u32,
@@ -518,7 +518,7 @@ struct SingleTuple(
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct MultiTuple(
     #[backwards_compat(versions(
-        #[with(widen_u16_to_u32)] 1: u16,
+        #[migrate(with = widen_u16_to_u32)] 1: u16,
         2: Self,
     ))]
     u32,
@@ -550,7 +550,7 @@ impl From<Mode3TupleV1> for Mode3SingleTuple {
 #[derive(Debug, PartialEq, Eq)]
 struct Mode3SingleTuple(
     #[backwards_compat(versions(
-        #[with(widen_u16_to_u32)] 1: u16,
+        #[migrate(with = widen_u16_to_u32)] 1: u16,
         2: Self,
     ))]
     u32,
@@ -625,7 +625,7 @@ struct ServerOuterV1 {
 struct ServerOuter {
     name: String,
     #[backwards_compat(versions(
-        #[with(widen_u16_to_u32)] 1: u16,
+        #[migrate(with = widen_u16_to_u32)] 1: u16,
         2: Self,
     ))]
     port: u32,
@@ -664,7 +664,7 @@ enum OuterEnum {
     },
     Disconnect(
         #[backwards_compat(versions(
-            #[with(widen_u16_to_u32)] 1: u16,
+            #[migrate(with = widen_u16_to_u32)] 1: u16,
             2: Self,
         ))]
         u32,
@@ -831,7 +831,7 @@ struct FeatureMatrix<T: Clone> {
         content = "val",
         versions(
             #[cfg(any())] 0: String,
-            #[cfg(test)] #[with(widen_u16_to_u32)] 1 | 10: u16,
+            #[cfg(test)] #[migrate(with = widen_u16_to_u32)] 1 | 10: u16,
             2 | 20: Self,
         )
     )]
@@ -839,8 +839,8 @@ struct FeatureMatrix<T: Clone> {
 
     // DAG => jumps
     #[backwards_compat(versions(
-        #[with(dag_jump_v1)] 1: u8 => Self,
-        #[with(dag_jump_v2)] 2: u16 => Self,
+        #[migrate(with = dag_jump_v1)] 1: u8 => Self,
+        #[migrate(with = dag_jump_v2)] 2: u16 => Self,
         3: Self,
     ))]
     dag_field: u64,
@@ -855,15 +855,15 @@ struct FeatureMatrix<T: Clone> {
 
     // Single _ untagged entry (e.g. raw unversioned u16)
     #[backwards_compat(versions(
-        #[with(widen_u16_to_u32)] _: u16,
+        #[migrate(with = widen_u16_to_u32)] _: u16,
         1: Self,
     ))]
     single_untagged: u32,
 
     // Multiple _ untagged entries tried in declaration order
     #[backwards_compat(versions(
-        #[with(sum_legacy_pair)] _: LegacyPair => Self,
-        #[fallible] #[with(u64_from_str)] _: String => Self,
+        #[migrate(with = sum_legacy_pair)] _: LegacyPair => Self,
+        #[migrate(try_with = u64_from_str)] _: String => Self,
         1: Self,
     ))]
     multi_untagged: u64,
@@ -871,7 +871,7 @@ struct FeatureMatrix<T: Clone> {
     // Composing with #[serde(default = ...)] and #[serde(rename = "...")]
     #[serde(default = "default_renamed_count", rename = "itemCount")]
     #[backwards_compat(versions(
-        #[with(widen_u16_to_u32)] 1: u16,
+        #[migrate(with = widen_u16_to_u32)] 1: u16,
         2: Self,
     ))]
     count: u32,
@@ -1004,7 +1004,7 @@ fn test_function_local_struct_and_local_with_fn() {
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     struct LocalConfig {
         #[backwards_compat(versions(
-            #[with(double_u16)] 1: u16,
+            #[migrate(with = double_u16)] 1: u16,
             2: Self,
         ))]
         limit: u32,
@@ -1027,7 +1027,7 @@ fn test_function_local_struct_and_local_with_fn() {
 struct MultiFormatDoc {
     title: String,
     #[backwards_compat(versions(
-        #[with(widen_u16_to_u32)] 1: u16,
+        #[migrate(with = widen_u16_to_u32)] 1: u16,
         2: Self,
     ))]
     timeout_ms: u32,
@@ -1130,7 +1130,7 @@ struct BareWithSiblingSerde {
     )]
     tags_split: Vec<u32>,
     #[backwards_compat(versions(
-        #[with(widen_u16_to_u32)] 1: u16,
+        #[migrate(with = widen_u16_to_u32)] 1: u16,
         2: Self,
     ))]
     port: u32,
@@ -1145,7 +1145,7 @@ struct CombinedWithSiblingSerde {
     )]
     tags: Vec<u32>,
     #[backwards_compat(versions(
-        #[with(widen_u16_to_u32)] 1: u16,
+        #[migrate(with = widen_u16_to_u32)] 1: u16,
         2: Self,
     ))]
     port: u32,
@@ -1190,7 +1190,7 @@ fn test_sibling_serde_with_serialize_deserialize_with_coexistence() {
 struct FieldExternalConfig {
     name: String,
     #[backwards_compat(external, versions(
-        #[with(widen_u16_to_u32)] 1 | 10: u16,
+        #[migrate(with = widen_u16_to_u32)] 1 | 10: u16,
         2: Self,
     ))]
     port: u32,

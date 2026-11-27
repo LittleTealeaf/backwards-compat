@@ -17,6 +17,8 @@ pub struct ViaArgs {
     pub from_fn: Option<ExprPath>,
     pub to_fn: Option<ExprPath>,
     pub dump: bool,
+    pub serialize: bool,
+    pub deserialize: bool,
 }
 
 fn reject_flag_value(input: ParseStream<'_>, flag_name: &str) -> syn::Result<()> {
@@ -93,12 +95,20 @@ impl Parse for ViaArgs {
         let mut proxy_ty: Option<Type> = None;
         let mut try_from = false;
         let mut try_into = false;
-        let mut seen_try_from = false;
-        let mut seen_try_into = false;
-        let mut seen_fallible = false;
+        let mut try_from_span = None;
+        let mut try_into_span = None;
+        let mut try_from_has_fn = false;
+        let mut try_into_has_fn = false;
+        let mut fallible_span = None;
         let mut from_fn: Option<ExprPath> = None;
+        let mut from_fn_span = None;
         let mut to_fn: Option<ExprPath> = None;
+        let mut to_fn_span = None;
         let mut dump = false;
+        let mut serialize = true;
+        let mut serialize_span = None;
+        let mut deserialize = true;
+        let mut deserialize_span = None;
 
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
@@ -113,74 +123,128 @@ impl Parse for ViaArgs {
                     proxy_ty = Some(parse_via_type_option(input, ident.span())?);
                 }
                 "try_from" => {
-                    reject_flag_value(input, "try_from")?;
-                    if seen_fallible {
+                    if fallible_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "`try_from` cannot be combined with `fallible` (which already enables both `try_from` and `try_into`)",
                         ));
                     }
-                    if seen_try_from {
+                    if try_from_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "duplicate `try_from` option in #[backwards_compat(...)]",
                         ));
                     }
-                    seen_try_from = true;
+                    if input.peek(Token![=]) || input.peek(syn::token::Paren) {
+                        let path = parse_fn_path_option(input, "try_from", ident.span())?;
+                        if from_fn_span.is_some() {
+                            return Err(syn::Error::new(
+                                ident.span(),
+                                "`from` cannot be combined with `try_from = <path>`",
+                            ));
+                        }
+                        from_fn = Some(path);
+                        try_from_has_fn = true;
+                    }
+                    try_from_span = Some(ident.span());
                     try_from = true;
                 }
                 "try_into" => {
-                    reject_flag_value(input, "try_into")?;
-                    if seen_fallible {
+                    if fallible_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "`try_into` cannot be combined with `fallible` (which already enables both `try_from` and `try_into`)",
                         ));
                     }
-                    if seen_try_into {
+                    if try_into_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "duplicate `try_into` option in #[backwards_compat(...)]",
                         ));
                     }
-                    seen_try_into = true;
+                    if input.peek(Token![=]) || input.peek(syn::token::Paren) {
+                        let path = parse_fn_path_option(input, "try_into", ident.span())?;
+                        if to_fn_span.is_some() {
+                            return Err(syn::Error::new(
+                                ident.span(),
+                                "`to` cannot be combined with `try_into = <path>`",
+                            ));
+                        }
+                        to_fn = Some(path);
+                        try_into_has_fn = true;
+                    }
+                    try_into_span = Some(ident.span());
                     try_into = true;
                 }
                 "fallible" => {
                     reject_flag_value(input, "fallible")?;
-                    if seen_fallible {
+                    if fallible_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "duplicate `fallible` option in #[backwards_compat(...)]",
                         ));
                     }
-                    if seen_try_from || seen_try_into {
+                    if try_from_span.is_some() || try_into_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "`fallible` cannot be combined with `try_from` or `try_into`",
                         ));
                     }
-                    seen_fallible = true;
+                    fallible_span = Some(ident.span());
                     try_from = true;
                     try_into = true;
                 }
                 "from" => {
-                    if from_fn.is_some() {
+                    if try_from_has_fn {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "`from` cannot be combined with `try_from = <path>`",
+                        ));
+                    }
+                    if from_fn_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "duplicate `from` option in #[backwards_compat(...)]",
                         ));
                     }
                     from_fn = Some(parse_fn_path_option(input, "from", ident.span())?);
+                    from_fn_span = Some(ident.span());
                 }
                 "to" => {
-                    if to_fn.is_some() {
+                    if try_into_has_fn {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "`to` cannot be combined with `try_into = <path>`",
+                        ));
+                    }
+                    if to_fn_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "duplicate `to` option in #[backwards_compat(...)]",
                         ));
                     }
                     to_fn = Some(parse_fn_path_option(input, "to", ident.span())?);
+                    to_fn_span = Some(ident.span());
+                }
+                "serialize" => {
+                    if serialize_span.is_some() {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "duplicate `serialize` option in #[backwards_compat(...)]",
+                        ));
+                    }
+                    serialize = crate::parse::parse_bool_option(input, "serialize", ident.span())?;
+                    serialize_span = Some(ident.span());
+                }
+                "deserialize" => {
+                    if deserialize_span.is_some() {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "duplicate `deserialize` option in #[backwards_compat(...)]",
+                        ));
+                    }
+                    deserialize = crate::parse::parse_bool_option(input, "deserialize", ident.span())?;
+                    deserialize_span = Some(ident.span());
                 }
                 "dump" => {
                     reject_flag_value(input, "dump")?;
@@ -202,7 +266,7 @@ impl Parse for ViaArgs {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
-                            "unknown option `{other}` in #[backwards_compat(via = ...)]; expected one of: `via`, `try_from`, `try_into`, `fallible`, `from`, `to`, `dump`"
+                            "unknown option `{other}` in #[backwards_compat(via = ...)]; expected one of: `via`, `try_from`, `try_into`, `fallible`, `from`, `to`, `serialize`, `deserialize`, `dump`"
                         ),
                     ));
                 }
@@ -220,6 +284,55 @@ impl Parse for ViaArgs {
             ));
         };
 
+        if !serialize && !deserialize {
+            let span = serialize_span
+                .or(deserialize_span)
+                .unwrap_or_else(proc_macro2::Span::call_site);
+            return Err(syn::Error::new(
+                span,
+                "cannot disable both `serialize` and `deserialize` in `#[backwards_compat(...)]`; at least one must be enabled",
+            ));
+        }
+
+        if !serialize {
+            if let Some(span) = to_fn_span {
+                return Err(syn::Error::new(span, "cannot use `to` when `serialize = false`"));
+            }
+            if let Some(span) = try_into_span {
+                return Err(syn::Error::new(
+                    span,
+                    "cannot use `try_into` when `serialize = false`",
+                ));
+            }
+            if let Some(span) = fallible_span {
+                return Err(syn::Error::new(
+                    span,
+                    "cannot use `fallible` when `serialize = false`; use `try_from` instead",
+                ));
+            }
+        }
+
+        if !deserialize {
+            if let Some(span) = from_fn_span {
+                return Err(syn::Error::new(
+                    span,
+                    "cannot use `from` when `deserialize = false`",
+                ));
+            }
+            if let Some(span) = try_from_span {
+                return Err(syn::Error::new(
+                    span,
+                    "cannot use `try_from` when `deserialize = false`",
+                ));
+            }
+            if let Some(span) = fallible_span {
+                return Err(syn::Error::new(
+                    span,
+                    "cannot use `fallible` when `deserialize = false`; use `try_into` instead",
+                ));
+            }
+        }
+
         Ok(Self {
             proxy_ty,
             try_from,
@@ -227,6 +340,8 @@ impl Parse for ViaArgs {
             from_fn,
             to_fn,
             dump,
+            serialize,
+            deserialize,
         })
     }
 }
@@ -259,91 +374,160 @@ pub fn generate_via(
         .predicates
         .push(syn::parse_quote!(#proxy_ty: ::backwards_compat::BackwardsCompat));
 
-    let mut de_generics = generics.clone();
-    let lifetime_idents: Vec<_> = generics.lifetimes().map(|lt| &lt.lifetime).collect();
-    let de_lifetime: syn::GenericParam = if lifetime_idents.is_empty() {
-        syn::parse_quote!('__de)
-    } else {
-        syn::parse_quote!('__de: #(#lifetime_idents)+*)
-    };
-    de_generics.params.insert(0, de_lifetime);
-    let (de_impl_generics, _, de_orig_where_clause) = de_generics.split_for_impl();
-
-    let mut de_where_clause = make_where_clause(de_orig_where_clause);
-    de_where_clause.predicates.push(syn::parse_quote!(
-        #proxy_ty: ::backwards_compat::BackwardsCompatDeserialize<'__de>
-    ));
-    if args.from_fn.is_none() {
-        if args.try_from {
-            de_where_clause.predicates.push(syn::parse_quote!(
-                Self: ::core::convert::TryFrom<#proxy_ty>
-            ));
-            de_where_clause.predicates.push(syn::parse_quote!(
-                <Self as ::core::convert::TryFrom<#proxy_ty>>::Error: ::core::fmt::Display
-            ));
+    let deserialize_impls = if args.deserialize {
+        let mut de_generics = generics.clone();
+        let lifetime_idents: Vec<_> = generics.lifetimes().map(|lt| &lt.lifetime).collect();
+        let de_lifetime: syn::GenericParam = if lifetime_idents.is_empty() {
+            syn::parse_quote!('__de)
         } else {
-            de_where_clause.predicates.push(syn::parse_quote!(
-                Self: ::core::convert::From<#proxy_ty>
-            ));
+            syn::parse_quote!('__de: #(#lifetime_idents)+*)
+        };
+        de_generics.params.insert(0, de_lifetime);
+        let (de_impl_generics, _, de_orig_where_clause) = de_generics.split_for_impl();
+
+        let mut de_where_clause = make_where_clause(de_orig_where_clause);
+        de_where_clause.predicates.push(syn::parse_quote!(
+            #proxy_ty: ::backwards_compat::BackwardsCompatDeserialize<'__de>
+        ));
+        if args.from_fn.is_none() {
+            if args.try_from {
+                de_where_clause.predicates.push(syn::parse_quote!(
+                    Self: ::core::convert::TryFrom<#proxy_ty>
+                ));
+                de_where_clause.predicates.push(syn::parse_quote!(
+                    <Self as ::core::convert::TryFrom<#proxy_ty>>::Error: ::core::fmt::Display
+                ));
+            } else {
+                de_where_clause.predicates.push(syn::parse_quote!(
+                    Self: ::core::convert::From<#proxy_ty>
+                ));
+            }
         }
-    }
 
-    let from_expr = match (&args.from_fn, args.try_from) {
-        (None, false) => quote::quote! {
-            <Self as ::core::convert::From<#proxy_ty>>::from(__migrated.value)
-        },
-        (None, true) => quote::quote! {
-            <Self as ::core::convert::TryFrom<#proxy_ty>>::try_from(__migrated.value)
-                .map_err(::serde::de::Error::custom)?
-        },
-        (Some(fn_path), false) => quote::quote! {
-            (#fn_path)(__migrated.value)
-        },
-        (Some(fn_path), true) => quote::quote! {
-            (#fn_path)(__migrated.value)
-                .map_err(::serde::de::Error::custom)?
-        },
+        let from_expr = match (&args.from_fn, args.try_from) {
+            (None, false) => quote::quote! {
+                <Self as ::core::convert::From<#proxy_ty>>::from(__migrated.value)
+            },
+            (None, true) => quote::quote! {
+                <Self as ::core::convert::TryFrom<#proxy_ty>>::try_from(__migrated.value)
+                    .map_err(::serde::de::Error::custom)?
+            },
+            (Some(fn_path), false) => quote::quote! {
+                (#fn_path)(__migrated.value)
+            },
+            (Some(fn_path), true) => quote::quote! {
+                (#fn_path)(__migrated.value)
+                    .map_err(::serde::de::Error::custom)?
+            },
+        };
+
+        quote::quote! {
+            impl #de_impl_generics ::backwards_compat::BackwardsCompatDeserialize<'__de> for #target_ty #de_where_clause {
+                fn deserialize_migrated<__D>(
+                    __deserializer: __D,
+                ) -> ::core::result::Result<::backwards_compat::Migrated<Self>, __D::Error>
+                where
+                    __D: ::serde::Deserializer<'__de>,
+                {
+                    let __migrated = <#proxy_ty as ::backwards_compat::BackwardsCompatDeserialize<'__de>>::deserialize_migrated(__deserializer)?;
+                    let __value = #from_expr;
+                    ::core::result::Result::Ok(::backwards_compat::Migrated {
+                        value: __value,
+                        source_version: __migrated.source_version,
+                    })
+                }
+            }
+
+            impl #de_impl_generics ::serde::Deserialize<'__de> for #target_ty #de_where_clause {
+                fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
+                where
+                    __D: ::serde::Deserializer<'__de>,
+                {
+                    <Self as ::backwards_compat::BackwardsCompatDeserialize<'__de>>::deserialize_migrated(__deserializer)
+                        .map(::backwards_compat::Migrated::into_inner)
+                }
+            }
+        }
+    } else {
+        proc_macro2::TokenStream::new()
     };
 
-    let mut ser_where_clause = make_where_clause(where_clause);
-    ser_where_clause
-        .predicates
-        .push(syn::parse_quote!(#proxy_ty: ::serde::Serialize));
+    let serialize_impls = if args.serialize {
+        let mut ser_where_clause = make_where_clause(where_clause);
+        ser_where_clause
+            .predicates
+            .push(syn::parse_quote!(#proxy_ty: ::serde::Serialize));
 
-    let to_proxy_stmt = match (&args.to_fn, args.try_into) {
-        (None, false) => quote::quote! {
-            #[allow(unused_imports)]
-            use ::backwards_compat::__private::{
-                BorrowedWireConvert as _,
-                FallbackWireConvert as _,
-                WireConvert as __WireConvert,
-            };
-            let __proxy: #proxy_ty = __WireConvert::<_, #proxy_ty>::new(self).convert_wire();
-        },
-        (None, true) => quote::quote! {
-            #[allow(unused_imports)]
-            use ::backwards_compat::__private::{
-                BorrowedTryWireConvert as _,
-                FallbackTryWireConvert as _,
-                TryWireConvert as __TryWireConvert,
-            };
-            let __proxy: #proxy_ty = __TryWireConvert::<_, #proxy_ty>::new(self)
-                .try_convert_wire()
-                .map_err(::serde::ser::Error::custom)?;
-        },
-        (Some(fn_path), false) => quote::quote! {
-            let __proxy: #proxy_ty = (#fn_path)(self);
-        },
-        (Some(fn_path), true) => quote::quote! {
-            let __proxy: #proxy_ty = (#fn_path)(self)
-                .map_err(::serde::ser::Error::custom)?;
-        },
+        let to_proxy_stmt = match (&args.to_fn, args.try_into) {
+            (None, false) => quote::quote! {
+                #[allow(unused_imports)]
+                use ::backwards_compat::__private::{
+                    BorrowedWireConvert as _,
+                    FallbackWireConvert as _,
+                    WireConvert as __WireConvert,
+                };
+                let __proxy: #proxy_ty = __WireConvert::<_, #proxy_ty>::new(self).convert_wire();
+            },
+            (None, true) => quote::quote! {
+                #[allow(unused_imports)]
+                use ::backwards_compat::__private::{
+                    BorrowedTryWireConvert as _,
+                    FallbackTryWireConvert as _,
+                    TryWireConvert as __TryWireConvert,
+                };
+                let __proxy: #proxy_ty = __TryWireConvert::<_, #proxy_ty>::new(self)
+                    .try_convert_wire()
+                    .map_err(::serde::ser::Error::custom)?;
+            },
+            (Some(fn_path), false) => quote::quote! {
+                let __proxy: #proxy_ty = (#fn_path)(self);
+            },
+            (Some(fn_path), true) => quote::quote! {
+                let __proxy: #proxy_ty = (#fn_path)(self)
+                    .map_err(::serde::ser::Error::custom)?;
+            },
+        };
+
+        let mut ser_as_where_clause = make_where_clause(where_clause);
+        ser_as_where_clause
+            .predicates
+            .push(syn::parse_quote!(#proxy_ty: ::backwards_compat::BackwardsCompatSerialize));
+
+        quote::quote! {
+            impl #impl_generics ::serde::Serialize for #target_ty #ser_where_clause {
+                fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
+                where
+                    __S: ::serde::Serializer,
+                {
+                    #to_proxy_stmt
+                    ::serde::Serialize::serialize(&__proxy, __serializer)
+                }
+            }
+
+            impl #impl_generics ::backwards_compat::BackwardsCompatSerialize for #target_ty #ser_as_where_clause {
+                const SERIALIZABLE_VERSIONS: &'static [Self::Version] =
+                    <#proxy_ty as ::backwards_compat::BackwardsCompatSerialize>::SERIALIZABLE_VERSIONS;
+
+                fn serialize_as_version<__S>(
+                    &self,
+                    __version: Self::Version,
+                    __serializer: __S,
+                ) -> ::core::result::Result<__S::Ok, __S::Error>
+                where
+                    __S: ::serde::Serializer,
+                {
+                    #to_proxy_stmt
+                    <#proxy_ty as ::backwards_compat::BackwardsCompatSerialize>::serialize_as_version(
+                        &__proxy,
+                        __version,
+                        __serializer,
+                    )
+                }
+            }
+        }
+    } else {
+        proc_macro2::TokenStream::new()
     };
-
-    let mut ser_as_where_clause = make_where_clause(where_clause);
-    ser_as_where_clause
-        .predicates
-        .push(syn::parse_quote!(#proxy_ty: ::backwards_compat::BackwardsCompatSerialize));
 
     #[cfg(feature = "schemars")]
     let json_schema_impl = if derive_json_schema {
@@ -389,62 +573,9 @@ pub fn generate_via(
                 const TAGGING: ::backwards_compat::Tagging = <#proxy_ty as ::backwards_compat::BackwardsCompat>::TAGGING;
             }
 
-            impl #de_impl_generics ::backwards_compat::BackwardsCompatDeserialize<'__de> for #target_ty #de_where_clause {
-                fn deserialize_migrated<__D>(
-                    __deserializer: __D,
-                ) -> ::core::result::Result<::backwards_compat::Migrated<Self>, __D::Error>
-                where
-                    __D: ::serde::Deserializer<'__de>,
-                {
-                    let __migrated = <#proxy_ty as ::backwards_compat::BackwardsCompatDeserialize<'__de>>::deserialize_migrated(__deserializer)?;
-                    let __value = #from_expr;
-                    ::core::result::Result::Ok(::backwards_compat::Migrated {
-                        value: __value,
-                        source_version: __migrated.source_version,
-                    })
-                }
-            }
+            #deserialize_impls
 
-            impl #de_impl_generics ::serde::Deserialize<'__de> for #target_ty #de_where_clause {
-                fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
-                where
-                    __D: ::serde::Deserializer<'__de>,
-                {
-                    <Self as ::backwards_compat::BackwardsCompatDeserialize<'__de>>::deserialize_migrated(__deserializer)
-                        .map(::backwards_compat::Migrated::into_inner)
-                }
-            }
-
-            impl #impl_generics ::serde::Serialize for #target_ty #ser_where_clause {
-                fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
-                where
-                    __S: ::serde::Serializer,
-                {
-                    #to_proxy_stmt
-                    ::serde::Serialize::serialize(&__proxy, __serializer)
-                }
-            }
-
-            impl #impl_generics ::backwards_compat::BackwardsCompatSerialize for #target_ty #ser_as_where_clause {
-                const SERIALIZABLE_VERSIONS: &'static [Self::Version] =
-                    <#proxy_ty as ::backwards_compat::BackwardsCompatSerialize>::SERIALIZABLE_VERSIONS;
-
-                fn serialize_as_version<__S>(
-                    &self,
-                    __version: Self::Version,
-                    __serializer: __S,
-                ) -> ::core::result::Result<__S::Ok, __S::Error>
-                where
-                    __S: ::serde::Serializer,
-                {
-                    #to_proxy_stmt
-                    <#proxy_ty as ::backwards_compat::BackwardsCompatSerialize>::serialize_as_version(
-                        &__proxy,
-                        __version,
-                        __serializer,
-                    )
-                }
-            }
+            #serialize_impls
 
             #json_schema_impl
         };
@@ -647,7 +778,7 @@ mod tests {
             parse_err("via = Proxy, to(my_fn, extra)").contains("unexpected trailing tokens in `to(...)`")
         );
 
-        for flag in ["try_from", "try_into", "fallible", "dump"] {
+        for flag in ["fallible", "dump"] {
             let eq_err = parse_err(&format!("via = Proxy, {flag} = true"));
             assert!(
                 eq_err.contains(&format!("`{flag}` does not take a value")),

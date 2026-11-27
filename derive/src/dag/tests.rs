@@ -503,8 +503,6 @@ fn test_dag_fallible_on_later_gated_duplicate_type_does_not_leak_to_unconditiona
 
 #[test]
 fn test_dag_serialize_on_older_version_and_with_fn() {
-    use quote::ToTokens as _;
-
     // Bare #[serialize] on older version
     let args1: BackwardsCompatArgs = syn::parse2(quote::quote! {
         versions = [
@@ -522,7 +520,7 @@ fn test_dag_serialize_on_older_version_and_with_fn() {
     assert_eq!(plan1.serialize_wire_ty, v2);
     assert!(!plan1.serialize_target_is_wire);
     assert!(!plan1.target_is_wire);
-    assert!(plan1.serialize_with_fn.is_none());
+    assert_eq!(plan1.serialize_mode, crate::parse::SerializeConvertMode::Into);
 
     // #[serialize(with = to_v2)] on older version
     let args2: BackwardsCompatArgs = syn::parse2(quote::quote! {
@@ -540,13 +538,8 @@ fn test_dag_serialize_on_older_version_and_with_fn() {
     assert_eq!(plan2.serialize_wire_ty, v2);
     assert!(!plan2.serialize_target_is_wire);
     assert_eq!(
-        plan2
-            .serialize_with_fn
-            .as_ref()
-            .unwrap()
-            .to_token_stream()
-            .to_string(),
-        "to_v2"
+        plan2.serialize_mode,
+        crate::parse::SerializeConvertMode::With(parse_quote!(to_v2))
     );
 }
 
@@ -1416,4 +1409,85 @@ fn test_dag_explicit_type_untagged_leading_pipe_alias_group() {
             ("V3".into(), "Target".into()),
         ]
     );
+}
+
+#[test]
+fn test_dag_deserialize_false_allows_unconditional_before_cfg_gated_version() {
+    // When `deserialize = false`, migration paths are not used, so an unconditional
+    // historical entry followed by a `#[cfg(...)]`-gated entry must succeed.
+    let plan = resolve_tokens(
+        quote::quote! {
+            deserialize = false,
+            versions = [
+                #[serializable] 1: V1,
+                #[cfg(feature = "v2")]
+                #[serializable] 2: V2,
+                3: Self,
+            ]
+        },
+        parse_quote!(Target),
+    )
+    .unwrap();
+
+    assert!(plan.target_is_wire);
+    assert!(plan.serialize_target_is_wire);
+    assert_eq!(plan.serialize_wire_ty, parse_quote!(Target));
+    assert_eq!(plan.serialize_mode, crate::parse::SerializeConvertMode::Into);
+    assert_eq!(plan.paths.len(), 3);
+    assert!(plan.paths[0].cfg.is_none());
+    assert_eq!(
+        plan.paths[1].cfg.as_ref().unwrap().to_string(),
+        quote::quote!(feature = "v2").to_string()
+    );
+    assert!(plan.paths[2].cfg.is_none());
+
+    // Also verify `#[serialize(with = ...)]` on an unconditional entry before a gated entry.
+    let plan_ser = resolve_tokens(
+        quote::quote! {
+            deserialize = false,
+            versions = [
+                #[serialize(with = to_v1)] 1: V1,
+                #[cfg(feature = "v2")]
+                #[serializable] 2: V2,
+                #[current] 3: Self,
+            ]
+        },
+        parse_quote!(Target),
+    )
+    .unwrap();
+
+    assert!(plan_ser.target_is_wire);
+    assert!(!plan_ser.serialize_target_is_wire);
+    assert_eq!(plan_ser.serialize_wire_ty, parse_quote!(V1));
+    assert_eq!(
+        plan_ser.serialize_mode,
+        crate::parse::SerializeConvertMode::With(parse_quote!(to_v1))
+    );
+
+    // With `deserialize = true` (explicitly or by default), the same layout is rejected.
+    for tokens in [
+        quote::quote! {
+            deserialize = true,
+            versions = [
+                #[serializable] 1: V1,
+                #[cfg(feature = "v2")]
+                #[serializable] 2: V2,
+                3: Self,
+            ]
+        },
+        quote::quote! {
+            versions = [
+                #[serializable] 1: V1,
+                #[cfg(feature = "v2")]
+                #[serializable] 2: V2,
+                3: Self,
+            ]
+        },
+    ] {
+        let err = resolve_tokens(tokens, parse_quote!(Target)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unconditional version `1` cannot migrate through conditionally compiled version `2`; add `#[cfg(...)]` or use an explicit `=>` transition to an unconditional target"
+        );
+    }
 }

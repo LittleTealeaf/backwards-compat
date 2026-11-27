@@ -509,7 +509,7 @@ fn widen_port(p: u16) -> u32 {
 pub struct FieldAdjContainer {
     pub label: String,
     #[backwards_compat(versions(
-        #[with(widen_port)] 1: u16,
+        #[migrate(with = widen_port)] 1: u16,
         2: Self,
     ))]
     pub port: u32,
@@ -525,7 +525,7 @@ pub struct FieldAdjContainer {
 pub struct FieldExtContainer {
     pub label: String,
     #[backwards_compat(external, versions(
-        #[with(widen_port)] 1: u16,
+        #[migrate(with = widen_port)] 1: u16,
         2: Self,
     ))]
     pub port: u32,

@@ -47,7 +47,7 @@ pub struct SerializedTournament {
         5: V5Tournament => 6,
         6: V6Tournament => 7,
         #[current]
-        #[fallible]
+        #[migrate(try_from)]
         7: SerializedTournament,
     ]
 )]
@@ -380,7 +380,7 @@ impl From<DupGatedTarget> for DupWireV2 {
     versions = [
         1: SharedV1 => 3,
         #[cfg(any())]
-        #[fallible]
+        #[migrate(try_from)]
         2: SharedV1 => 3,
         3: DupWireV2,
     ]

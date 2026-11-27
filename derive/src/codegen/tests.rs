@@ -741,7 +741,7 @@ fn test_generate_backwards_compat_dump_string_shadow_and_missing_shadow_guards()
         ]
     });
     ser_with_guard_input.serialize_version = crate::parse::VersionTag::Int(99);
-    ser_with_guard_input.serialize_with_fn = Some(syn::parse_quote!(my_ser));
+    ser_with_guard_input.serialize_mode = crate::parse::SerializeConvertMode::With(syn::parse_quote!(my_ser));
     let err_ser_with_guard =
         generate_for_test(&ser_with_guard_input, SelfWireMode::Disallowed, None).unwrap_err();
     assert!(
@@ -992,4 +992,349 @@ fn test_generate_backwards_compat_external_generic_cfg_arm_trait() {
     assert!(rendered.contains("trait __BcSerArm_0"));
     assert!(!rendered.contains("deserialize_any"));
     syn::parse2::<syn::File>(generated).unwrap();
+}
+
+#[test]
+fn test_generate_backwards_compat_serialize_false_all_taggings() {
+    for tokens in [
+        quote! {
+            serialize = false,
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2,
+            ]
+        },
+        quote! {
+            serialize = false,
+            tag = "ver",
+            content = "data",
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2,
+            ]
+        },
+        quote! {
+            serialize = false,
+            external,
+            versions = [
+                1: ModelV1 => 2,
+                2: ModelV2,
+            ]
+        },
+    ] {
+        let input = parse_test_input(tokens);
+        let generated = generate_for_test(&input, SelfWireMode::Disallowed, None).unwrap();
+        let rendered = generated.to_string();
+
+        assert!(!rendered.contains("impl :: serde :: Serialize"));
+        assert!(!rendered.contains("BackwardsCompatSerialize"));
+        assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompat for TargetModel"));
+        assert!(rendered.contains("impl < '__de > :: serde :: Deserialize < '__de > for TargetModel"));
+        assert!(rendered.contains(
+            "impl < '__de > :: backwards_compat :: BackwardsCompatDeserialize < '__de > for TargetModel"
+        ));
+        syn::parse2::<syn::File>(generated).unwrap();
+    }
+}
+
+#[test]
+fn test_generate_backwards_compat_deserialize_false_all_taggings() {
+    for tokens in [
+        quote! {
+            deserialize = false,
+            versions = [
+                #[serializable] 1: ModelV1,
+                2: ModelV2,
+            ]
+        },
+        quote! {
+            deserialize = false,
+            tag = "ver",
+            content = "data",
+            versions = [
+                #[serializable] 1: ModelV1,
+                2: ModelV2,
+            ]
+        },
+        quote! {
+            deserialize = false,
+            external,
+            versions = [
+                #[serializable] 1: ModelV1,
+                2: ModelV2,
+            ]
+        },
+    ] {
+        let input = parse_test_input(tokens);
+        let generated = generate_for_test(&input, SelfWireMode::Disallowed, None).unwrap();
+        let rendered = generated.to_string();
+
+        assert!(!rendered.contains("impl < '__de > :: serde :: Deserialize"));
+        assert!(!rendered.contains("BackwardsCompatDeserialize"));
+        assert!(!rendered.contains("__BcVisitor"));
+        assert!(rendered.contains("const ACCEPTS_UNTAGGED : bool = false ;"));
+        assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompat for TargetModel"));
+        assert!(rendered.contains("impl :: serde :: Serialize for TargetModel"));
+        assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompatSerialize for TargetModel"));
+        syn::parse2::<syn::File>(generated).unwrap();
+    }
+}
+
+#[cfg(feature = "schemars")]
+#[test]
+fn test_generate_backwards_compat_schemars_with_serialize_or_deserialize_false() {
+    let owned_shadow = format_ident!("TargetModelWire");
+    let borrowed_shadow = format_ident!("TargetModelBorrowedWire");
+    let shadow_info = ShadowWireInfo {
+        owned_ident: &owned_shadow,
+        borrowed_ident: &borrowed_shadow,
+        borrowed_ty_in_helper: quote!(TargetModelBorrowedWire<'__a>),
+        construct_borrowed: quote!(TargetModelBorrowedWire {}),
+        is_unit_struct: false,
+    };
+
+    // serialize = false with JsonSchema
+    let de_only = parse_test_input(quote! {
+        serialize = false,
+        versions = [
+            1: ModelV1 => 2,
+            2: Self,
+        ]
+    });
+    let de_plan = resolve_dag(&de_only).unwrap();
+    let de_gen =
+        generate_backwards_compat(&de_only, &de_plan, SelfWireMode::Shadow(&shadow_info), None, true)
+            .unwrap();
+    let de_rendered = de_gen.to_string();
+    assert!(
+        de_rendered
+            .contains("impl :: backwards_compat :: __private :: schemars :: JsonSchema for TargetModel")
+    );
+    assert!(!de_rendered.contains("impl :: serde :: Serialize"));
+    assert!(de_rendered.contains("impl < '__de > :: serde :: Deserialize < '__de > for TargetModel"));
+    syn::parse2::<syn::File>(de_gen).unwrap();
+
+    // deserialize = false with JsonSchema
+    let ser_only = parse_test_input(quote! {
+        deserialize = false,
+        versions = [
+            #[serializable] 1: ModelV1,
+            2: Self,
+        ]
+    });
+    let ser_plan = resolve_dag(&ser_only).unwrap();
+    let ser_gen = generate_backwards_compat(
+        &ser_only,
+        &ser_plan,
+        SelfWireMode::Shadow(&shadow_info),
+        None,
+        true,
+    )
+    .unwrap();
+    let ser_rendered = ser_gen.to_string();
+    assert!(
+        ser_rendered
+            .contains("impl :: backwards_compat :: __private :: schemars :: JsonSchema for TargetModel")
+    );
+    assert!(ser_rendered.contains("impl :: serde :: Serialize for TargetModel"));
+    assert!(!ser_rendered.contains("impl < '__de > :: serde :: Deserialize"));
+    assert!(!ser_rendered.contains("__BcVisitor"));
+    syn::parse2::<syn::File>(ser_gen).unwrap();
+}
+
+#[test]
+fn test_generate_backwards_compat_deserialize_false_unconditional_before_cfg_not_gated() {
+    let owned_shadow = format_ident!("TargetModelWire");
+    let borrowed_shadow = format_ident!("TargetModelBorrowedWire");
+    let shadow_info = ShadowWireInfo {
+        owned_ident: &owned_shadow,
+        borrowed_ident: &borrowed_shadow,
+        borrowed_ty_in_helper: quote!(TargetModelBorrowedWire<'__a>),
+        construct_borrowed: quote!(TargetModelBorrowedWire {}),
+        is_unit_struct: false,
+    };
+
+    // Internal tagging
+    let internal = parse_test_input(quote! {
+        deserialize = false,
+        versions = [
+            #[serializable] 1: ModelV1,
+            #[cfg(feature = "v2")]
+            #[serializable] 2: ModelV2,
+            3: Self,
+        ]
+    });
+    let internal_gen = generate_for_test(&internal, SelfWireMode::Shadow(&shadow_info), None).unwrap();
+    let internal_rendered = internal_gen.to_string();
+    assert!(
+        internal_rendered.contains(
+            "const SUPPORTED_VERSIONS : & 'static [Self :: Version] = & [1u64 , # [cfg (feature = \"v2\")] 2u64 , 3u64 ,] ;"
+        ),
+        "unexpected internal SUPPORTED_VERSIONS: {internal_rendered}"
+    );
+    assert!(!internal_rendered.contains("# [cfg (feature = \"v2\")] 1u64"));
+    syn::parse2::<syn::File>(internal_gen).unwrap();
+
+    // External tagging
+    let external = parse_test_input(quote! {
+        deserialize = false,
+        external,
+        versions = [
+            #[serializable] 1: ModelV1,
+            #[cfg(feature = "v2")]
+            #[serializable] 2: ModelV2,
+            3: Self,
+        ]
+    });
+    let external_gen = generate_for_test(&external, SelfWireMode::Shadow(&shadow_info), None).unwrap();
+    let external_rendered = external_gen.to_string();
+    assert!(
+        external_rendered.contains(
+            "const SUPPORTED_VERSIONS : & 'static [Self :: Version] = & [1u64 , # [cfg (feature = \"v2\")] 2u64 , 3u64 ,] ;"
+        ),
+        "unexpected external SUPPORTED_VERSIONS: {external_rendered}"
+    );
+    assert!(!external_rendered.contains("# [cfg (feature = \"v2\")] 1u64"));
+    assert!(external_rendered.contains("# [cfg (feature = \"v2\")] 2u64 =>"));
+    syn::parse2::<syn::File>(external_gen).unwrap();
+}
+
+#[test]
+fn test_generate_backwards_compat_serialize_modes_into_try_into_try_with() {
+    // #[serialize(into)]
+    let into_input = parse_test_input(quote! {
+        versions = [
+            #[serialize(into)] 1: ModelV1,
+            #[current] 2: ModelV2,
+        ]
+    });
+    let into_gen = generate_for_test(&into_input, SelfWireMode::Disallowed, None).unwrap();
+    let into_rendered = into_gen.to_string();
+    assert!(into_rendered.contains("WireConvert as __WireConvert"));
+    assert!(into_rendered.contains(". convert_wire ()"));
+    syn::parse2::<syn::File>(into_gen).unwrap();
+
+    // #[serialize(try_into)] across internal, adjacent, and external tagging
+    for tokens in [
+        quote! {
+            versions = [
+                #[serialize(try_into)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+        quote! {
+            tag = "ver",
+            content = "data",
+            versions = [
+                #[serialize(try_into)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+        quote! {
+            external,
+            versions = [
+                #[serialize(try_into)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+    ] {
+        let input = parse_test_input(tokens);
+        let generated = generate_for_test(&input, SelfWireMode::Disallowed, None).unwrap();
+        let rendered = generated.to_string();
+        assert!(rendered.contains("TryWireConvert as __TryWireConvert"));
+        assert!(rendered.contains(". try_convert_wire ()"));
+        assert!(rendered.contains(". map_err (:: serde :: ser :: Error :: custom) ?"));
+        syn::parse2::<syn::File>(generated).unwrap();
+    }
+
+    // #[serialize(try_with = ...)] across internal and adjacent tagging
+    for tokens in [
+        quote! {
+            versions = [
+                #[serialize(try_with = my_mod::try_to_v1)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+        quote! {
+            tag = "ver",
+            content = "data",
+            versions = [
+                #[serialize(try_with = my_mod::try_to_v1)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+    ] {
+        let input = parse_test_input(tokens);
+        let generated = generate_for_test(&input, SelfWireMode::Disallowed, None).unwrap();
+        let rendered = generated.to_string();
+        assert!(
+            rendered
+                .contains("(my_mod :: try_to_v1) (self) . map_err (:: serde :: ser :: Error :: custom) ?")
+        );
+        syn::parse2::<syn::File>(generated).unwrap();
+    }
+}
+
+#[test]
+fn test_generate_backwards_compat_serializable_into_and_try_into() {
+    let input = parse_test_input(quote! {
+        versions = [
+            #[serializable(into)] 1: ModelV1,
+            #[serializable(try_into)] 2: ModelV2,
+            3: ModelV3,
+        ]
+    });
+    let generated = generate_for_test(&input, SelfWireMode::Disallowed, None).unwrap();
+    let rendered = generated.to_string();
+
+    assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompatSerialize for TargetModel"));
+    assert!(rendered.contains("WireConvert as __WireConvert"));
+    assert!(rendered.contains("TryWireConvert as __TryWireConvert"));
+    assert!(rendered.contains(". try_convert_wire () . map_err (:: serde :: ser :: Error :: custom) ?"));
+    syn::parse2::<syn::File>(generated).unwrap();
+}
+
+#[test]
+fn test_emit_legacy_deprecation_warnings() {
+    // Legacy #[fallible] and #[with(...)] emit #[deprecated] and forward #[allow(deprecated)]
+    let mut legacy_input = parse_test_input(quote! {
+        versions = [
+            #[fallible] 1: ModelV1,
+            #[with(up_v2)] 2: ModelV2,
+            3: ModelV3,
+        ]
+    });
+    legacy_input.allow_attrs = vec![syn::parse_quote!(#[allow(deprecated)])];
+    let legacy_gen = generate_for_test(&legacy_input, SelfWireMode::Disallowed, None).unwrap();
+    let legacy_rendered = legacy_gen.to_string();
+
+    assert!(legacy_rendered.contains(
+        "# [deprecated (note = \"deprecated: use `#[migrate(try_from)]` instead of `#[fallible]`\")]"
+    ));
+    assert!(legacy_rendered.contains("const fn __bc_deprecated_legacy_attr_0 ()"));
+    assert!(legacy_rendered.contains(
+        "# [deprecated (note = \"deprecated: use `#[migrate(with = fn_path)]` instead of `#[with(...)]`\")]"
+    ));
+    assert!(legacy_rendered.contains("const fn __bc_deprecated_legacy_attr_1 ()"));
+    assert!(
+        legacy_rendered.contains("# [allow (deprecated)] const _ : () = __bc_deprecated_legacy_attr_0 () ;")
+    );
+    assert!(
+        legacy_rendered.contains("# [allow (deprecated)] const _ : () = __bc_deprecated_legacy_attr_1 () ;")
+    );
+    syn::parse2::<syn::File>(legacy_gen).unwrap();
+
+    // Canonical #[migrate(...)] emits no deprecation warnings
+    let canonical_input = parse_test_input(quote! {
+        versions = [
+            #[migrate(try_from)] 1: ModelV1,
+            #[migrate(with = up_v2)] 2: ModelV2,
+            3: ModelV3,
+        ]
+    });
+    let canonical_gen = generate_for_test(&canonical_input, SelfWireMode::Disallowed, None).unwrap();
+    let canonical_rendered = canonical_gen.to_string();
+    assert!(!canonical_rendered.contains("__bc_deprecated_legacy_attr_"));
+    assert!(!canonical_rendered.contains("deprecated"));
+    syn::parse2::<syn::File>(canonical_gen).unwrap();
 }

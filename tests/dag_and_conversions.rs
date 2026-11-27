@@ -127,9 +127,9 @@ pub struct PortV2 {
 
 #[backwards_compat(
     versions(
-        #[fallible]
+        #[migrate(try_from)]
         1: PortV1 => 2,
-        #[fallible]
+        #[migrate(try_from)]
         2: PortV2 => 3,
         3: Self,
     )
@@ -175,7 +175,7 @@ pub struct BoxedV2 {
 
 #[backwards_compat(
     versions(
-        #[fallible]
+        #[migrate(try_from)]
         1: BoxedV1 => 2,
         2: BoxedV2 => 3,
         3: Self,
@@ -238,10 +238,9 @@ mod converters {
 #[backwards_compat(
     content = "data",
     versions(
-        #[fallible]
-        #[with(converters::str_to_u32)]
+        #[migrate(try_with = converters::str_to_u32)]
         1: String => 2,
-        #[with(converters::u32_to_target)]
+        #[migrate(with = converters::u32_to_target)]
         2: u32 => 3,
         3: Self,
     )
@@ -405,9 +404,9 @@ pub struct HeteroV2 {
 
 #[backwards_compat(
     versions(
-        #[fallible]
+        #[migrate(try_from)]
         1: HeteroV1 => 2,
-        #[fallible]
+        #[migrate(try_from)]
         2: HeteroV2 => 3,
         3: Self,
     )
@@ -510,7 +509,7 @@ fn special_v1_to_target(v: SharedWireV1) -> DivergentWireTarget {
     versions(
         1: SharedWireV1 => 2,
         2: SharedWireV2 => 4,
-        #[with(special_v1_to_target)]
+        #[migrate(with = special_v1_to_target)]
         3: SharedWireV1 => Self,
         4: Self,
     )
@@ -970,8 +969,7 @@ pub struct GenV2<'a, T> {
 
 #[backwards_compat(
     versions(
-        #[fallible]
-        #[with(generic_converters::upgrade_v1)]
+        #[migrate(try_with = generic_converters::upgrade_v1)]
         1: GenV1<'a, T> => GenV2<'a, T>,
         2: GenV2<'a, T> => GenTarget<'a, T>,
         3: Self,

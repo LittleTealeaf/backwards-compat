@@ -16,9 +16,9 @@ In applications with evolving data formats (such as configuration files, databas
 `backwards-compat` provides the `#[backwards_compat]` attribute macro to declaratively define schema transitions on `struct` and `enum` domain models—or on individual fields. It automatically generates `serde::Serialize`, `serde::Deserialize`, `BackwardsCompat`, and `BackwardsCompatDeserialize` implementations with streaming-first deserialization and always-inlined migration chains:
 - **Streaming-First Deserialization**: Streams directly into the matched version's deserializer with zero buffering when the tag appears first, buffers only the prefix when the tag is out-of-order, fails fast on unknown/future/disabled versions, and runs the inlined migration chain to produce your target model.
 - **Serialization**: Encodes your target model with zero-copy shadow wire borrowing and emits the native version tag automatically (with optional `#[serialize]` overrides for rolling deployments).
-- **Field-Level Versioning**: Annotate individual struct or enum fields with `#[backwards_compat(...)]` (using bare `#[backwards_compat]` on an unversioned container, or combined with outer container versioning) with automatic adjacent tagging (`content = "data"` by default) and `#[with(...)]` support for primitives and foreign types.
+- **Field-Level Versioning**: Annotate individual struct or enum fields with `#[backwards_compat(...)]` (using bare `#[backwards_compat]` on an unversioned container, or combined with outer container versioning) with automatic adjacent tagging (`content = "data"` by default) and `#[migrate(with = ...)]` / `#[migrate(try_with = ...)]` support for primitives and foreign types.
 - **Proxy Redirection**: Use `#[backwards_compat(via = ProxyType, ...)]` to decouple a domain model from its versioned serialized DTO while inheriting all `BackwardsCompat` and `Migrated<T>` capabilities automatically.
-- **Introspection & Migration Tracking**: Exposes schema metadata via `BackwardsCompat`, supports opt-in source-version tracking via `Migrated<T>`, and inlines multi-step `From`, `TryFrom`, and `#[with(...)]` migrations directly into deserialization arms.
+- **Introspection & Migration Tracking**: Exposes schema metadata via `BackwardsCompat`, supports opt-in source-version tracking via `Migrated<T>`, and inlines multi-step `From`, `TryFrom`, and `#[migrate(with = ...)]` / `#[migrate(try_with = ...)]` migrations directly into deserialization arms.
 
 ---
 
@@ -27,17 +27,17 @@ In applications with evolving data formats (such as configuration files, databas
 - **Streaming-First Deserialization**: Zero-buffer fast path when the version tag is first in the input, prefix-only buffering when out-of-order, direct version dispatch, single-pass untagged fallback, and fail-fast unknown/disabled version errors.
 - **Structs & Enums**: Apply `#[backwards_compat]` to named structs, tuple structs, unit structs, or `enum` domain models.
 - **Field-Level Versioning**: Version individual fields of structs or enum variants with `#[backwards_compat(...)]`, either standalone (with bare `#[backwards_compat]` on the container) or combined with outer container versioning—even when multiple fields share the same Rust type with different migration chains.
-- **Unified Proxy Redirection (`#[backwards_compat(via = ...)]`)**: Redirect `Serialize`, `Deserialize`, `BackwardsCompat`, and `BackwardsCompatDeserialize` through a separate versioned proxy type with infallible or fallible (`try_from`, `try_into`, `fallible`) conversions, custom `from` / `to` functions, and zero-clone `&Self` support.
+- **Unified Proxy Redirection (`#[backwards_compat(via = ...)]`)**: Redirect `Serialize`, `Deserialize`, `BackwardsCompat`, and `BackwardsCompatDeserialize` through a separate versioned proxy type with infallible or fallible (`try_from`, `try_into`, `fallible`) conversions, custom `from = fn_path` / `to = fn_path` / `try_from = fn_path` / `try_into = fn_path` functions, and zero-clone `&Self` support.
 - **Native Integer & String Tags**: Emits native integer (`"version": 2`) or string (`"version": "2.0"`) tags with strict type matching, homogeneous inline `|` aliases (`"1" | "v1": ModelV1`, `1 | 10: ModelV1`), and `external` tagging for positional binary formats (`bincode`, `postcard`, `bitcode`).
 - **Zero-Boilerplate & Zero-Copy**: Your target type does not need `#[derive(Serialize, Deserialize)]` or `Clone`—serialization borrows fields directly without cloning.
 - **Metadata & Opt-In Migration Tracking**: Implements `BackwardsCompat` (`CURRENT_VERSION`, `SERIALIZE_VERSION`, `SUPPORTED_VERSIONS`, `ACCEPTS_UNTAGGED`, `TAGGING`) and `Migrated<T>` (`Deref`, `DerefMut`, `AsRef`, `is_untagged()`, `source_version()`, `map(...)`) to detect and inspect upgraded payloads.
-- **Rolling Deployments & Runtime Version Selection**: Override the default wire version with `#[serialize]` / `#[serialize(with = ...)]`, or opt older versions into runtime selection with `#[serializable]` / `BackwardsCompatSerialize::as_version(...)`.
+- **Rolling Deployments & Runtime Version Selection**: Override the default wire version with `#[serialize]` / `#[serialize(into | try_into | with = ... | try_with = ...)]`, or opt older versions into runtime selection with `#[serializable]` / `BackwardsCompatSerialize::as_version(...)`.
 - **`no_std` + `alloc` & Optional `schemars`**: Compiles with `default-features = false` for `no_std` + `alloc` targets, and optionally derives `schemars::JsonSchema` (`features = ["schemars"]`).
-- **Custom Converters (`#[with(fn_path)]`)**: Supply a custom conversion function per step instead of implementing `From` / `TryFrom`.
+- **Custom Converters (`#[migrate(with = ...)]` / `#[migrate(try_with = ...)]`)**: Supply an infallible or fallible conversion function per step instead of implementing `From` / `TryFrom`.
 - **Generics & Lifetimes**: Full support for structs and enums with type parameters, lifetimes, const generics, and `where` clauses.
 - **Adjacent Tagging**: Use `content = "..."` for tuple structs, scalar types, newtypes, and enums (field-level `#[backwards_compat(...)]` defaults to `content = "data"`).
 - **Linear & DAG Migrations**: Support sequential version upgrades (`1 -> 2 -> ... -> N`) or DAG jumps (`1 => 3`, `1 => ModelV3`, `1 => Self`).
-- **Always-Inlined Infallible & Fallible Migrations**: Seamless support for `From`, `#[fallible]` `TryFrom`, and `#[with(...)]` migrations inlined directly per version arm; fallible error types only need to implement `core::fmt::Display` (heterogeneous error types across steps require no unified error enum).
+- **Always-Inlined Infallible & Fallible Migrations**: Seamless support for `#[migrate(from)]` (default), `#[migrate(try_from)]`, `#[migrate(with = ...)]`, and `#[migrate(try_with = ...)]` inlined directly per version arm; fallible error types only need to implement `core::fmt::Display` (heterogeneous error types across steps require no unified error enum).
 - **Multiple Unversioned (`_`) Schemas**: Accept one or more pre-backwards-compat unversioned schemas tried in declaration order (`#[serde(untagged)]`).
 - **Feature-Gated Versions (`#[cfg(...)]`)**: Conditionally compile historical or unversioned (`_`) schema entries behind Cargo features or `#[cfg(...)]` predicates.
 - **Format Agnostic**: Works out of the box with JSON, TOML, RON, YAML, and any other format supported by Serde.
@@ -117,7 +117,7 @@ fn main() {
 
 ### Field-Level Versioning
 
-You can version individual fields of a `struct` or `enum` without versioning the entire container by placing a bare `#[backwards_compat]` on the container (alongside `#[derive(Serialize, Deserialize)]`) and `#[backwards_compat(...)]` on specific fields. Field-level attributes automatically default to adjacent tagging with `content = "data"` (overridable via `content = "..."`), which makes versioning primitives, foreign types (with `#[with(...)]`), `Option<T>`, `Vec<T>`, and nested structs seamless:
+You can version individual fields of a `struct` or `enum` without versioning the entire container by placing a bare `#[backwards_compat]` on the container (alongside `#[derive(Serialize, Deserialize)]`) and `#[backwards_compat(...)]` on specific fields. Field-level attributes automatically default to adjacent tagging with `content = "data"` (overridable via `content = "..."`), which makes versioning primitives, foreign types (with `#[migrate(with = ...)]` / `#[migrate(try_with = ...)]`), `Option<T>`, `Vec<T>`, and nested structs seamless:
 
 ```rust
 use backwards_compat::backwards_compat;
@@ -137,7 +137,7 @@ pub struct AppSettings {
     pub name: String,
     // Default adjacent tagging: {"version": 2, "data": 8080}
     #[backwards_compat(versions(
-        #[fallible] #[with(parse_port)] 1: String,
+        #[migrate(try_with = parse_port)] 1: String,
         2: Self,
     ))]
     pub port: u16,
@@ -146,7 +146,7 @@ pub struct AppSettings {
         tag = "v",
         content = "val",
         versions(
-            #[with(u8_to_bool)] 1: u8,
+            #[migrate(with = u8_to_bool)] 1: u8,
             2: Self,
         )
     )]
@@ -185,7 +185,7 @@ pub struct ServerV1 {
 pub struct Server {
     pub host: String,
     #[backwards_compat(versions(
-        #[with(u32::from)] 1: u16,
+        #[migrate(with = u32::from)] 1: u16,
         2: Self,
     ))]
     pub port: u32,
@@ -272,7 +272,7 @@ assert!(json.contains(r#""version":2"#));
 # }
 ```
 
-`#[backwards_compat(via = ...)]` also supports fallible conversions (`try_from`, `try_into`, or `fallible` for both) and custom conversion functions (`from = fn_path` / `to = fn_path`):
+`#[backwards_compat(via = ...)]` also supports fallible conversions (`try_from`, `try_into`, or `fallible` for both) and custom conversion functions (`from = fn_path`, `to = fn_path`, `try_from = fn_path`, `try_into = fn_path`):
 
 ```rust
 use backwards_compat::backwards_compat;
@@ -294,7 +294,7 @@ fn encode_port(p: &ValidPort) -> PortWire {
     PortWire { port: u32::from(p.0) }
 }
 
-#[backwards_compat(via = PortWire, try_from, from = decode_port, to = encode_port)]
+#[backwards_compat(via = PortWire, try_from = decode_port, to = encode_port)]
 #[derive(Debug, PartialEq)]
 pub struct ValidPort(u16);
 
@@ -307,9 +307,9 @@ assert!(serde_json::from_str::<ValidPort>(r#"{"version": 1, "port": 0}"#).is_err
 
 See the `#[backwards_compat]` macro documentation for the full option reference and conversion rules.
 
-### Fallible Migrations (`#[fallible]`)
+### Fallible Migrations (`#[migrate(try_from)]` / `#[migrate(try_with = ...)]`)
 
-When migrations can fail validation, mark steps as `#[fallible]` and implement `TryFrom` (or a `Result`-returning `#[with(...)]` function); error types only need to implement `core::fmt::Display`:
+When migrations can fail validation, mark steps with `#[migrate(try_from)]` and implement `TryFrom` (or use `#[migrate(try_with = fn_path)]` with a `Result`-returning function); error types only need to implement `core::fmt::Display`:
 
 ```rust
 use backwards_compat::backwards_compat;
@@ -332,7 +332,7 @@ pub struct ServerConfigV1 {
 #[backwards_compat(
     tag = "version",
     versions(
-        #[fallible] 1: ServerConfigV1,
+        #[migrate(try_from)] 1: ServerConfigV1,
         2: Self,
     )
 )]
@@ -385,9 +385,9 @@ impl From<EventV1> for Event {
 }
 ```
 
-### Custom Converters (`#[with(fn_path)]`) & DAG Transitions (`=> tag` / `=> Type` / `=> Self`)
+### Custom Converters (`#[migrate(with = ...)]`) & DAG Transitions (`=> tag` / `=> Type` / `=> Self`)
 
-Use `=> <target_version>`, `=> <TargetType>`, or `=> Self` to jump directly across versions, and `#[with(fn_path)]` to supply a custom conversion function instead of `From` / `TryFrom`. A type target resolves to the matching declared version's type (or the domain struct itself). Duplicate entries sharing a type (such as an unversioned `_` entry alongside a versioned entry) automatically inherit that type's explicit `=>` transition regardless of declaration order:
+Use `=> <target_version>`, `=> <TargetType>`, or `=> Self` to jump directly across versions, and `#[migrate(with = fn_path)]` (or `#[migrate(try_with = fn_path)]`) to supply a custom conversion function instead of `From` / `TryFrom`. A type target resolves to the matching declared version's type (or the domain struct itself). Duplicate entries sharing a type (such as an unversioned `_` entry alongside a versioned entry) automatically inherit that type's explicit `=>` transition regardless of declaration order:
 
 ```rust
 use backwards_compat::backwards_compat;
@@ -427,8 +427,8 @@ impl From<AppConfigV3> for AppConfig {
 #[backwards_compat(
     tag = "version",
     versions(
-        _: AppConfigV1,                        // inherits `=> AppConfigV3` and `#[with(upgrade_v1)]` from `1`
-        #[with(upgrade_v1)] 1: AppConfigV1 => AppConfigV3,
+        _: AppConfigV1,                        // inherits `=> AppConfigV3` and `#[migrate(with = upgrade_v1)]` from `1`
+        #[migrate(with = upgrade_v1)] 1: AppConfigV1 => AppConfigV3,
         2: AppConfigV2 => Self,
         3: AppConfigV3 => AppConfig,           // equivalent to `=> Self`
         4: Self,
@@ -453,7 +453,7 @@ assert_eq!(from_v2, AppConfig { val: 4 });
 
 ### Metadata (`BackwardsCompat`), Migration Tracking (`Migrated<T>`), & Rolling Deployments (`#[serialize]`)
 
-Every `#[backwards_compat]` type implements `BackwardsCompat` and `BackwardsCompatDeserialize`. Deserialize into `Migrated<T>` to inspect the source version and detect whether a migration occurred, and mark an older version with `#[serialize]` (or `#[serialize(with = fn_path)]`) during rolling deployments:
+Every `#[backwards_compat]` type implements `BackwardsCompat` and `BackwardsCompatDeserialize`. Deserialize into `Migrated<T>` to inspect the source version and detect whether a migration occurred, and mark an older version with `#[serialize]` (or `#[serialize(into)]`, `#[serialize(try_into)]`, `#[serialize(with = fn_path)]`, `#[serialize(try_with = fn_path)]`) during rolling deployments:
 
 ```rust
 use backwards_compat::{BackwardsCompat, Migrated, Tagging, backwards_compat};
@@ -506,7 +506,7 @@ let upper = migrated.map(|mut d| {
 
 ### Runtime Version Selection (`BackwardsCompatSerialize` & `#[serializable]`)
 
-When you want to keep serializing at `CURRENT_VERSION` by default while allowing callers to emit older wire versions on demand (for example, per-client API negotiation or targeted exports), annotate older version entries with `#[serializable]`, `#[serializable(with = fn_path)]`, or `#[serializable(try_with = fn_path)]`. This generates a `BackwardsCompatSerialize` implementation with `SERIALIZABLE_VERSIONS`, `serialize_as_version`, and `as_version(...)`:
+When you want to keep serializing at `CURRENT_VERSION` by default while allowing callers to emit older wire versions on demand (for example, per-client API negotiation or targeted exports), annotate older version entries with `#[serializable]` / `#[serializable(into)]`, `#[serializable(try_into)]`, `#[serializable(with = fn_path)]`, or `#[serializable(try_with = fn_path)]`. This generates a `BackwardsCompatSerialize` implementation with `SERIALIZABLE_VERSIONS`, `serialize_as_version`, and `as_version(...)`:
 
 ```rust
 use backwards_compat::{BackwardsCompatSerialize, backwards_compat};
@@ -574,7 +574,57 @@ assert_eq!(v2_json, r#"{"version":2,"label":"widget","weight":5}"#);
 # }
 ```
 
-- `#[serializable]` converts using `From<&Self>` (or `Clone` + `From<Self>`), `#[serializable(with = fn_path)]` calls an infallible `fn(&Self) -> OldType`, and `#[serializable(try_with = fn_path)]` calls a fallible `fn(&Self) -> Result<OldType, E>` where `E: core::fmt::Display`.
+- `#[serializable]` / `#[serializable(into)]` converts using `From<&Self>` (or `Clone` + `From<Self>`), `#[serializable(try_into)]` converts using `TryFrom<&Self>` (or `Clone` + `TryFrom<Self>`), `#[serializable(with = fn_path)]` calls an infallible `fn(&Self) -> OldType`, and `#[serializable(try_with = fn_path)]` calls a fallible `fn(&Self) -> Result<OldType, E>` where `E: core::fmt::Display`.
+
+### One-Way Serialization or Deserialization (`serialize = false` / `deserialize = false`)
+
+Both `serialize` and `deserialize` default to `true` on struct/enum-level `#[backwards_compat(...)]` (including `via = ...`). Set one to `false` when a type only needs one direction—for example, when fields only implement `Deserialize` or `Serialize`, or when you want to provide a manual or plain `#[derive(Serialize)]` / `#[derive(Deserialize)]` implementation for the disabled direction (disabling both is a compile-time error):
+
+```rust
+use backwards_compat::backwards_compat;
+use serde::{Deserialize, Serialize};
+
+// Deserialize-only field (does not implement Serialize):
+#[derive(Debug, PartialEq, Deserialize)]
+pub struct IncomingToken(String);
+
+#[derive(Deserialize)]
+pub struct RequestV1 {
+    pub token: IncomingToken,
+}
+
+#[backwards_compat(serialize = false, versions(1: RequestV1, 2: Self))]
+#[derive(Debug, PartialEq)]
+pub struct Request {
+    pub token: IncomingToken,
+    pub retries: u8,
+}
+
+impl From<RequestV1> for Request {
+    fn from(v1: RequestV1) -> Self {
+        Self { token: v1.token, retries: 3 }
+    }
+}
+
+// Serialize-only field (does not implement Deserialize):
+#[derive(Debug, PartialEq, Serialize)]
+pub struct OutgoingMetric(u64);
+
+#[backwards_compat(deserialize = false, versions(1: Self))]
+#[derive(Debug, PartialEq)]
+pub struct TelemetryEvent {
+    pub latency_ms: OutgoingMetric,
+}
+
+# fn main() {
+let req: Request = serde_json::from_str(r#"{"version": 1, "token": "abc"}"#).unwrap();
+assert_eq!(req, Request { token: IncomingToken("abc".into()), retries: 3 });
+
+let event = TelemetryEvent { latency_ms: OutgoingMetric(42) };
+let json = serde_json::to_string(&event).unwrap();
+assert_eq!(json, r#"{"version":1,"latency_ms":42}"#);
+# }
+```
 
 ### `no_std` + `alloc` Support
 
@@ -811,7 +861,7 @@ pub struct Config {
 
 1. **Declare the current version inside `versions(...)`**: Top-level `version = N` was removed. Add `N: Self` (or mark an entry `#[current]`) inside `versions(...)`.
 2. **Native integer tags**: Integer keys like `1` now serialize as native integers (`"version": 1`) instead of strings (`"version": "1"`). Use homogeneous integer or string aliases (e.g., `"1" | "v1": ModelV1` or `1 | 10: ModelV1`) when supporting multiple legacy tag values.
-3. **Canonical entry directives**: Use `#[fallible]` (aliases `#[try_from]`, `#[try]`, etc. were removed) and `_` for unversioned entries (`none`/`None`/`untagged` aliases were removed).
+3. **Canonical entry directives**: Use `#[migrate(try_from)]` (originally `#[fallible]` in 2.0, now deprecated; aliases `#[try_from]`, `#[try]`, etc. were removed) and `_` for unversioned entries (`none`/`None`/`untagged` aliases were removed).
 
 ---
 
@@ -821,9 +871,11 @@ pub struct Config {
 |-----------|------|---------|-------------|
 | `tag` | string | `"version"` | Tag field name in serialized output (e.g. `tag = "version"` or `tag("version")`). |
 | `content` | string | *none* (type-level) / `"data"` (field-level) | Content field name for adjacent tagging (e.g. `content = "data"`). Field-level `#[backwards_compat(...)]` defaults to `"data"`. |
-| `via` | type path | *none* | Unified proxy redirection mode (`via = ProxyType` or `via(ProxyType)`), mutually exclusive with `tag`, `content`, and `versions`. Supports `try_from`, `try_into`, `fallible`, `from = fn_path`, `to = fn_path`, and `dump`. |
+| `via` | type path | *none* | Unified proxy redirection mode (`via = ProxyType` or `via(ProxyType)`), mutually exclusive with `tag`, `content`, and `versions`. Supports `try_from`, `try_into`, `fallible`, `from = fn_path`, `to = fn_path`, `try_from = fn_path`, `try_into = fn_path`, `serialize`, `deserialize`, and `dump`. |
+| `serialize` | bool | `true` | Controls whether `Serialize` and `BackwardsCompatSerialize` (and the borrowed shadow wire type) are generated (`serialize = false` or `serialize(false)`). Struct/enum-level only; cannot be combined with `deserialize = false`. |
+| `deserialize` | bool | `true` | Controls whether `Deserialize` and `BackwardsCompatDeserialize` (and migration chains) are generated (`deserialize = false` or `deserialize(false)`). Struct/enum-level only; cannot be combined with `serialize = false`. |
 | `dump` | flag | *disabled* | Prints the generated Rust token stream to `stderr` during compilation. |
-| `versions` | list / map | *empty* | Version entries supporting `#[current]`, `#[serialize]`, `#[serialize(with = fn)]`, `#[serializable]`, `#[serializable(with = fn)]`, `#[serializable(try_with = fn)]`, `#[fallible]`, `#[with(fn)]`, `#[cfg(...)]`, `\|` aliases, `_`, and `=> target` / `=> TargetType` / `=> Self`. |
+| `versions` | list / map | *empty* | Version entries supporting `#[current]`, `#[migrate(from \| try_from \| with = fn \| try_with = fn)]`, `#[serialize]` / `#[serialize(into \| try_into \| with = fn \| try_with = fn)]`, `#[serializable]` / `#[serializable(into \| try_into \| with = fn \| try_with = fn)]`, `#[cfg(...)]`, `\|` aliases, `_`, and `=> target` / `=> TargetType` / `=> Self`. Legacy `#[fallible]` and `#[with(fn)]` remain accepted as deprecated aliases. |
 
 ---
 
@@ -835,7 +887,7 @@ Under the hood, `#[backwards_compat]` generates:
    - **Prefix-only slow path**: When other fields appear before the version tag, only the preceding prefix entries are buffered and replayed ahead of the remaining live stream.
    - **Direct version dispatch & fail-fast errors**: Native integer (`u64`) and string (`&str`) tags dispatch directly to each version's deserialization arm (no intermediate helper enum), failing immediately on unknown, future, or `#[cfg]`-disabled versions without reading the rest of the payload.
    - **Single-pass untagged fallback**: When `_` entries are declared and the tag field is absent, the already-collected payload is tried once per `_` entry in declaration order via `ContentRefDeserializer`.
-2. **Always-Inlined Migrations**: Multi-step `From`, `#[fallible]` `TryFrom`, and `#[with(...)]` chains are inlined directly inside each version's deserialization arm, so fallible steps only require `core::fmt::Display` and can mix distinct error types freely.
+2. **Always-Inlined Migrations**: Multi-step `#[migrate(from)]`, `#[migrate(try_from)]`, `#[migrate(with = ...)]`, and `#[migrate(try_with = ...)]` chains are inlined directly inside each version's deserialization arm, so fallible steps only require `core::fmt::Display` and can mix distinct error types freely.
 3. **Zero-Copy Native-Tag Serialization**: Emits a private `__SerializeHelper` struct holding the native `u64` or `&'static str` tag field alongside a borrowed reference to your wire struct/enum, guaranteeing zero clones.
 4. **Field-Level Helpers & Proxy Redirection**: Field-level `#[backwards_compat(...)]` emits private same-scope per-field Serde helpers (`serialize`, `serialize_ref`, `deserialize`) so multiple fields of the same type can have independent chains with zero trait collisions and zero-clone serialization. `#[backwards_compat(via = ProxyType, ...)]` delegates `Serialize`, `Deserialize`, `BackwardsCompat`, and `BackwardsCompatDeserialize` directly through `ProxyType`.
 
