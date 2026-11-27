@@ -741,7 +741,7 @@ fn test_generate_backwards_compat_dump_string_shadow_and_missing_shadow_guards()
         ]
     });
     ser_with_guard_input.serialize_version = crate::parse::VersionTag::Int(99);
-    ser_with_guard_input.serialize_with_fn = Some(syn::parse_quote!(my_ser));
+    ser_with_guard_input.serialize_mode = crate::parse::SerializeConvertMode::With(syn::parse_quote!(my_ser));
     let err_ser_with_guard =
         generate_for_test(&ser_with_guard_input, SelfWireMode::Disallowed, None).unwrap_err();
     assert!(
@@ -1197,4 +1197,144 @@ fn test_generate_backwards_compat_deserialize_false_unconditional_before_cfg_not
     assert!(!external_rendered.contains("# [cfg (feature = \"v2\")] 1u64"));
     assert!(external_rendered.contains("# [cfg (feature = \"v2\")] 2u64 =>"));
     syn::parse2::<syn::File>(external_gen).unwrap();
+}
+
+#[test]
+fn test_generate_backwards_compat_serialize_modes_into_try_into_try_with() {
+    // #[serialize(into)]
+    let into_input = parse_test_input(quote! {
+        versions = [
+            #[serialize(into)] 1: ModelV1,
+            #[current] 2: ModelV2,
+        ]
+    });
+    let into_gen = generate_for_test(&into_input, SelfWireMode::Disallowed, None).unwrap();
+    let into_rendered = into_gen.to_string();
+    assert!(into_rendered.contains("WireConvert as __WireConvert"));
+    assert!(into_rendered.contains(". convert_wire ()"));
+    syn::parse2::<syn::File>(into_gen).unwrap();
+
+    // #[serialize(try_into)] across internal, adjacent, and external tagging
+    for tokens in [
+        quote! {
+            versions = [
+                #[serialize(try_into)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+        quote! {
+            tag = "ver",
+            content = "data",
+            versions = [
+                #[serialize(try_into)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+        quote! {
+            external,
+            versions = [
+                #[serialize(try_into)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+    ] {
+        let input = parse_test_input(tokens);
+        let generated = generate_for_test(&input, SelfWireMode::Disallowed, None).unwrap();
+        let rendered = generated.to_string();
+        assert!(rendered.contains("TryWireConvert as __TryWireConvert"));
+        assert!(rendered.contains(". try_convert_wire ()"));
+        assert!(rendered.contains(". map_err (:: serde :: ser :: Error :: custom) ?"));
+        syn::parse2::<syn::File>(generated).unwrap();
+    }
+
+    // #[serialize(try_with = ...)] across internal and adjacent tagging
+    for tokens in [
+        quote! {
+            versions = [
+                #[serialize(try_with = my_mod::try_to_v1)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+        quote! {
+            tag = "ver",
+            content = "data",
+            versions = [
+                #[serialize(try_with = my_mod::try_to_v1)] 1: ModelV1,
+                #[current] 2: ModelV2,
+            ]
+        },
+    ] {
+        let input = parse_test_input(tokens);
+        let generated = generate_for_test(&input, SelfWireMode::Disallowed, None).unwrap();
+        let rendered = generated.to_string();
+        assert!(
+            rendered
+                .contains("(my_mod :: try_to_v1) (self) . map_err (:: serde :: ser :: Error :: custom) ?")
+        );
+        syn::parse2::<syn::File>(generated).unwrap();
+    }
+}
+
+#[test]
+fn test_generate_backwards_compat_serializable_into_and_try_into() {
+    let input = parse_test_input(quote! {
+        versions = [
+            #[serializable(into)] 1: ModelV1,
+            #[serializable(try_into)] 2: ModelV2,
+            3: ModelV3,
+        ]
+    });
+    let generated = generate_for_test(&input, SelfWireMode::Disallowed, None).unwrap();
+    let rendered = generated.to_string();
+
+    assert!(rendered.contains("impl :: backwards_compat :: BackwardsCompatSerialize for TargetModel"));
+    assert!(rendered.contains("WireConvert as __WireConvert"));
+    assert!(rendered.contains("TryWireConvert as __TryWireConvert"));
+    assert!(rendered.contains(". try_convert_wire () . map_err (:: serde :: ser :: Error :: custom) ?"));
+    syn::parse2::<syn::File>(generated).unwrap();
+}
+
+#[test]
+fn test_emit_legacy_deprecation_warnings() {
+    // Legacy #[fallible] and #[with(...)] emit #[deprecated] and forward #[allow(deprecated)]
+    let mut legacy_input = parse_test_input(quote! {
+        versions = [
+            #[fallible] 1: ModelV1,
+            #[with(up_v2)] 2: ModelV2,
+            3: ModelV3,
+        ]
+    });
+    legacy_input.allow_attrs = vec![syn::parse_quote!(#[allow(deprecated)])];
+    let legacy_gen = generate_for_test(&legacy_input, SelfWireMode::Disallowed, None).unwrap();
+    let legacy_rendered = legacy_gen.to_string();
+
+    assert!(legacy_rendered.contains(
+        "# [deprecated (note = \"deprecated: use `#[migrate(try_from)]` instead of `#[fallible]`\")]"
+    ));
+    assert!(legacy_rendered.contains("const fn __bc_deprecated_legacy_attr_0 ()"));
+    assert!(legacy_rendered.contains(
+        "# [deprecated (note = \"deprecated: use `#[migrate(with = fn_path)]` instead of `#[with(...)]`\")]"
+    ));
+    assert!(legacy_rendered.contains("const fn __bc_deprecated_legacy_attr_1 ()"));
+    assert!(
+        legacy_rendered.contains("# [allow (deprecated)] const _ : () = __bc_deprecated_legacy_attr_0 () ;")
+    );
+    assert!(
+        legacy_rendered.contains("# [allow (deprecated)] const _ : () = __bc_deprecated_legacy_attr_1 () ;")
+    );
+    syn::parse2::<syn::File>(legacy_gen).unwrap();
+
+    // Canonical #[migrate(...)] emits no deprecation warnings
+    let canonical_input = parse_test_input(quote! {
+        versions = [
+            #[migrate(try_from)] 1: ModelV1,
+            #[migrate(with = up_v2)] 2: ModelV2,
+            3: ModelV3,
+        ]
+    });
+    let canonical_gen = generate_for_test(&canonical_input, SelfWireMode::Disallowed, None).unwrap();
+    let canonical_rendered = canonical_gen.to_string();
+    assert!(!canonical_rendered.contains("__bc_deprecated_legacy_attr_"));
+    assert!(!canonical_rendered.contains("deprecated"));
+    syn::parse2::<syn::File>(canonical_gen).unwrap();
 }

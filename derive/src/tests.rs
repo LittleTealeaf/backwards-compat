@@ -1359,3 +1359,124 @@ fn test_backwards_compat_via_impl_selective_serialize_deserialize() {
             .contains("derive (Debug , Deserialize)")
     );
 }
+
+#[test]
+fn test_via_try_from_and_try_into_fn_path_parsing() {
+    let from_eq: via::ViaArgs = syn::parse_str("via = Proxy, try_from = my_mod::decode").unwrap();
+    assert!(from_eq.try_from);
+    assert!(!from_eq.try_into);
+    assert_eq!(from_eq.from_fn, Some(syn::parse_quote!(my_mod::decode)));
+    assert!(from_eq.to_fn.is_none());
+
+    let from_paren: via::ViaArgs = syn::parse_str("via = Proxy, try_from(decode_fn)").unwrap();
+    assert!(from_paren.try_from);
+    assert_eq!(from_paren.from_fn, Some(syn::parse_quote!(decode_fn)));
+
+    let into_eq: via::ViaArgs = syn::parse_str("via = Proxy, try_into = my_mod::encode").unwrap();
+    assert!(!into_eq.try_from);
+    assert!(into_eq.try_into);
+    assert!(into_eq.from_fn.is_none());
+    assert_eq!(into_eq.to_fn, Some(syn::parse_quote!(my_mod::encode)));
+
+    let into_paren: via::ViaArgs = syn::parse_str("via = Proxy, try_into(encode_fn)").unwrap();
+    assert!(into_paren.try_into);
+    assert_eq!(into_paren.to_fn, Some(syn::parse_quote!(encode_fn)));
+
+    let both: via::ViaArgs = syn::parse_str("via = Proxy, try_from = f, try_into(g)").unwrap();
+    assert!(both.try_from);
+    assert!(both.try_into);
+    assert_eq!(both.from_fn, Some(syn::parse_quote!(f)));
+    assert_eq!(both.to_fn, Some(syn::parse_quote!(g)));
+
+    // Bare `try_from` + `from = f` and bare `try_into` + `to = g` still work
+    let bare_from: via::ViaArgs = syn::parse_str("via = Proxy, try_from, from = f").unwrap();
+    assert!(bare_from.try_from);
+    assert_eq!(bare_from.from_fn, Some(syn::parse_quote!(f)));
+
+    let bare_to: via::ViaArgs = syn::parse_str("via = Proxy, try_into, to = g").unwrap();
+    assert!(bare_to.try_into);
+    assert_eq!(bare_to.to_fn, Some(syn::parse_quote!(g)));
+}
+
+#[test]
+fn test_via_try_from_and_try_into_fn_path_errors() {
+    for (input, expected_substr) in [
+        (
+            "via = Proxy, try_from(f extra)",
+            "unexpected trailing tokens in `try_from(...)`",
+        ),
+        (
+            "via = Proxy, try_into(g extra)",
+            "unexpected trailing tokens in `try_into(...)`",
+        ),
+        ("via = Proxy, try_from = 123", "expected"),
+        ("via = Proxy, try_into(\"bad\")", "expected"),
+        (
+            "via = Proxy, from = f, try_from = g",
+            "`from` cannot be combined with `try_from = <path>`",
+        ),
+        (
+            "via = Proxy, try_from = g, from = f",
+            "`from` cannot be combined with `try_from = <path>`",
+        ),
+        (
+            "via = Proxy, to = f, try_into = g",
+            "`to` cannot be combined with `try_into = <path>`",
+        ),
+        (
+            "via = Proxy, try_into = g, to = f",
+            "`to` cannot be combined with `try_into = <path>`",
+        ),
+        (
+            "via = Proxy, try_from = f, fallible",
+            "`fallible` cannot be combined with `try_from` or `try_into`",
+        ),
+        (
+            "via = Proxy, fallible, try_from = f",
+            "`try_from` cannot be combined with `fallible`",
+        ),
+        (
+            "via = Proxy, try_into = f, fallible",
+            "`fallible` cannot be combined with `try_from` or `try_into`",
+        ),
+        (
+            "via = Proxy, fallible, try_into = f",
+            "`try_into` cannot be combined with `fallible`",
+        ),
+        (
+            "via = Proxy, try_from = f, deserialize = false",
+            "cannot use `try_from` when `deserialize = false`",
+        ),
+        (
+            "via = Proxy, try_into = f, serialize = false",
+            "cannot use `try_into` when `serialize = false`",
+        ),
+    ] {
+        let err = syn::parse_str::<via::ViaArgs>(input).unwrap_err();
+        assert!(
+            err.to_string().contains(expected_substr),
+            "for `{input}`, expected `{expected_substr}`, got `{err}`"
+        );
+    }
+}
+
+#[test]
+fn test_via_generate_try_from_and_try_into_fn_paths() {
+    let item: syn::DeriveInput = syn::parse_quote!(
+        struct Domain {
+            val: u32,
+        }
+    );
+    let args: via::ViaArgs =
+        syn::parse_str("via = Proxy, try_from = my_mod::decode, try_into = my_mod::encode").unwrap();
+    let ts = via::generate_via(&args, &item.ident, &item.generics, false);
+    let rendered = ts.to_string();
+
+    assert!(
+        rendered.contains(
+            "(my_mod :: decode) (__migrated . value) . map_err (:: serde :: de :: Error :: custom) ?"
+        )
+    );
+    assert!(rendered.contains("(my_mod :: encode) (self) . map_err (:: serde :: ser :: Error :: custom) ?"));
+    syn::parse2::<syn::File>(ts).unwrap();
+}

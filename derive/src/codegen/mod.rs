@@ -11,7 +11,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::dag::DagPlan;
-use crate::parse::{BackwardsCompatInput, VersionTag};
+use crate::parse::{BackwardsCompatInput, LegacyAttrWarning, VersionTag};
 
 pub use de::generate_deserialize_core;
 #[cfg(feature = "schemars")]
@@ -21,6 +21,27 @@ pub use ser::generate_serialize_core;
 #[cfg(feature = "schemars")]
 use schema::generate_json_schema_impl;
 use ser::generate_backwards_compat_serialize;
+
+// LEGACY (deprecated): remove in 5.0
+/// Emits compile-time `#[deprecated]` warnings for each recorded legacy attribute usage.
+pub fn emit_legacy_deprecation_warnings(
+    warnings: &[LegacyAttrWarning],
+    allow_attrs: &[syn::Attribute],
+) -> TokenStream {
+    let mut out = TokenStream::new();
+    for (idx, w) in warnings.iter().enumerate() {
+        let fn_ident = format_ident!("__bc_deprecated_legacy_attr_{idx}", span = w.span);
+        let call_ident = format_ident!("__bc_deprecated_legacy_attr_{idx}", span = w.span);
+        let note = w.note;
+        out.extend(quote! {
+            #[deprecated(note = #note)]
+            const fn #fn_ident() {}
+            #(#allow_attrs)*
+            const _: () = #call_ident();
+        });
+    }
+    out
+}
 
 fn cfg_attr(pred: Option<&TokenStream>) -> TokenStream {
     pred.map_or_else(TokenStream::new, |p| quote!(#[cfg(#p)]))
@@ -461,6 +482,8 @@ pub fn generate_backwards_compat(
     };
 
     let extra = extra_items.unwrap_or_default();
+    let legacy_deprecation_warnings =
+        emit_legacy_deprecation_warnings(&input.legacy_warnings, &input.allow_attrs);
 
     let version_ty = version_mode.version_ty();
     let current_version_expr = version_mode.tag_expr(&input.current_version);
@@ -468,6 +491,8 @@ pub fn generate_backwards_compat(
 
     let code = quote! {
         const _: () = {
+            #legacy_deprecation_warnings
+
             #extra
 
             #de_helper_defs

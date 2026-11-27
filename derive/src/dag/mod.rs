@@ -2,7 +2,7 @@ use quote::ToTokens as _;
 use std::collections::{HashMap, HashSet};
 use syn::{Error, Result, Type};
 
-use crate::parse::{BackwardsCompatInput, ExplicitNext, VersionEntry, VersionTag};
+use crate::parse::{BackwardsCompatInput, ExplicitNext, SerializeConvertMode, VersionEntry, VersionTag};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code, reason = "debug and DAG introspection fields")]
@@ -75,7 +75,7 @@ pub struct DagPlan {
     pub target_is_wire: bool,
     pub serialize_wire_ty: Type,
     pub serialize_target_is_wire: bool,
-    pub serialize_with_fn: Option<syn::ExprPath>,
+    pub serialize_mode: SerializeConvertMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +228,7 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
             target_is_wire: true,
             serialize_wire_ty: input.target_ty.clone(),
             serialize_target_is_wire: true,
-            serialize_with_fn: None,
+            serialize_mode: SerializeConvertMode::Into,
         });
     }
 
@@ -491,7 +491,7 @@ pub fn resolve_dag(input: &BackwardsCompatInput) -> Result<DagPlan> {
         target_is_wire,
         serialize_wire_ty,
         serialize_target_is_wire,
-        serialize_with_fn: input.serialize_with_fn.clone(),
+        serialize_mode: input.serialize_mode.clone(),
     })
 }
 

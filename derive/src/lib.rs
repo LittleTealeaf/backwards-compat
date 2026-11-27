@@ -210,6 +210,7 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>, strip_serialize: bool, st
 ///   Delegates `Serialize`, `Deserialize`, `BackwardsCompat`, `BackwardsCompatDeserialize`, and
 ///   `BackwardsCompatSerialize` through a separate versioned proxy type. Supports `try_from`,
 ///   `try_into`, `fallible`, `from = fn_path` / `from(fn_path)`, `to = fn_path` / `to(fn_path)`,
+///   `try_from = fn_path` / `try_from(fn_path)`, `try_into = fn_path` / `try_into(fn_path)`,
 ///   `serialize = true | false` / `serialize(true | false)`, `deserialize = true | false` /
 ///   `deserialize(true | false)`, and `dump`.
 ///
@@ -222,8 +223,9 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>, strip_serialize: bool, st
 ///   container with field-level `#[backwards_compat(...)]` on its fields (preserving zero-clone
 ///   serialization via `serialize_ref`).
 /// - Each annotated field gets a private same-scope helper with `content = "data"` by default,
-///   supporting primitives, foreign types (`#[with(...)]`), `Option<T>`, `Vec<T>`, generics,
-///   lifetimes, const generics, and multiple fields of the same type with independent chains.
+///   supporting primitives, foreign types (`#[migrate(with = ...)]` / `#[migrate(try_with = ...)]`),
+///   `Option<T>`, `Vec<T>`, generics, lifetimes, const generics, and multiple fields of the same
+///   type with independent chains.
 ///
 /// # Version Entry Directives
 ///
@@ -243,15 +245,24 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>, strip_serialize: bool, st
 ///   automatically inherit its explicit `=>` transition regardless of declaration order.
 /// - **`#[current]`**: Explicitly designates the active current schema version (required only when
 ///   it is not the last primary entry in `versions`).
-/// - **`#[serialize]` / `#[serialize(with = fn_path)]`**: Overrides which version is emitted during
-///   serialization (useful for rolling deployments). Defaults to the current version.
-/// - **`#[serializable]` / `#[serializable(with = fn_path)]` / `#[serializable(try_with = fn_path)]`**:
+/// - **`#[migrate(from)]` / `#[migrate(try_from)]` / `#[migrate(with = fn_path)]` / `#[migrate(try_with = fn_path)]`**:
+///   Configures how a version entry converts to the next step during deserialization.
+///   `#[migrate(from)]` (the default when omitted) uses `From`; `#[migrate(try_from)]` uses
+///   `TryFrom`; `#[migrate(with = fn_path)]` calls `fn(FromTy) -> ToTy`; and
+///   `#[migrate(try_with = fn_path)]` calls `fn(FromTy) -> Result<ToTy, E>` where
+///   `E: core::fmt::Display`. Legacy `#[fallible]` and `#[with(fn_path)]` remain accepted as
+///   deprecated aliases (emitting a compiler warning) and will be removed in the next major version.
+/// - **`#[serialize]` / `#[serialize(into)]` / `#[serialize(try_into)]` / `#[serialize(with = fn_path)]` / `#[serialize(try_with = fn_path)]`**:
+///   Overrides which version is emitted during default serialization (useful for rolling
+///   deployments). Bare `#[serialize]` and `#[serialize(into)]` convert via `From<&Self>` (or
+///   `Clone` + `From<Self>`); `#[serialize(try_into)]` converts via `TryFrom<&Self>` (or `Clone` +
+///   `TryFrom<Self>`); `#[serialize(with = fn_path)]` calls `fn(&Self) -> WireTy`; and
+///   `#[serialize(try_with = fn_path)]` calls `fn(&Self) -> Result<WireTy, E>`. Defaults to the
+///   current version.
+/// - **`#[serializable]` / `#[serializable(into)]` / `#[serializable(try_into)]` / `#[serializable(with = fn_path)]` / `#[serializable(try_with = fn_path)]`**:
 ///   Marks a historical version entry as a valid runtime target for `BackwardsCompatSerialize::serialize_as_version`
-///   and includes it in `BackwardsCompatSerialize::SERIALIZABLE_VERSIONS`.
-/// - **`#[fallible]`**: Marks a transition as fallible, using `TryFrom` (or a `Result`-returning
-///   `#[with]` function). Error types only need to implement `core::fmt::Display`.
-/// - **`#[with(fn_path)]`**: Uses a custom conversion function `fn(FromTy) -> ToTy` (or
-///   `fn(FromTy) -> Result<ToTy, E>` with `#[fallible]`) instead of `From` / `TryFrom`.
+///   and includes it in `BackwardsCompatSerialize::SERIALIZABLE_VERSIONS`. Supports the same four
+///   conversion modes as `#[serialize(...)]`.
 /// - **`#[cfg(...)]`**: Conditionally compiles a historical or unversioned (`_`) version entry,
 ///   including its deserialization arm and inlined migration chain. Multiple
 ///   `#[cfg(...)]` attributes on an entry or along a path are combined with `all(...)`. Neither the
@@ -318,20 +329,20 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>, strip_serialize: bool, st
 ///     pub name: String,
 ///     // Adjacent tagging defaults to tag = "version", content = "data":
 ///     #[backwards_compat(versions(
-///         #[fallible] #[with(parse_port)] 1: String,
+///         #[migrate(try_with = parse_port)] 1: String,
 ///         2: Self,
 ///     ))]
 ///     pub port: u16,
 /// }
 /// ```
 ///
-/// ### 3. Fallible Migrations with `#[with]`
+/// ### 3. Fallible Migrations with `#[migrate(try_with = ...)]`
 ///
 /// ```rust,ignore
 /// #[backwards_compat(
 ///     tag = "ver",
 ///     versions(
-///         #[fallible] #[with(parse_v1)] 1: ServerV1,
+///         #[migrate(try_with = parse_v1)] 1: ServerV1,
 ///         2: Self,
 ///     )
 /// )]
@@ -745,9 +756,23 @@ fn backwards_compat_impl(
     let (_, ty_generics, _) = generics.split_for_impl();
     let target_ty: syn::Type = syn::parse_quote!(#target_ident #ty_generics);
 
-    let input = match args.into_input(target_ty, vis, generics) {
+    let mut input = match args.into_input(target_ty, vis, generics) {
         Ok(i) => i,
         Err(err) => return err.to_compile_error(),
+    };
+    input.allow_attrs = match &shadow_source {
+        PreparedShadowSource::Struct(s) => s
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("allow"))
+            .cloned()
+            .collect(),
+        PreparedShadowSource::Enum(e) => e
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("allow"))
+            .cloned()
+            .collect(),
     };
 
     let dag_plan = match dag::resolve_dag(&input) {

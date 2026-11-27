@@ -97,6 +97,8 @@ impl Parse for ViaArgs {
         let mut try_into = false;
         let mut try_from_span = None;
         let mut try_into_span = None;
+        let mut try_from_has_fn = false;
+        let mut try_into_has_fn = false;
         let mut fallible_span = None;
         let mut from_fn: Option<ExprPath> = None;
         let mut from_fn_span = None;
@@ -121,7 +123,6 @@ impl Parse for ViaArgs {
                     proxy_ty = Some(parse_via_type_option(input, ident.span())?);
                 }
                 "try_from" => {
-                    reject_flag_value(input, "try_from")?;
                     if fallible_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
@@ -134,11 +135,21 @@ impl Parse for ViaArgs {
                             "duplicate `try_from` option in #[backwards_compat(...)]",
                         ));
                     }
+                    if input.peek(Token![=]) || input.peek(syn::token::Paren) {
+                        let path = parse_fn_path_option(input, "try_from", ident.span())?;
+                        if from_fn_span.is_some() {
+                            return Err(syn::Error::new(
+                                ident.span(),
+                                "`from` cannot be combined with `try_from = <path>`",
+                            ));
+                        }
+                        from_fn = Some(path);
+                        try_from_has_fn = true;
+                    }
                     try_from_span = Some(ident.span());
                     try_from = true;
                 }
                 "try_into" => {
-                    reject_flag_value(input, "try_into")?;
                     if fallible_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
@@ -150,6 +161,17 @@ impl Parse for ViaArgs {
                             ident.span(),
                             "duplicate `try_into` option in #[backwards_compat(...)]",
                         ));
+                    }
+                    if input.peek(Token![=]) || input.peek(syn::token::Paren) {
+                        let path = parse_fn_path_option(input, "try_into", ident.span())?;
+                        if to_fn_span.is_some() {
+                            return Err(syn::Error::new(
+                                ident.span(),
+                                "`to` cannot be combined with `try_into = <path>`",
+                            ));
+                        }
+                        to_fn = Some(path);
+                        try_into_has_fn = true;
                     }
                     try_into_span = Some(ident.span());
                     try_into = true;
@@ -173,7 +195,13 @@ impl Parse for ViaArgs {
                     try_into = true;
                 }
                 "from" => {
-                    if from_fn.is_some() {
+                    if try_from_has_fn {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "`from` cannot be combined with `try_from = <path>`",
+                        ));
+                    }
+                    if from_fn_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "duplicate `from` option in #[backwards_compat(...)]",
@@ -183,7 +211,13 @@ impl Parse for ViaArgs {
                     from_fn_span = Some(ident.span());
                 }
                 "to" => {
-                    if to_fn.is_some() {
+                    if try_into_has_fn {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "`to` cannot be combined with `try_into = <path>`",
+                        ));
+                    }
+                    if to_fn_span.is_some() {
                         return Err(syn::Error::new(
                             ident.span(),
                             "duplicate `to` option in #[backwards_compat(...)]",
@@ -744,7 +778,7 @@ mod tests {
             parse_err("via = Proxy, to(my_fn, extra)").contains("unexpected trailing tokens in `to(...)`")
         );
 
-        for flag in ["try_from", "try_into", "fallible", "dump"] {
+        for flag in ["fallible", "dump"] {
             let eq_err = parse_err(&format!("via = Proxy, {flag} = true"));
             assert!(
                 eq_err.contains(&format!("`{flag}` does not take a value")),

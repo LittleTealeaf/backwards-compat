@@ -514,7 +514,7 @@ fn test_parse_args_unsupported_attributes_error() {
     .unwrap_err();
     assert_eq!(
         err_typo.to_string(),
-        "unsupported attribute `cgf` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported"
+        "unsupported attribute `cgf` on version entry; only `#[cfg(...)]`, `#[current]`, `#[migrate(...)]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported"
     );
 
     let err_serde = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
@@ -526,7 +526,7 @@ fn test_parse_args_unsupported_attributes_error() {
     .unwrap_err();
     assert_eq!(
         err_serde.to_string(),
-        "unsupported attribute `serde` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported"
+        "unsupported attribute `serde` on version entry; only `#[cfg(...)]`, `#[current]`, `#[migrate(...)]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported"
     );
 
     let err_path = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
@@ -539,7 +539,7 @@ fn test_parse_args_unsupported_attributes_error() {
     assert_eq!(
         err_path.to_string(),
         format!(
-            "unsupported attribute `{}` on version entry; only `#[cfg(...)]`, `#[current]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported",
+            "unsupported attribute `{}` on version entry; only `#[cfg(...)]`, `#[current]`, `#[migrate(...)]`, `#[serialize]`, `#[serializable]`, `#[fallible]`, and `#[with(...)]` are supported",
             quote::quote!(foo::bar)
         )
     );
@@ -877,7 +877,7 @@ fn test_parse_and_validate_serialize_attr() {
         .unwrap();
     assert_eq!(bare_input.current_version, VersionTag::Int(2));
     assert_eq!(bare_input.serialize_version, VersionTag::Int(1));
-    assert!(bare_input.serialize_with_fn.is_none());
+    assert_eq!(bare_input.serialize_mode, SerializeConvertMode::Into);
 
     // #[serialize(with = my_mod::to_v6)]
     let with_fn: BackwardsCompatArgs = syn::parse2(quote::quote! {
@@ -896,13 +896,8 @@ fn test_parse_and_validate_serialize_attr() {
         .unwrap();
     assert_eq!(with_input.serialize_version, VersionTag::Int(6));
     assert_eq!(
-        with_input
-            .serialize_with_fn
-            .as_ref()
-            .unwrap()
-            .to_token_stream()
-            .to_string(),
-        quote::quote!(my_mod::to_v6).to_string()
+        with_input.serialize_mode,
+        SerializeConvertMode::With(syn::parse_quote!(my_mod::to_v6))
     );
 
     // Duplicate #[serialize] on same entry
@@ -942,7 +937,7 @@ fn test_parse_and_validate_serialize_attr() {
     .unwrap_err();
     assert_eq!(
         err_bad_kw.to_string(),
-        "expected `with = <fn_path>` inside `#[serialize(...)]`"
+        "expected `into`, `try_into`, `with = <fn_path>`, or `try_with = <fn_path>` inside `#[serialize(...)]`"
     );
 
     let err_trailing = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
@@ -960,7 +955,7 @@ fn test_parse_and_validate_serialize_attr() {
     .unwrap_err();
     assert_eq!(
         err_nv.to_string(),
-        "expected `#[serialize]` or `#[serialize(with = fn_path)]`"
+        "expected `#[serialize]`, `#[serialize(into)]`, `#[serialize(try_into)]`, `#[serialize(with = fn_path)]`, or `#[serialize(try_with = fn_path)]`"
     );
 
     // #[serialize] on _
@@ -1084,10 +1079,11 @@ fn test_parse_inline_pipe_aliases_and_multiple_untagged() {
 
     // #[serialize(with = ...)] applies only to first tag (5), not alias (50)
     assert_eq!(compat_input.serialize_version, VersionTag::Int(5));
-    assert!(compat_input.versions[4].is_serialize);
-    assert!(compat_input.versions[4].serialize_with_fn.is_some());
-    assert!(!compat_input.versions[5].is_serialize);
-    assert!(compat_input.versions[5].serialize_with_fn.is_none());
+    assert!(matches!(
+        compat_input.versions[4].serialize,
+        Some(SerializeConvertMode::With(_))
+    ));
+    assert!(compat_input.versions[5].serialize.is_none());
 
     // #[current] applies only to first tag (6), not alias (60)
     assert_eq!(compat_input.current_version, VersionTag::Int(6));
@@ -1342,17 +1338,19 @@ fn test_parse_and_validate_serializable_attr() {
         ]
     })
     .unwrap();
-    assert_eq!(args.versions[0].serializable, Some(SerializableMode::Infallible));
+    assert_eq!(args.versions[0].serializable, Some(SerializeConvertMode::Into));
     assert_eq!(args.versions[1].serializable, None); // pipe alias does not inherit
     assert_eq!(
         args.versions[2].serializable,
-        Some(SerializableMode::With(syn::parse_quote!(my_mod::to_v2)))
+        Some(SerializeConvertMode::With(syn::parse_quote!(my_mod::to_v2)))
     );
     assert_eq!(
         args.versions[3].serializable,
-        Some(SerializableMode::TryWith(syn::parse_quote!(my_mod::try_to_v3)))
+        Some(SerializeConvertMode::TryWith(syn::parse_quote!(
+            my_mod::try_to_v3
+        )))
     );
-    assert_eq!(args.versions[4].serializable, Some(SerializableMode::Infallible));
+    assert_eq!(args.versions[4].serializable, Some(SerializeConvertMode::Into));
 
     // Duplicate #[serializable]
     let err_dup = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
@@ -1381,7 +1379,7 @@ fn test_parse_and_validate_serializable_attr() {
     .unwrap_err();
     assert_eq!(
         err_kw.to_string(),
-        "expected `with = <fn_path>` or `try_with = <fn_path>` inside `#[serializable(...)]`"
+        "expected `into`, `try_into`, `with = <fn_path>`, or `try_with = <fn_path>` inside `#[serializable(...)]`"
     );
 
     let err_trailing = syn::parse2::<BackwardsCompatArgs>(quote::quote! {
@@ -1408,7 +1406,7 @@ fn test_parse_and_validate_serializable_attr() {
     .unwrap_err();
     assert_eq!(
         err_nv.to_string(),
-        "expected `#[serializable]`, `#[serializable(with = fn_path)]`, or `#[serializable(try_with = fn_path)]`"
+        "expected `#[serializable]`, `#[serializable(into)]`, `#[serializable(try_into)]`, `#[serializable(with = fn_path)]`, or `#[serializable(try_with = fn_path)]`"
     );
 }
 
@@ -1700,6 +1698,7 @@ fn test_reject_both_serialize_and_deserialize_false() {
         serialize_specified: true,
         deserialize_specified: true,
         versions: Vec::new(),
+        legacy_warnings: Vec::new(),
     };
     let err = manual_args
         .into_input(
@@ -1863,4 +1862,298 @@ fn test_deserialize_false_rejects_deserialization_only_features() {
     assert_eq!(input.versions.len(), 3);
     assert_eq!(input.current_version, VersionTag::Int(3));
     assert_eq!(input.serialize_version, VersionTag::Int(2));
+}
+
+#[test]
+fn test_parse_migrate_attr_all_four_forms() {
+    let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        versions = [
+            #[migrate(from)] 1: V1,
+            #[migrate(try_from)] 2: V2,
+            #[migrate(with = my_mod::up)] 3: V3,
+            #[migrate(try_with = my_mod::try_up)] 4: V4,
+            5: Self,
+        ]
+    })
+    .unwrap();
+
+    assert!(args.legacy_warnings.is_empty());
+    assert_eq!(args.versions.len(), 5);
+
+    assert!(!args.versions[0].fallible);
+    assert!(args.versions[0].with_fn.is_none());
+    assert!(args.versions[0].has_migrate_attr);
+
+    assert!(args.versions[1].fallible);
+    assert!(args.versions[1].with_fn.is_none());
+    assert!(args.versions[1].has_migrate_attr);
+
+    assert!(!args.versions[2].fallible);
+    assert_eq!(args.versions[2].with_fn, Some(syn::parse_quote!(my_mod::up)));
+    assert!(args.versions[2].has_migrate_attr);
+
+    assert!(args.versions[3].fallible);
+    assert_eq!(args.versions[3].with_fn, Some(syn::parse_quote!(my_mod::try_up)));
+    assert!(args.versions[3].has_migrate_attr);
+
+    assert!(!args.versions[4].fallible);
+    assert!(args.versions[4].with_fn.is_none());
+    assert!(!args.versions[4].has_migrate_attr);
+
+    let input = args
+        .into_input(
+            syn::parse_quote!(TargetModel),
+            syn::Visibility::Inherited,
+            syn::Generics::default(),
+        )
+        .unwrap();
+    assert!(input.legacy_warnings.is_empty());
+}
+
+#[test]
+fn test_parse_migrate_attr_invalid_and_duplicate_errors() {
+    let expected_forms = "expected `#[migrate(from)]`, `#[migrate(try_from)]`, `#[migrate(with = fn_path)]`, or `#[migrate(try_with = fn_path)]`";
+    for (tokens, expected_msg) in [
+        (quote::quote!(versions(#[migrate] 1: V1)), expected_forms),
+        (quote::quote!(versions(#[migrate = "from"] 1: V1)), expected_forms),
+        (
+            quote::quote!(versions(#[migrate(from)] #[migrate(try_from)] 1: V1)),
+            "duplicate `#[migrate(...)]` attribute on version entry",
+        ),
+        (
+            quote::quote!(versions(#[migrate(bogus)] 1: V1)),
+            "expected `from`, `try_from`, `with = <fn_path>`, or `try_with = <fn_path>` inside `#[migrate(...)]`",
+        ),
+        (
+            quote::quote!(versions(#[migrate(from extra)] 1: V1)),
+            "unexpected trailing tokens in `#[migrate(from)]`",
+        ),
+        (
+            quote::quote!(versions(#[migrate(try_from extra)] 1: V1)),
+            "unexpected trailing tokens in `#[migrate(try_from)]`",
+        ),
+        (
+            quote::quote!(versions(#[migrate(with = f extra)] 1: V1)),
+            "unexpected trailing tokens in `#[migrate(with = ...)]`",
+        ),
+        (
+            quote::quote!(versions(#[migrate(try_with = f extra)] 1: V1)),
+            "unexpected trailing tokens in `#[migrate(try_with = ...)]`",
+        ),
+    ] {
+        let err = syn::parse2::<BackwardsCompatArgs>(tokens).unwrap_err();
+        assert_eq!(err.to_string(), expected_msg);
+    }
+}
+
+#[test]
+fn test_parse_migrate_attr_cannot_mix_with_legacy() {
+    let expected = "cannot combine `#[migrate(...)]` with legacy `#[fallible]` or `#[with(...)]` on the same version entry";
+    for tokens in [
+        quote::quote!(versions(#[migrate(from)] #[fallible] 1: V1)),
+        quote::quote!(versions(#[fallible] #[migrate(try_from)] 1: V1)),
+        quote::quote!(versions(#[migrate(from)] #[with(my_fn)] 1: V1)),
+        quote::quote!(versions(#[with(my_fn)] #[migrate(with = other_fn)] 1: V1)),
+    ] {
+        let err = syn::parse2::<BackwardsCompatArgs>(tokens).unwrap_err();
+        assert_eq!(err.to_string(), expected);
+    }
+}
+
+#[test]
+fn test_deserialize_false_rejects_all_migrate_attr_forms() {
+    let expected = "cannot use `#[migrate(...)]` when `deserialize = false`";
+    for tokens in [
+        quote::quote!(deserialize = false, versions(#[migrate(from)] 1: V1, 2: Self)),
+        quote::quote!(deserialize = false, versions(#[migrate(try_from)] 1: V1, 2: Self)),
+        quote::quote!(deserialize = false, versions(#[migrate(with = f)] 1: V1, 2: Self)),
+        quote::quote!(deserialize = false, versions(#[migrate(try_with = f)] 1: V1, 2: Self)),
+    ] {
+        let args: BackwardsCompatArgs = syn::parse2(tokens).unwrap();
+        let err = args
+            .into_input(
+                syn::parse_quote!(TargetModel),
+                syn::Visibility::Inherited,
+                syn::Generics::default(),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), expected);
+    }
+}
+
+#[test]
+fn test_legacy_warnings_recorded_for_fallible_and_with_and_pipe_aliases() {
+    let args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        versions = [
+            #[fallible] 1: V1,
+            #[with(up)] 2: V2,
+            #[fallible] #[with(try_up)] 3: V3,
+            4: Self,
+        ]
+    })
+    .unwrap();
+    assert_eq!(args.legacy_warnings.len(), 3);
+    assert_eq!(
+        args.legacy_warnings[0].note,
+        "deprecated: use `#[migrate(try_from)]` instead of `#[fallible]`"
+    );
+    assert_eq!(
+        args.legacy_warnings[1].note,
+        "deprecated: use `#[migrate(with = fn_path)]` instead of `#[with(...)]`"
+    );
+    assert_eq!(
+        args.legacy_warnings[2].note,
+        "deprecated: use `#[migrate(try_with = fn_path)]` instead of `#[fallible]` + `#[with(...)]`"
+    );
+
+    // Pipe aliases must record only ONE warning for the shared attribute
+    let pipe_args: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        versions = [
+            #[fallible] 1 | 10: ModelV1,
+            2: Self,
+        ]
+    })
+    .unwrap();
+    assert_eq!(pipe_args.versions.len(), 3);
+    assert_eq!(pipe_args.legacy_warnings.len(), 1);
+
+    let pipe_input = pipe_args
+        .into_input(
+            syn::parse_quote!(TargetModel),
+            syn::Visibility::Inherited,
+            syn::Generics::default(),
+        )
+        .unwrap();
+    assert_eq!(pipe_input.legacy_warnings.len(), 1);
+}
+
+#[test]
+fn test_parse_serialize_and_serializable_unified_modes() {
+    // #[serialize(into)]
+    let args_into: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        versions = [
+            #[serialize(into)] 1: V1,
+            #[current] 2: V2,
+        ]
+    })
+    .unwrap();
+    assert_eq!(args_into.versions[0].serialize, Some(SerializeConvertMode::Into));
+    let input_into = args_into
+        .into_input(
+            syn::parse_quote!(TargetModel),
+            syn::Visibility::Inherited,
+            syn::Generics::default(),
+        )
+        .unwrap();
+    assert_eq!(input_into.serialize_mode, SerializeConvertMode::Into);
+
+    // #[serialize(try_into)]
+    let args_try_into: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        versions = [
+            #[serialize(try_into)] 1: V1,
+            #[current] 2: V2,
+        ]
+    })
+    .unwrap();
+    assert_eq!(
+        args_try_into.versions[0].serialize,
+        Some(SerializeConvertMode::TryInto)
+    );
+    let input_try_into = args_try_into
+        .into_input(
+            syn::parse_quote!(TargetModel),
+            syn::Visibility::Inherited,
+            syn::Generics::default(),
+        )
+        .unwrap();
+    assert_eq!(input_try_into.serialize_mode, SerializeConvertMode::TryInto);
+
+    // #[serialize(try_with = fn_path)]
+    let args_try_with: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        versions = [
+            #[serialize(try_with = my_mod::try_to_v1)] 1: V1,
+            #[current] 2: V2,
+        ]
+    })
+    .unwrap();
+    assert_eq!(
+        args_try_with.versions[0].serialize,
+        Some(SerializeConvertMode::TryWith(syn::parse_quote!(
+            my_mod::try_to_v1
+        )))
+    );
+    let input_try_with = args_try_with
+        .into_input(
+            syn::parse_quote!(TargetModel),
+            syn::Visibility::Inherited,
+            syn::Generics::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        input_try_with.serialize_mode,
+        SerializeConvertMode::TryWith(syn::parse_quote!(my_mod::try_to_v1))
+    );
+
+    // #[serializable(into)] and #[serializable(try_into)]
+    let args_ser: BackwardsCompatArgs = syn::parse2(quote::quote! {
+        versions = [
+            #[serializable(into)] 1: V1,
+            #[serializable(try_into)] 2: V2,
+            3: Self,
+        ]
+    })
+    .unwrap();
+    assert_eq!(
+        args_ser.versions[0].serializable,
+        Some(SerializeConvertMode::Into)
+    );
+    assert_eq!(
+        args_ser.versions[1].serializable,
+        Some(SerializeConvertMode::TryInto)
+    );
+}
+
+#[test]
+fn test_parse_serialize_and_serializable_unified_errors() {
+    for (tokens, expected_msg) in [
+        (
+            quote::quote!(versions(#[serialize(into extra)] 1: V1)),
+            "unexpected trailing tokens in `#[serialize(into)]`",
+        ),
+        (
+            quote::quote!(versions(#[serialize(try_into extra)] 1: V1)),
+            "unexpected trailing tokens in `#[serialize(try_into)]`",
+        ),
+        (
+            quote::quote!(versions(#[serialize(try_with = f extra)] 1: V1)),
+            "unexpected trailing tokens in `#[serialize(try_with = ...)]`",
+        ),
+        (
+            quote::quote!(versions(#[serialize(bogus)] 1: V1)),
+            "expected `into`, `try_into`, `with = <fn_path>`, or `try_with = <fn_path>` inside `#[serialize(...)]`",
+        ),
+        (
+            quote::quote!(versions(#[serialize = "v1"] 1: V1)),
+            "expected `#[serialize]`, `#[serialize(into)]`, `#[serialize(try_into)]`, `#[serialize(with = fn_path)]`, or `#[serialize(try_with = fn_path)]`",
+        ),
+        (
+            quote::quote!(versions(#[serializable(into extra)] 1: V1)),
+            "unexpected trailing tokens in `#[serializable(into)]`",
+        ),
+        (
+            quote::quote!(versions(#[serializable(try_into extra)] 1: V1)),
+            "unexpected trailing tokens in `#[serializable(try_into)]`",
+        ),
+        (
+            quote::quote!(versions(#[serializable(bogus)] 1: V1)),
+            "expected `into`, `try_into`, `with = <fn_path>`, or `try_with = <fn_path>` inside `#[serializable(...)]`",
+        ),
+        (
+            quote::quote!(versions(#[serializable = "v1"] 1: V1)),
+            "expected `#[serializable]`, `#[serializable(into)]`, `#[serializable(try_into)]`, `#[serializable(with = fn_path)]`, or `#[serializable(try_with = fn_path)]`",
+        ),
+    ] {
+        let err = syn::parse2::<BackwardsCompatArgs>(tokens).unwrap_err();
+        assert_eq!(err.to_string(), expected_msg);
+    }
 }

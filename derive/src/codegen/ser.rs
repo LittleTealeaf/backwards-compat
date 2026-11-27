@@ -8,7 +8,7 @@ use super::{
     ext_variant_lookup, non_empty_where_clause, target_type_name,
 };
 use crate::dag::{DagPlan, combine_cfg_all};
-use crate::parse::{BackwardsCompatInput, SerializableMode, VersionTag};
+use crate::parse::{BackwardsCompatInput, SerializeConvertMode, VersionTag};
 
 pub struct SerializeCore {
     pub helper_def: TokenStream,
@@ -36,7 +36,7 @@ pub fn generate_serialize_core(
     let is_internal_unit_shadow = !input.external
         && input.content_field.is_none()
         && dag_plan.serialize_target_is_wire
-        && dag_plan.serialize_with_fn.is_none()
+        && matches!(dag_plan.serialize_mode, SerializeConvertMode::Into)
         && matches!(wire_mode, SelfWireMode::Shadow(info) if info.is_unit_struct);
 
     if is_internal_unit_shadow {
@@ -108,66 +108,99 @@ pub fn generate_serialize_core(
         }
     };
 
-    let (body, latest_wire_ty_in_helper) = if let Some(ref ser_fn) = dag_plan.serialize_with_fn {
-        let ser_ty = if dag_plan.serialize_target_is_wire {
+    let resolve_owned_ser_ty = || -> syn::Result<TokenStream> {
+        if dag_plan.serialize_target_is_wire {
             match wire_mode {
                 SelfWireMode::Shadow(info) => {
                     let owned_ident = info.owned_ident;
-                    quote!(#owned_ident #ty_generics)
+                    Ok(quote!(#owned_ident #ty_generics))
                 }
-                SelfWireMode::Direct => quote!(#target_ty),
-                SelfWireMode::Disallowed => {
-                    return Err(syn::Error::new_spanned(
-                        &input.target_ty,
-                        "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro",
-                    ));
-                }
+                SelfWireMode::Direct => Ok(quote!(#target_ty)),
+                SelfWireMode::Disallowed => Err(syn::Error::new_spanned(
+                    &input.target_ty,
+                    "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro",
+                )),
             }
         } else {
             let ty = &dag_plan.serialize_wire_ty;
-            quote!(#ty)
-        };
-        let ser_call = emit_ser_expr(quote!(&latest));
-        let s = quote! {
-            let latest: #ser_ty = (#ser_fn)(#value_expr);
-            #ser_call
-        };
-        (s, ser_ty)
-    } else if dag_plan.serialize_target_is_wire {
-        match wire_mode {
-            SelfWireMode::Shadow(info) => {
-                let construct_borrowed = &info.construct_borrowed;
-                let ty_in_helper = &info.borrowed_ty_in_helper;
+            Ok(quote!(#ty))
+        }
+    };
+
+    let (body, latest_wire_ty_in_helper) = match &dag_plan.serialize_mode {
+        SerializeConvertMode::With(ser_fn) => {
+            let ser_ty = resolve_owned_ser_ty()?;
+            let ser_call = emit_ser_expr(quote!(&latest));
+            let s = quote! {
+                let latest: #ser_ty = (#ser_fn)(#value_expr);
+                #ser_call
+            };
+            (s, ser_ty)
+        }
+        SerializeConvertMode::TryWith(ser_fn) => {
+            let ser_ty = resolve_owned_ser_ty()?;
+            let ser_call = emit_ser_expr(quote!(&latest));
+            let s = quote! {
+                let latest: #ser_ty = (#ser_fn)(#value_expr).map_err(::serde::ser::Error::custom)?;
+                #ser_call
+            };
+            (s, ser_ty)
+        }
+        SerializeConvertMode::TryInto => {
+            let ser_ty = resolve_owned_ser_ty()?;
+            let ser_call = emit_ser_expr(quote!(&latest));
+            let s = quote! {
+                #[allow(unused_imports)]
+                use ::backwards_compat::__private::{
+                    BorrowedTryWireConvert as _,
+                    FallbackTryWireConvert as _,
+                    TryWireConvert as __TryWireConvert,
+                };
+                let latest: #ser_ty = __TryWireConvert::<_, #ser_ty>::new(#value_expr)
+                    .try_convert_wire()
+                    .map_err(::serde::ser::Error::custom)?;
+                #ser_call
+            };
+            (s, ser_ty)
+        }
+        SerializeConvertMode::Into => {
+            if dag_plan.serialize_target_is_wire {
+                match wire_mode {
+                    SelfWireMode::Shadow(info) => {
+                        let construct_borrowed = &info.construct_borrowed;
+                        let ty_in_helper = &info.borrowed_ty_in_helper;
+                        let ser_call = emit_ser_expr(quote!(&latest));
+                        let s = quote! {
+                            let latest = #construct_borrowed;
+                            #ser_call
+                        };
+                        (s, quote!(#ty_in_helper))
+                    }
+                    SelfWireMode::Direct => {
+                        let s = emit_ser_expr(quote!(#value_expr));
+                        (s, quote!(#target_ty))
+                    }
+                    SelfWireMode::Disallowed => {
+                        return Err(syn::Error::new_spanned(
+                            &input.target_ty,
+                            "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro",
+                        ));
+                    }
+                }
+            } else {
+                let ty = &dag_plan.serialize_wire_ty;
                 let ser_call = emit_ser_expr(quote!(&latest));
                 let s = quote! {
-                    let latest = #construct_borrowed;
+                    use ::backwards_compat::__private::{
+                        BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
+                    };
+
+                    let latest: #ty = __WireConvert::<_, #ty>::new(#value_expr).convert_wire();
                     #ser_call
                 };
-                (s, quote!(#ty_in_helper))
-            }
-            SelfWireMode::Direct => {
-                let s = emit_ser_expr(quote!(#value_expr));
-                (s, quote!(#target_ty))
-            }
-            SelfWireMode::Disallowed => {
-                return Err(syn::Error::new_spanned(
-                    &input.target_ty,
-                    "using the domain struct as the active wire format is only supported when using the #[backwards_compat] attribute macro",
-                ));
+                (s, quote!(#ty))
             }
         }
-    } else {
-        let ty = &dag_plan.serialize_wire_ty;
-        let ser_call = emit_ser_expr(quote!(&latest));
-        let s = quote! {
-            use ::backwards_compat::__private::{
-                BorrowedWireConvert as _, FallbackWireConvert as _, WireConvert as __WireConvert,
-            };
-
-            let latest: #ty = __WireConvert::<_, #ty>::new(#value_expr).convert_wire();
-            #ser_call
-        };
-        (s, quote!(#ty))
     };
 
     let mut ser_wc = where_clause.cloned().unwrap_or_else(|| syn::WhereClause {
@@ -229,7 +262,7 @@ pub(super) fn generate_backwards_compat_serialize(
                      ty: &syn::Type,
                      cfg: Option<TokenStream>,
                      is_ser_ver: bool,
-                     serializable: Option<&SerializableMode>|
+                     serializable: Option<&SerializeConvertMode>|
      -> syn::Result<SerializableArm> {
         let tag_lit = match tag {
             VersionTag::Int(n) => quote!(#n),
@@ -297,7 +330,7 @@ pub(super) fn generate_backwards_compat_serialize(
         };
 
         let (body, bound_ty) = match serializable {
-            Some(SerializableMode::With(fn_path)) => {
+            Some(SerializeConvertMode::With(fn_path)) => {
                 let wire_ty = resolve_owned_wire_ty(ty)?;
                 let ser_call = emit_ser_call(quote!(&__wire_val));
                 (
@@ -308,7 +341,7 @@ pub(super) fn generate_backwards_compat_serialize(
                     Some(wire_ty),
                 )
             }
-            Some(SerializableMode::TryWith(fn_path)) => {
+            Some(SerializeConvertMode::TryWith(fn_path)) => {
                 let wire_ty = resolve_owned_wire_ty(ty)?;
                 let ser_call = emit_ser_call(quote!(&__wire_val));
                 (
@@ -319,8 +352,27 @@ pub(super) fn generate_backwards_compat_serialize(
                     Some(wire_ty),
                 )
             }
-            Some(SerializableMode::Infallible) | None => {
-                let bound_ty = if is_ser_ver && input.serialize_with_fn.is_some() {
+            Some(SerializeConvertMode::TryInto) => {
+                let wire_ty = resolve_owned_wire_ty(ty)?;
+                let ser_call = emit_ser_call(quote!(&__wire_val));
+                (
+                    quote! {
+                        #[allow(unused_imports)]
+                        use ::backwards_compat::__private::{
+                            BorrowedTryWireConvert as _,
+                            FallbackTryWireConvert as _,
+                            TryWireConvert as __TryWireConvert,
+                        };
+                        let __wire_val: #wire_ty = __TryWireConvert::<_, #wire_ty>::new(self)
+                            .try_convert_wire()
+                            .map_err(::serde::ser::Error::custom)?;
+                        #ser_call
+                    },
+                    Some(wire_ty),
+                )
+            }
+            Some(SerializeConvertMode::Into) | None => {
+                let bound_ty = if is_ser_ver && !matches!(input.serialize_mode, SerializeConvertMode::Into) {
                     Some(resolve_owned_wire_ty(ty)?)
                 } else if ty == target_ty {
                     match wire_mode {

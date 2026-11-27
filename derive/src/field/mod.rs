@@ -19,6 +19,7 @@ pub struct FieldCompatSpec {
     pub field_ty: syn::Type,
     pub filtered_generics: syn::Generics,
     pub cfgs: Vec<syn::Attribute>,
+    pub allow_attrs: Vec<syn::Attribute>,
     pub args: BackwardsCompatArgs,
 }
 
@@ -578,14 +579,19 @@ fn filter_generics(
     }
 }
 
+struct FieldExtractContext<'a> {
+    outer_generics: &'a syn::Generics,
+    outer: &'a OuterParams,
+    extra_cfgs: &'a [syn::Attribute],
+    extra_allows: &'a [syn::Attribute],
+}
+
 fn extract_single_field(
     field: &syn::Field,
     variant_idx: Option<usize>,
     field_idx: usize,
     helper_ident: syn::Ident,
-    outer_generics: &syn::Generics,
-    outer: &OuterParams,
-    extra_cfgs: &[syn::Attribute],
+    ctx: &FieldExtractContext<'_>,
 ) -> syn::Result<Option<FieldCompatSpec>> {
     let mut bc_attrs = field
         .attrs
@@ -605,12 +611,14 @@ fn extract_single_field(
     check_serde_attr_conflicts(&field.attrs)?;
     let args = parse_field_bc_attr(first_bc)?;
 
-    let field_used = collect_used_in_type(&field.ty, outer);
-    validate_historical_version_generics(outer_generics, outer, &field_used, &args)?;
-    let filtered_generics = filter_generics(outer_generics, outer, &field_used);
+    let field_used = collect_used_in_type(&field.ty, ctx.outer);
+    validate_historical_version_generics(ctx.outer_generics, ctx.outer, &field_used, &args)?;
+    let filtered_generics = filter_generics(ctx.outer_generics, ctx.outer, &field_used);
 
-    let mut cfgs: Vec<syn::Attribute> = extra_cfgs.to_vec();
+    let mut cfgs: Vec<syn::Attribute> = ctx.extra_cfgs.to_vec();
     cfgs.extend(field.attrs.iter().filter(|a| a.path().is_ident("cfg")).cloned());
+    let mut allow_attrs: Vec<syn::Attribute> = ctx.extra_allows.to_vec();
+    allow_attrs.extend(field.attrs.iter().filter(|a| a.path().is_ident("allow")).cloned());
     let schema_helper_ident = format_ident!("{}_Schema", helper_ident, span = Span::call_site());
 
     Ok(Some(FieldCompatSpec {
@@ -621,6 +629,7 @@ fn extract_single_field(
         field_ty: field.ty.clone(),
         filtered_generics,
         cfgs,
+        allow_attrs,
         args,
     }))
 }
@@ -630,6 +639,18 @@ pub fn extract_struct_field_compat(item_struct: &syn::ItemStruct) -> syn::Result
     let outer = OuterParams::from_generics(&item_struct.generics);
     let type_name = strip_raw_prefix(&item_struct.ident);
     let call_site = Span::call_site();
+    let outer_allows: Vec<syn::Attribute> = item_struct
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("allow"))
+        .cloned()
+        .collect();
+    let ctx = FieldExtractContext {
+        outer_generics: &item_struct.generics,
+        outer: &outer,
+        extra_cfgs: &[],
+        extra_allows: &outer_allows,
+    };
     let mut specs = Vec::new();
 
     for (field_idx, field) in item_struct.fields.iter().enumerate() {
@@ -644,15 +665,7 @@ pub fn extract_struct_field_compat(item_struct: &syn::ItemStruct) -> syn::Result
                 )
             },
         );
-        if let Some(spec) = extract_single_field(
-            field,
-            None,
-            field_idx,
-            helper_ident,
-            &item_struct.generics,
-            &outer,
-            &[],
-        )? {
+        if let Some(spec) = extract_single_field(field, None, field_idx, helper_ident, &ctx)? {
             specs.push(spec);
         }
     }
@@ -665,6 +678,12 @@ pub fn extract_enum_field_compat(item_enum: &syn::ItemEnum) -> syn::Result<Vec<F
     let outer = OuterParams::from_generics(&item_enum.generics);
     let enum_name = strip_raw_prefix(&item_enum.ident);
     let call_site = Span::call_site();
+    let outer_allows: Vec<syn::Attribute> = item_enum
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("allow"))
+        .cloned()
+        .collect();
     let mut specs = Vec::new();
 
     for (variant_idx, variant) in item_enum.variants.iter().enumerate() {
@@ -675,6 +694,20 @@ pub fn extract_enum_field_compat(item_enum: &syn::ItemEnum) -> syn::Result<Vec<F
             .filter(|a| a.path().is_ident("cfg"))
             .cloned()
             .collect();
+        let mut variant_allows = outer_allows.clone();
+        variant_allows.extend(
+            variant
+                .attrs
+                .iter()
+                .filter(|a| a.path().is_ident("allow"))
+                .cloned(),
+        );
+        let ctx = FieldExtractContext {
+            outer_generics: &item_enum.generics,
+            outer: &outer,
+            extra_cfgs: &variant_cfgs,
+            extra_allows: &variant_allows,
+        };
 
         for (field_idx, field) in variant.fields.iter().enumerate() {
             let helper_ident = field.ident.as_ref().map_or_else(
@@ -697,15 +730,8 @@ pub fn extract_enum_field_compat(item_enum: &syn::ItemEnum) -> syn::Result<Vec<F
                     )
                 },
             );
-            if let Some(spec) = extract_single_field(
-                field,
-                Some(variant_idx),
-                field_idx,
-                helper_ident,
-                &item_enum.generics,
-                &outer,
-                &variant_cfgs,
-            )? {
+            if let Some(spec) = extract_single_field(field, Some(variant_idx), field_idx, helper_ident, &ctx)?
+            {
                 specs.push(spec);
             }
         }
@@ -900,6 +926,9 @@ pub fn generate_field_helper(
         (TokenStream::new(), TokenStream::new())
     };
 
+    let legacy_deprecation_warnings =
+        codegen::emit_legacy_deprecation_warnings(&input.legacy_warnings, &spec.allow_attrs);
+
     let code = quote! {
         #(#cfgs)*
         #[doc(hidden)]
@@ -910,6 +939,7 @@ pub fn generate_field_helper(
 
         #(#cfgs)*
         const _: () = {
+            #legacy_deprecation_warnings
             #ser_helper_def
             #de_helper_defs
             #schema_impl_items

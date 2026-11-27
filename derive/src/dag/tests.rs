@@ -503,8 +503,6 @@ fn test_dag_fallible_on_later_gated_duplicate_type_does_not_leak_to_unconditiona
 
 #[test]
 fn test_dag_serialize_on_older_version_and_with_fn() {
-    use quote::ToTokens as _;
-
     // Bare #[serialize] on older version
     let args1: BackwardsCompatArgs = syn::parse2(quote::quote! {
         versions = [
@@ -522,7 +520,7 @@ fn test_dag_serialize_on_older_version_and_with_fn() {
     assert_eq!(plan1.serialize_wire_ty, v2);
     assert!(!plan1.serialize_target_is_wire);
     assert!(!plan1.target_is_wire);
-    assert!(plan1.serialize_with_fn.is_none());
+    assert_eq!(plan1.serialize_mode, crate::parse::SerializeConvertMode::Into);
 
     // #[serialize(with = to_v2)] on older version
     let args2: BackwardsCompatArgs = syn::parse2(quote::quote! {
@@ -540,13 +538,8 @@ fn test_dag_serialize_on_older_version_and_with_fn() {
     assert_eq!(plan2.serialize_wire_ty, v2);
     assert!(!plan2.serialize_target_is_wire);
     assert_eq!(
-        plan2
-            .serialize_with_fn
-            .as_ref()
-            .unwrap()
-            .to_token_stream()
-            .to_string(),
-        "to_v2"
+        plan2.serialize_mode,
+        crate::parse::SerializeConvertMode::With(parse_quote!(to_v2))
     );
 }
 
@@ -1439,7 +1432,7 @@ fn test_dag_deserialize_false_allows_unconditional_before_cfg_gated_version() {
     assert!(plan.target_is_wire);
     assert!(plan.serialize_target_is_wire);
     assert_eq!(plan.serialize_wire_ty, parse_quote!(Target));
-    assert!(plan.serialize_with_fn.is_none());
+    assert_eq!(plan.serialize_mode, crate::parse::SerializeConvertMode::Into);
     assert_eq!(plan.paths.len(), 3);
     assert!(plan.paths[0].cfg.is_none());
     assert_eq!(
@@ -1467,13 +1460,8 @@ fn test_dag_deserialize_false_allows_unconditional_before_cfg_gated_version() {
     assert!(!plan_ser.serialize_target_is_wire);
     assert_eq!(plan_ser.serialize_wire_ty, parse_quote!(V1));
     assert_eq!(
-        plan_ser
-            .serialize_with_fn
-            .as_ref()
-            .unwrap()
-            .to_token_stream()
-            .to_string(),
-        "to_v1"
+        plan_ser.serialize_mode,
+        crate::parse::SerializeConvertMode::With(parse_quote!(to_v1))
     );
 
     // With `deserialize = true` (explicitly or by default), the same layout is rejected.

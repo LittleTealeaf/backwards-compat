@@ -365,3 +365,38 @@ fn test_generate_field_helper_with_schemars_and_disabled_serde() {
     assert!(!ser_rendered.contains("fn deserialize"));
     syn::parse2::<syn::File>(ser_schema).unwrap();
 }
+
+#[test]
+fn test_generate_field_helper_legacy_deprecation_warnings_and_allow_forwarding() {
+    let legacy_item: syn::ItemStruct = syn::parse_quote! {
+        pub struct Outer {
+            #[allow(deprecated)]
+            #[backwards_compat(versions(#[fallible] 1: OldField, 2: Self))]
+            pub field: NewField,
+        }
+    };
+    let legacy_specs = extract_struct_field_compat(&legacy_item).unwrap();
+    let legacy_tokens = generate_field_helper(&legacy_specs[0], false, true, true).unwrap();
+    let legacy_rendered = legacy_tokens.to_string();
+    assert!(legacy_rendered.contains(
+        "# [deprecated (note = \"deprecated: use `#[migrate(try_from)]` instead of `#[fallible]`\")]"
+    ));
+    assert!(legacy_rendered.contains("const fn __bc_deprecated_legacy_attr_0 ()"));
+    assert!(
+        legacy_rendered.contains("# [allow (deprecated)] const _ : () = __bc_deprecated_legacy_attr_0 () ;")
+    );
+    syn::parse2::<syn::File>(legacy_tokens).unwrap();
+
+    let canonical_item: syn::ItemStruct = syn::parse_quote! {
+        pub struct Outer {
+            #[backwards_compat(versions(#[migrate(try_from)] 1: OldField, 2: Self))]
+            pub field: NewField,
+        }
+    };
+    let canonical_specs = extract_struct_field_compat(&canonical_item).unwrap();
+    let canonical_tokens = generate_field_helper(&canonical_specs[0], false, true, true).unwrap();
+    let canonical_rendered = canonical_tokens.to_string();
+    assert!(!canonical_rendered.contains("__bc_deprecated_legacy_attr_"));
+    assert!(!canonical_rendered.contains("deprecated"));
+    syn::parse2::<syn::File>(canonical_tokens).unwrap();
+}
