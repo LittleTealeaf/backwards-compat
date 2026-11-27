@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.0.1](https://github.com/LittleTealeaf/backwards-compat/compare/v4.0.0...v4.0.1) (2026-11-27)
+
+
+### Performance Improvements
+
+* optimize codegen size, LLVM IR, DAG resolution, and modularize internals ([#74](https://github.com/LittleTealeaf/backwards-compat/issues/74)) ([7a79459](https://github.com/LittleTealeaf/backwards-compat/commit/7a7945900440e393127f0eb82212cd3afe66d783))
+
 ## [4.0.0](https://github.com/LittleTealeaf/backwards-compat/compare/v3.1.0...v4.0.0) (2026-11-26)
 
 
