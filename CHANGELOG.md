@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.0.2](https://github.com/LittleTealeaf/backwards-compat/compare/v4.0.1...v4.0.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* resolve broken intra-doc links and build docs in CI ([#76](https://github.com/LittleTealeaf/backwards-compat/issues/76)) ([153f909](https://github.com/LittleTealeaf/backwards-compat/commit/153f909b0be34ba5c31dc81b60fd1b86877aa784))
+
 ## [4.0.1](https://github.com/LittleTealeaf/backwards-compat/compare/v4.0.0...v4.0.1) (2026-11-27)
 
 
