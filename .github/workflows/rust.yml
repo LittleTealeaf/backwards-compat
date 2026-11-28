@@ -36,7 +36,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run Clippy
-        uses: LittleTealeaf/github-actions/cargo-clippy@18ab758355cd975760e8a19c4b519a1743aa5b75
+        uses: LittleTealeaf/github-actions/cargo-clippy@6260bfe0cca312a78cec11942a58402cb86ecc58
 
   test-coverage:
     name: Test Coverage
