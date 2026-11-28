@@ -68,7 +68,7 @@ bincode = { version = "2", features = ["serde"] }
 bitcode = { version = "0.6", features = ["serde"] }
 bson = "2"
 ciborium = "0.2"
-criterion = "0.7"
+criterion = "0.8"
 flexbuffers = "25"
 json5 = "1.3"
 postcard = { version = "1", features = ["alloc"] }
