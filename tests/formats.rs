@@ -1182,22 +1182,37 @@ fn test_self_describing_yaml_json5_flexbuffers_bson() {
     );
 
     // bson (root document structs)
-    let bson_rec = bson::to_vec(&rec).unwrap();
-    assert_eq!(bson::from_slice::<Record>(&bson_rec).unwrap(), rec);
-    let bson_rec_v1 = bson::to_vec(&rec.as_version(1)).unwrap();
-    let dec_bson_v1: Migrated<Record> = bson::from_slice(&bson_rec_v1).unwrap();
+    let bson_rec = bson::serialize_to_vec(&rec).unwrap();
+    assert_eq!(bson::deserialize_from_slice::<Record>(&bson_rec).unwrap(), rec);
+    let bson_rec_v1 = bson::serialize_to_vec(&rec.as_version(1)).unwrap();
+    let dec_bson_v1: Migrated<Record> = bson::deserialize_from_slice(&bson_rec_v1).unwrap();
     assert_eq!(dec_bson_v1.source_version(), Some(1));
 
-    let bson_adj = bson::to_vec(&adj).unwrap();
-    assert_eq!(bson::from_slice::<AdjStrEnvelope>(&bson_adj).unwrap(), adj);
-    let bson_ext_i = bson::to_vec(&ext_int).unwrap();
-    assert_eq!(bson::from_slice::<ExtIntEnvelope>(&bson_ext_i).unwrap(), ext_int);
-    let bson_ext_s = bson::to_vec(&ext_str).unwrap();
-    assert_eq!(bson::from_slice::<ExtStrEnvelope>(&bson_ext_s).unwrap(), ext_str);
-    let bson_flat_i = bson::to_vec(&flat_int).unwrap();
-    assert_eq!(bson::from_slice::<FlatIntConfig>(&bson_flat_i).unwrap(), flat_int);
-    let bson_flat_s = bson::to_vec(&flat_str).unwrap();
-    assert_eq!(bson::from_slice::<FlatStrConfig>(&bson_flat_s).unwrap(), flat_str);
+    let bson_adj = bson::serialize_to_vec(&adj).unwrap();
+    assert_eq!(
+        bson::deserialize_from_slice::<AdjStrEnvelope>(&bson_adj).unwrap(),
+        adj
+    );
+    let bson_ext_i = bson::serialize_to_vec(&ext_int).unwrap();
+    assert_eq!(
+        bson::deserialize_from_slice::<ExtIntEnvelope>(&bson_ext_i).unwrap(),
+        ext_int
+    );
+    let bson_ext_s = bson::serialize_to_vec(&ext_str).unwrap();
+    assert_eq!(
+        bson::deserialize_from_slice::<ExtStrEnvelope>(&bson_ext_s).unwrap(),
+        ext_str
+    );
+    let bson_flat_i = bson::serialize_to_vec(&flat_int).unwrap();
+    assert_eq!(
+        bson::deserialize_from_slice::<FlatIntConfig>(&bson_flat_i).unwrap(),
+        flat_int
+    );
+    let bson_flat_s = bson::serialize_to_vec(&flat_str).unwrap();
+    assert_eq!(
+        bson::deserialize_from_slice::<FlatStrConfig>(&bson_flat_s).unwrap(),
+        flat_str
+    );
 }
 
 #[test]

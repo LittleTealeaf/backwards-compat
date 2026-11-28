@@ -193,6 +193,7 @@ dependencies = [
  "indexmap",
  "js-sys",
  "rand",
+ "serde",
  "serde_bytes",
  "simdutf8",
  "thiserror",
