@@ -152,6 +152,7 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>, strip_serialize: bool, st
             return true;
         };
 
+        let original_len = nested.len();
         let retained: Vec<syn::Path> = nested
             .into_iter()
             .filter(|path| {
@@ -168,7 +169,17 @@ fn clean_derive_attrs(attrs: &mut Vec<syn::Attribute>, strip_serialize: bool, st
         if retained.is_empty() {
             return false;
         }
-        *attr = syn::parse_quote!(#[derive(#(#retained),*)]);
+        if retained.len() == original_len {
+            return true;
+        }
+        // Preserve the original `#[derive(...)]` outer tokens/spans by updating only the inner
+        // token list in place. Rebuilding the whole attribute via `parse_quote!` replaces those
+        // spans with `Span::call_site()`, which breaks rust-analyzer's rename on fields/variants.
+        if let syn::Meta::List(ref mut list) = attr.meta {
+            list.tokens = quote::quote!(#(#retained),*);
+        } else {
+            *attr = syn::parse_quote!(#[derive(#(#retained),*)]);
+        }
         true
     });
 }
@@ -464,6 +475,106 @@ fn respan_generics_to_call_site(generics: &syn::Generics) -> syn::Generics {
     respanned
 }
 
+/// Emits an uncalled, zero-cost helper function inside `const _: ()` that references each named
+/// struct field using its original source span.
+///
+/// Inside an attribute proc-macro expansion, rust-analyzer's rename-at-definition-site requires
+/// the field token to map to a `NameRef` (e.g. a pattern field reference), not just the
+/// `RecordField` declaration itself. Destructuring with `<field>: _` avoids taking references
+/// (so `#[repr(packed)]` structs remain valid) and avoids introducing a local binding, while
+/// keeping `target_ident` and `generics` at `Span::call_site()` so hover/docs are unaffected.
+fn generate_struct_rename_anchor(
+    item_struct: &syn::ItemStruct,
+    target_ident: &syn::Ident,
+    generics: &syn::Generics,
+) -> proc_macro2::TokenStream {
+    let syn::Fields::Named(ref named) = item_struct.fields else {
+        return proc_macro2::TokenStream::new();
+    };
+    if named.named.is_empty() {
+        return proc_macro2::TokenStream::new();
+    }
+
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let field_pats = named.named.iter().filter_map(|field| {
+        let field_ident = field.ident.as_ref()?;
+        let cfg_attrs: Vec<_> = field.attrs.iter().filter(|a| a.path().is_ident("cfg")).collect();
+        Some(quote::quote! {
+            #(#cfg_attrs)*
+            #field_ident: _,
+        })
+    });
+
+    quote::quote! {
+        const _: () = {
+            #[allow(dead_code, unused_variables, deprecated, clippy::all)]
+            fn __backwards_compat_ide_rename_anchor #impl_generics (__v: &#target_ident #ty_generics) #where_clause {
+                let #target_ident { #(#field_pats)* .. } = __v;
+            }
+        };
+    }
+}
+
+/// Emits an uncalled, zero-cost helper function inside `const _: ()` that references each enum
+/// variant and named variant field using its original source span so rust-analyzer can rename
+/// variants and fields directly from their definition sites.
+fn generate_enum_rename_anchor(
+    item_enum: &syn::ItemEnum,
+    target_ident: &syn::Ident,
+    generics: &syn::Generics,
+) -> proc_macro2::TokenStream {
+    if item_enum.variants.is_empty() {
+        return proc_macro2::TokenStream::new();
+    }
+
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let arms = item_enum.variants.iter().map(|variant| {
+        let v_ident = &variant.ident;
+        let v_cfg_attrs: Vec<_> = variant
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("cfg"))
+            .collect();
+        match &variant.fields {
+            syn::Fields::Unit => quote::quote! {
+                #(#v_cfg_attrs)*
+                #target_ident::#v_ident => {}
+            },
+            syn::Fields::Unnamed(_) => quote::quote! {
+                #(#v_cfg_attrs)*
+                #target_ident::#v_ident(..) => {}
+            },
+            syn::Fields::Named(named) => {
+                let field_pats = named.named.iter().filter_map(|field| {
+                    let f_ident = field.ident.as_ref()?;
+                    let f_cfg_attrs: Vec<_> =
+                        field.attrs.iter().filter(|a| a.path().is_ident("cfg")).collect();
+                    Some(quote::quote! {
+                        #(#f_cfg_attrs)*
+                        #f_ident: _,
+                    })
+                });
+                quote::quote! {
+                    #(#v_cfg_attrs)*
+                    #target_ident::#v_ident { #(#field_pats)* .. } => {}
+                }
+            }
+        }
+    });
+
+    quote::quote! {
+        const _: () = {
+            #[allow(dead_code, unused_variables, unreachable_patterns, deprecated, clippy::all)]
+            fn __backwards_compat_ide_rename_anchor #impl_generics (__v: &#target_ident #ty_generics) #where_clause {
+                match __v {
+                    #(#arms)*
+                    _ => {}
+                }
+            }
+        };
+    }
+}
+
 fn check_tag_field_collision(item_struct: &syn::ItemStruct, tag_field: &str) -> syn::Result<()> {
     let syn::Fields::Named(ref named) = item_struct.fields else {
         return Ok(());
@@ -566,6 +677,7 @@ fn backwards_compat_impl(
 
     struct PreparedItem {
         cleaned_item_tokens: proc_macro2::TokenStream,
+        rename_anchor_tokens: proc_macro2::TokenStream,
         target_ident: syn::Ident,
         vis: syn::Visibility,
         generics: syn::Generics,
@@ -647,8 +759,10 @@ fn backwards_compat_impl(
             target_ident.set_span(call_site);
             let vis = item_struct.vis.clone();
             let generics = respan_generics_to_call_site(&item_struct.generics);
+            let rename_anchor_tokens = generate_struct_rename_anchor(&item_struct, &target_ident, &generics);
             PreparedItem {
                 cleaned_item_tokens: quote::quote!(#cleaned_item_struct),
+                rename_anchor_tokens,
                 target_ident,
                 vis,
                 generics,
@@ -722,8 +836,10 @@ fn backwards_compat_impl(
             target_ident.set_span(call_site);
             let vis = item_enum.vis.clone();
             let generics = respan_generics_to_call_site(&item_enum.generics);
+            let rename_anchor_tokens = generate_enum_rename_anchor(&item_enum, &target_ident, &generics);
             PreparedItem {
                 cleaned_item_tokens: quote::quote!(#cleaned_item_enum),
+                rename_anchor_tokens,
                 target_ident,
                 vis,
                 generics,
@@ -744,6 +860,7 @@ fn backwards_compat_impl(
 
     let PreparedItem {
         cleaned_item_tokens,
+        rename_anchor_tokens,
         target_ident,
         vis,
         generics,
@@ -830,6 +947,7 @@ fn backwards_compat_impl(
 
         quote::quote! {
             #cleaned_item_tokens
+            #rename_anchor_tokens
             #codegen_tokens
             #(#field_helper_tokens)*
         }
@@ -846,6 +964,7 @@ fn backwards_compat_impl(
         };
         quote::quote! {
             #cleaned_item_tokens
+            #rename_anchor_tokens
             #codegen_tokens
             #(#field_helper_tokens)*
         }
@@ -901,6 +1020,8 @@ fn backwards_compat_via_impl(
             }
             clean_derive_attrs(&mut item_struct.attrs, args.serialize, args.deserialize);
             let codegen_struct = respan_to_call_site(&item_struct);
+            let rename_anchor_tokens =
+                generate_struct_rename_anchor(&item_struct, &codegen_struct.ident, &codegen_struct.generics);
             let codegen_tokens = via::generate_via(
                 &args,
                 &codegen_struct.ident,
@@ -909,6 +1030,7 @@ fn backwards_compat_via_impl(
             );
             quote::quote! {
                 #item_struct
+                #rename_anchor_tokens
                 #codegen_tokens
             }
         }
@@ -935,6 +1057,8 @@ fn backwards_compat_via_impl(
             }
             clean_derive_attrs(&mut item_enum.attrs, args.serialize, args.deserialize);
             let codegen_enum = respan_to_call_site(&item_enum);
+            let rename_anchor_tokens =
+                generate_enum_rename_anchor(&item_enum, &codegen_enum.ident, &codegen_enum.generics);
             let codegen_tokens = via::generate_via(
                 &args,
                 &codegen_enum.ident,
@@ -943,6 +1067,7 @@ fn backwards_compat_via_impl(
             );
             quote::quote! {
                 #item_enum
+                #rename_anchor_tokens
                 #codegen_tokens
             }
         }

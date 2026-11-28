@@ -100,6 +100,87 @@ fn test_clean_derive_attrs() {
     let mut all_serde_attrs = vec![syn::parse_quote!(#[derive(Serialize, Deserialize, serde::Serialize)])];
     clean_derive_attrs(&mut all_serde_attrs, true, true);
     assert_eq!(all_serde_attrs.len(), 0);
+
+    let mut untouched_attrs = vec![syn::parse_quote!(#[derive(Debug, Clone, PartialEq, Eq)])];
+    clean_derive_attrs(&mut untouched_attrs, true, true);
+    assert_eq!(untouched_attrs.len(), 1);
+    assert_eq!(
+        quote::quote!(#(#untouched_attrs)*).to_string(),
+        "# [derive (Debug , Clone , PartialEq , Eq)]"
+    );
+}
+
+#[test]
+fn test_generate_struct_rename_anchor() {
+    let named_struct: syn::ItemStruct = syn::parse_quote! {
+        pub struct Record<'a, T>
+        where
+            T: Clone,
+        {
+            pub name: &'a str,
+            #[cfg(feature = "extra")]
+            pub extra: T,
+        }
+    };
+    let mut target_ident = named_struct.ident.clone();
+    target_ident.set_span(proc_macro2::Span::call_site());
+    let generics = respan_generics_to_call_site(&named_struct.generics);
+
+    let anchor = generate_struct_rename_anchor(&named_struct, &target_ident, &generics);
+    let anchor_str = anchor.to_string();
+    assert!(anchor_str.contains("__backwards_compat_ide_rename_anchor"));
+    assert!(anchor_str.contains("name : _"));
+    assert!(anchor_str.contains("# [cfg (feature = \"extra\")] extra : _"));
+    syn::parse2::<syn::File>(anchor).unwrap();
+
+    let tuple_struct: syn::ItemStruct = syn::parse_quote!(
+        pub struct Wrapper(u32);
+    );
+    assert!(
+        generate_struct_rename_anchor(&tuple_struct, &tuple_struct.ident, &tuple_struct.generics).is_empty()
+    );
+
+    let unit_struct: syn::ItemStruct = syn::parse_quote!(
+        pub struct Marker;
+    );
+    assert!(
+        generate_struct_rename_anchor(&unit_struct, &unit_struct.ident, &unit_struct.generics).is_empty()
+    );
+}
+
+#[test]
+fn test_generate_enum_rename_anchor() {
+    let item_enum: syn::ItemEnum = syn::parse_quote! {
+        pub enum Event<T> {
+            Ping,
+            Click(u32),
+            Message {
+                text: String,
+                #[cfg(feature = "extra")]
+                meta: T,
+            },
+            #[cfg(test)]
+            TestOnly(u8),
+        }
+    };
+    let mut target_ident = item_enum.ident.clone();
+    target_ident.set_span(proc_macro2::Span::call_site());
+    let generics = respan_generics_to_call_site(&item_enum.generics);
+
+    let anchor = generate_enum_rename_anchor(&item_enum, &target_ident, &generics);
+    let anchor_str = anchor.to_string();
+    assert!(anchor_str.contains("__backwards_compat_ide_rename_anchor"));
+    assert!(anchor_str.contains("Event :: Ping => { }"));
+    assert!(anchor_str.contains("Event :: Click (..) => { }"));
+    assert!(anchor_str.contains("text : _"));
+    assert!(anchor_str.contains("# [cfg (feature = \"extra\")] meta : _"));
+    assert!(anchor_str.contains("# [cfg (test)] Event :: TestOnly (..) => { }"));
+    syn::parse2::<syn::File>(anchor).unwrap();
+
+    let empty_enum: syn::ItemEnum = syn::parse_quote!(
+        pub enum Never {}
+    );
+    assert!(generate_enum_rename_anchor(&empty_enum, &empty_enum.ident, &empty_enum.generics).is_empty());
 }
 
 #[test]
