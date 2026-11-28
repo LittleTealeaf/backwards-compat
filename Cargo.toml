@@ -69,7 +69,7 @@ bitcode = { version = "0.6", features = ["serde"] }
 bson = "2"
 ciborium = "0.2"
 criterion = "0.7"
-flexbuffers = "2"
+flexbuffers = "25"
 json5 = "0.4"
 postcard = { version = "1", features = ["alloc"] }
 quick-xml = { version = "0.42", features = ["serialize"] }
