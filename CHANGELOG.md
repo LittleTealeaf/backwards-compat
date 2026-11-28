@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.1.1](https://github.com/LittleTealeaf/backwards-compat/compare/v4.1.0...v4.1.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* enable rust-analyzer rename on fields and variants inside #[backwards_compat] ([#80](https://github.com/LittleTealeaf/backwards-compat/issues/80)) ([c6ace09](https://github.com/LittleTealeaf/backwards-compat/commit/c6ace09c8d9ef9d80db0df213cd8b6b97a5fe5a2))
+
 ## [4.1.0](https://github.com/LittleTealeaf/backwards-compat/compare/v4.0.2...v4.1.0) (2026-11-27)
 
 
